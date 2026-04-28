@@ -3,6 +3,7 @@
 //! Handles downloading, installing, and managing the Claude CLI binary
 //! embedded within the Jean application.
 
+pub mod accounts;
 mod commands;
 mod config;
 pub mod mcp;

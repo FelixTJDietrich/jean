@@ -17,6 +17,8 @@ import type {
   ReleaseInfo,
   InstallProgress,
   ClaudeUsageSnapshot,
+  ClaudeAccountSummary,
+  ClaudeAccountsState,
 } from '@/types/claude-cli'
 
 import { hasBackend } from '@/lib/environment'
@@ -24,13 +26,18 @@ import { hasBackend } from '@/lib/environment'
 const isTauri = hasBackend
 const USAGE_REFRESH_MS = 1000 * 60 * 5
 
-// Query keys for Claude CLI
+// Query keys for Claude CLI.
+// NOTE: every key nests under `['claude-cli', ...]` so a coarse
+// `invalidateQueries(['claude-cli'])` reliably refreshes everything
+// claude-related. The websocket cache-invalidate listener in
+// `src/hooks/useMainWindowEventListeners.ts` must stay in sync with this.
 export const claudeCliQueryKeys = {
   all: ['claude-cli'] as const,
   status: () => [...claudeCliQueryKeys.all, 'status'] as const,
   auth: () => [...claudeCliQueryKeys.all, 'auth'] as const,
   usage: () => [...claudeCliQueryKeys.all, 'usage'] as const,
   versions: () => [...claudeCliQueryKeys.all, 'versions'] as const,
+  accounts: () => [...claudeCliQueryKeys.all, 'accounts'] as const,
 }
 
 /**
@@ -357,4 +364,187 @@ export function useClaudeCliSetup() {
     install,
     refetchStatus: status.refetch,
   }
+}
+
+// =============================================================================
+// Claude account profiles (personal / work / etc.)
+// =============================================================================
+
+const EMPTY_ACCOUNTS_STATE: ClaudeAccountsState = {
+  accounts: [],
+  activeAccountId: null,
+}
+
+/**
+ * Fetch the list of named Claude accounts + which one is active.
+ *
+ * In non-Tauri (web browser) contexts the backend isn't reachable; return
+ * an empty list so UI renders as "no accounts" and doesn't crash.
+ */
+export function useClaudeAccounts(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: claudeCliQueryKeys.accounts(),
+    queryFn: async (): Promise<ClaudeAccountsState> => {
+      if (!isTauri()) return EMPTY_ACCOUNTS_STATE
+      try {
+        return await invoke<ClaudeAccountsState>('list_claude_accounts')
+      } catch (error) {
+        logger.error('Failed to list Claude accounts', { error })
+        return EMPTY_ACCOUNTS_STATE
+      }
+    },
+    enabled: options?.enabled ?? true,
+    staleTime: 1000 * 60 * 2,
+    gcTime: 1000 * 60 * 10,
+  })
+}
+
+/**
+ * Which queries depend on the active Claude account. `auth` and `usage` are
+ * per-account, so switching invalidates them too; rename/delete/create do
+ * not need to touch them.
+ */
+function invalidateSwitchDependents(
+  queryClient: ReturnType<typeof useQueryClient>
+) {
+  queryClient.invalidateQueries({ queryKey: claudeCliQueryKeys.accounts() })
+  queryClient.invalidateQueries({ queryKey: claudeCliQueryKeys.auth() })
+  queryClient.invalidateQueries({ queryKey: claudeCliQueryKeys.usage() })
+}
+
+function invalidateAccountList(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: claudeCliQueryKeys.accounts() })
+}
+
+/**
+ * Create a new named Claude subscription profile.
+ *
+ * The backend scaffolds `<app_data>/claude-accounts/<uuid>/` with symlinks
+ * back into `~/.claude/` and appends to `preferences.claude_accounts`.
+ * The account starts *without* credentials — the caller is expected to
+ * chain into the login-hint dialog that surfaces the `claude /login`
+ * shell command.
+ *
+ * Invalidates: `['claude-cli', 'accounts']`.
+ * Errors: surfaced via `toast.error`.
+ */
+export function useCreateClaudeAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { name: string; color: string }) => {
+      return invoke<ClaudeAccountSummary>('create_claude_account', input)
+    },
+    retry: false,
+    onSuccess: account => {
+      invalidateAccountList(queryClient)
+      toast.success(`Created "${account.name}"`)
+    },
+    onError: error => {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error('Failed to create account', { description: message })
+    },
+  })
+}
+
+/**
+ * Delete a named Claude account: removes it from preferences AND deletes
+ * the on-disk `<app_data>/claude-accounts/<id>/` directory (including the
+ * per-account `.credentials.json`; shared `~/.claude/` symlinks are
+ * removed as entries without following them).
+ *
+ * Refused server-side while any Claude session is running — running
+ * subprocesses may still hold the dir via `CLAUDE_CONFIG_DIR`.
+ *
+ * Invalidates: `['claude-cli', 'accounts'/'auth'/'usage']` (delete may
+ * un-set the active account, which affects auth + usage).
+ */
+export function useDeleteClaudeAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await invoke('delete_claude_account', { id })
+    },
+    retry: false,
+    onSuccess: () => {
+      // Delete can un-set the active account server-side, so auth/usage
+      // also need to refetch (mirror of the "switch" invalidation set).
+      invalidateSwitchDependents(queryClient)
+      toast.success('Account removed')
+    },
+    onError: error => {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error('Failed to remove account', { description: message })
+    },
+  })
+}
+
+/**
+ * Switch the active Claude account. Passing `null` clears the selection
+ * and falls back to the plain `~/.claude/` directory.
+ *
+ * This mutation does NOT optimistically update the cache. Two rapid
+ * clicks on different accounts would each snapshot "previous" into their
+ * own context, and an error on the second would restore to the stale
+ * first-click snapshot rather than the true pre-mutation state. The
+ * backend call is a single file write, so the round-trip latency is
+ * small enough that a direct invalidate-on-settle is simpler and correct.
+ */
+export function useSetActiveClaudeAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (id: string | null) => {
+      await invoke('set_active_claude_account', { id })
+    },
+    retry: false,
+    onError: error => {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error('Failed to switch account', { description: message })
+    },
+    onSettled: () => {
+      invalidateSwitchDependents(queryClient)
+    },
+  })
+}
+
+/**
+ * Rename and/or re-color a Claude account. Name must be unique
+ * (case-insensitive) across active accounts; omitting `color` leaves it
+ * unchanged.
+ *
+ * Invalidates: `['claude-cli', 'accounts']`.
+ */
+export function useRenameClaudeAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: {
+      id: string
+      name: string
+      color?: string
+    }) => {
+      return invoke<ClaudeAccountSummary>('rename_claude_account', input)
+    },
+    retry: false,
+    onSuccess: () => {
+      invalidateAccountList(queryClient)
+    },
+    onError: error => {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error('Failed to update account', { description: message })
+    },
+  })
+}
+
+/**
+ * Returns the shell command the user should paste into their terminal to
+ * log in as this account (`CLAUDE_CONFIG_DIR=/... claude /login`). We don't
+ * spawn it ourselves because `/login` opens a browser OAuth flow and is
+ * cleaner to run interactively.
+ */
+export async function getClaudeAccountLoginCommand(id: string): Promise<string> {
+  if (!isTauri()) {
+    throw new Error(
+      'Account login is only available when Jean is running as a desktop app.'
+    )
+  }
+  return invoke<string>('get_claude_account_login_command', { id })
 }

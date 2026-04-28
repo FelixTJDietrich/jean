@@ -288,6 +288,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
       vi.mocked(invoke).mockResolvedValueOnce(mockPreferences)
 
@@ -440,6 +442,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithOldBinding)
 
@@ -562,6 +566,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithDeprecatedFastModel)
 
@@ -684,6 +690,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -808,6 +816,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -974,6 +984,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -1096,6 +1108,8 @@ describe('preferences service', () => {
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        claude_accounts: [],
+        active_claude_account_id: null,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {

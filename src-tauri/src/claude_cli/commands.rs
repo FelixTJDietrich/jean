@@ -11,12 +11,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::accounts;
 use super::config::{
     ensure_cli_dir, get_cli_binary_path, get_cli_dir, get_wsl_cli_binary_path, get_wsl_cli_dir,
     resolve_cli_binary,
 };
 use crate::http_server::EmitExt;
 use crate::platform::silent_command;
+use crate::ClaudeAccount;
 
 /// Extract semver version number from a version string
 /// Handles formats like: "1.0.28", "v1.0.28", "Claude CLI 1.0.28"
@@ -758,7 +760,16 @@ fn parse_credentials_json(raw: &str) -> Option<ClaudeCredentialsFile> {
     serde_json::from_str::<ClaudeCredentialsFile>(&decoded).ok()
 }
 
-fn get_claude_credentials_path() -> Result<PathBuf, String> {
+/// Resolve the credentials file path for the currently-active Claude account,
+/// falling back to `~/.claude/.credentials.json` when no account is active.
+///
+/// This is the single choke point that controls whose credentials Jean reads
+/// and refreshes. Any new code path that touches `.credentials.json` **must**
+/// go through here (or `load_claude_credentials`).
+fn get_claude_credentials_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(dir) = accounts::get_active_account_config_dir(app) {
+        return Ok(dir.join(".credentials.json"));
+    }
     let home = dirs::home_dir().ok_or_else(|| "No home directory found".to_string())?;
     Ok(home.join(CLAUDE_CREDENTIALS_FILE))
 }
@@ -796,6 +807,16 @@ fn read_wsl_claude_credentials(distro: &str, path: &str) -> Result<ClaudeCredent
     parse_claude_credentials(&raw)
 }
 
+/// On macOS, the Keychain entry "Claude Code-credentials" is a *system-wide*
+/// (single-user-singleton) credential store. It has no notion of profiles.
+/// When the user has an active Claude account, we skip Keychain entirely so
+/// we never accidentally read the wrong account's token or write one
+/// account's refreshed token into the other's slot.
+#[cfg(target_os = "macos")]
+fn keychain_allowed(app: &AppHandle) -> bool {
+    accounts::get_active_account_config_dir(app).is_none()
+}
+
 #[cfg(target_os = "macos")]
 fn load_credentials_from_keychain() -> Option<ClaudeCredentialsFile> {
     let output = silent_command("security")
@@ -809,7 +830,13 @@ fn load_credentials_from_keychain() -> Option<ClaudeCredentialsFile> {
     parse_credentials_json(&payload)
 }
 
-fn load_claude_credentials() -> Result<(ClaudeCredentialSource, ClaudeCredentialsFile), String> {
+fn load_claude_credentials(
+    app: &AppHandle,
+) -> Result<(ClaudeCredentialSource, ClaudeCredentialsFile), String> {
+    // WSL takes priority: when Jean is configured to use a WSL distro for
+    // Claude, the active-account `CLAUDE_CONFIG_DIR` (which lives on the
+    // Windows host filesystem) doesn't apply — read credentials from inside
+    // the distro instead.
     let wsl = crate::platform::get_wsl_config();
     if wsl.enabled {
         let home = crate::platform::get_wsl_home_dir(&wsl.distro)?;
@@ -830,7 +857,7 @@ fn load_claude_credentials() -> Result<(ClaudeCredentialSource, ClaudeCredential
         ));
     }
 
-    let cred_path = get_claude_credentials_path()?;
+    let cred_path = get_claude_credentials_path(app)?;
     if cred_path.exists() {
         let raw = std::fs::read_to_string(&cred_path)
             .map_err(|e| format!("Failed to read Claude credentials file: {e}"))?;
@@ -842,9 +869,11 @@ fn load_claude_credentials() -> Result<(ClaudeCredentialSource, ClaudeCredential
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(parsed) = load_credentials_from_keychain() {
-            if credentials_have_access_token(&parsed) {
-                return Ok((ClaudeCredentialSource::Keychain, parsed));
+        if keychain_allowed(app) {
+            if let Some(parsed) = load_credentials_from_keychain() {
+                if credentials_have_access_token(&parsed) {
+                    return Ok((ClaudeCredentialSource::Keychain, parsed));
+                }
             }
         }
     }
@@ -870,8 +899,36 @@ fn persist_claude_credentials(
                     )
                 })?;
             }
-            std::fs::write(path, payload)
-                .map_err(|e| format!("Failed to write Claude credentials file: {e}"))
+            // Atomic write: a concurrent reader (claude CLI subprocess, another
+            // auth check, etc.) must never observe a truncated or half-written
+            // credentials file. Write to a unique tmp path, fsync it, then
+            // rename on top. The fsync is load-bearing for OAuth tokens — a
+            // power loss after a non-fsynced rename can leave an empty file,
+            // forcing the user to re-run `claude /login`.
+            use std::io::Write as _;
+            let tmp_suffix = uuid::Uuid::new_v4();
+            let tmp = path.with_extension(format!("tmp.{tmp_suffix}"));
+            {
+                let mut f = std::fs::File::create(&tmp).map_err(|e| {
+                    format!("Failed to create Claude credentials tmp: {e}")
+                })?;
+                f.write_all(payload.as_bytes())
+                    .map_err(|e| format!("Failed to write Claude credentials tmp: {e}"))?;
+                f.sync_all()
+                    .map_err(|e| format!("Failed to fsync Claude credentials tmp: {e}"))?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &tmp,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            std::fs::rename(&tmp, path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Failed to finalize Claude credentials file: {e}")
+            })
         }
         ClaudeCredentialSource::WslFile { distro, path } => {
             crate::platform::wsl_write_bytes(distro, path, payload.as_bytes())
@@ -919,12 +976,26 @@ fn get_usage_cache_dir() -> Option<PathBuf> {
     Some(base.join("jean").join("usage-cache"))
 }
 
-fn get_claude_usage_cache_path() -> Option<PathBuf> {
-    Some(get_usage_cache_dir()?.join("claude.json"))
+fn get_claude_usage_cache_path(cache_key: &str) -> Option<PathBuf> {
+    // Validate: only let through chars we already produce ourselves (uuid
+    // hex, dashes, or the literal "default") so we cannot be tricked into
+    // escaping the cache dir if an attacker ever controls active_account_id.
+    let safe = cache_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !safe {
+        return None;
+    }
+    let filename = if cache_key == "default" {
+        "claude.json".to_string()
+    } else {
+        format!("claude-{cache_key}.json")
+    };
+    Some(get_usage_cache_dir()?.join(filename))
 }
 
-fn load_cached_claude_usage(now_secs: u64) -> Option<ClaudeUsageSnapshot> {
-    let path = get_claude_usage_cache_path()?;
+fn load_cached_claude_usage(cache_key: &str, now_secs: u64) -> Option<ClaudeUsageSnapshot> {
+    let path = get_claude_usage_cache_path(cache_key)?;
     let content = std::fs::read_to_string(path).ok()?;
     let entry: ClaudeUsageCacheEntry = serde_json::from_str(&content).ok()?;
     if now_secs.saturating_sub(entry.cached_at) <= CLAUDE_USAGE_CACHE_TTL_SECS {
@@ -933,8 +1004,8 @@ fn load_cached_claude_usage(now_secs: u64) -> Option<ClaudeUsageSnapshot> {
     None
 }
 
-fn save_cached_claude_usage(snapshot: &ClaudeUsageSnapshot, now_secs: u64) {
-    let Some(path) = get_claude_usage_cache_path() else {
+fn save_cached_claude_usage(cache_key: &str, snapshot: &ClaudeUsageSnapshot, now_secs: u64) {
+    let Some(path) = get_claude_usage_cache_path(cache_key) else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -1027,21 +1098,25 @@ async fn refresh_claude_access_token(
     Ok(next_oauth.access_token)
 }
 
-/// Check if Claude CLI is authenticated by running a simple query
+/// Check if Claude CLI is authenticated by running `claude auth status`.
+///
+/// Goes through `spawn_claude_command` so the check is scoped to the active
+/// account's `CLAUDE_CONFIG_DIR`. If an account is configured but its dir
+/// is missing, we report "not authenticated" with the resolver's error
+/// message — rather than silently checking the shared `~/.claude/` and
+/// falsely reporting the user as signed in.
 #[tauri::command]
 pub async fn check_claude_cli_auth(app: AppHandle) -> Result<ClaudeAuthStatus, String> {
     log::trace!("Checking Claude CLI authentication status");
 
     let wsl = crate::platform::get_wsl_config();
-    let binary_path = resolve_cli_binary(&app);
 
-    if !wsl.enabled && !binary_path.exists() {
-        return Ok(ClaudeAuthStatus {
-            authenticated: false,
-            error: Some("Claude CLI not installed".to_string()),
-        });
-    }
-    if wsl.enabled {
+    // WSL mode: WSL distro doesn't support per-account profiles, so route
+    // straight through `wsl_aware_command`. Native mode: go through
+    // `spawn_claude_command` so the active account's CLAUDE_CONFIG_DIR is
+    // injected and a misconfigured account refuses to silently fall back.
+    let output = if wsl.enabled {
+        let binary_path = resolve_cli_binary(&app);
         let tool = binary_path.to_string_lossy().to_string();
         let installed = if tool.starts_with('/') {
             crate::platform::wsl_file_executable(&wsl.distro, &tool)
@@ -1054,15 +1129,25 @@ pub async fn check_claude_cli_auth(app: AppHandle) -> Result<ClaudeAuthStatus, S
                 error: Some("Claude CLI not installed inside WSL".to_string()),
             });
         }
-    }
-
-    log::trace!("Running auth check: {:?}", binary_path);
-
-    let binary_str = binary_path.to_string_lossy().to_string();
-    let output = crate::platform::wsl_aware_command(&binary_str, None)
-        .args(["auth", "status"])
-        .output()
-        .map_err(|e| format!("Failed to execute Claude CLI: {e}"))?;
+        log::trace!("Running auth check (WSL): {:?}", binary_path);
+        crate::platform::wsl_aware_command(&tool, None)
+            .args(["auth", "status"])
+            .output()
+            .map_err(|e| format!("Failed to execute Claude CLI: {e}"))?
+    } else {
+        let mut cmd = match super::config::spawn_claude_command(&app) {
+            Ok(c) => c,
+            Err(msg) => {
+                return Ok(ClaudeAuthStatus {
+                    authenticated: false,
+                    error: Some(msg),
+                });
+            }
+        };
+        cmd.args(["auth", "status"])
+            .output()
+            .map_err(|e| format!("Failed to execute Claude CLI: {e}"))?
+    };
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1088,27 +1173,38 @@ pub async fn check_claude_cli_auth(app: AppHandle) -> Result<ClaudeAuthStatus, S
 
 /// Get current Claude usage for authenticated users.
 #[tauri::command]
-pub async fn get_claude_usage() -> Result<ClaudeUsageSnapshot, String> {
-    get_claude_usage_with_source("ui").await
+pub async fn get_claude_usage(app: AppHandle) -> Result<ClaudeUsageSnapshot, String> {
+    get_claude_usage_with_source(&app, "ui").await
 }
 
 pub(crate) async fn get_claude_usage_with_source(
+    app: &AppHandle,
     request_source: &'static str,
 ) -> Result<ClaudeUsageSnapshot, String> {
     // Serialize usage fetches so token refresh cannot run concurrently from UI + background.
     let _usage_lock = claude_usage_fetch_lock().lock().await;
     log::trace!("Claude usage fetch start (source={request_source})");
 
+    // Usage cache is keyed per account so switching accounts doesn't serve
+    // the previous account's cached numbers. We read the active id from
+    // preferences directly rather than deriving from the filesystem — that
+    // avoids a corner case where the dir briefly vanishes and we'd cache
+    // under "default" alongside the real no-account value.
+    let cache_key = crate::load_preferences_sync(app)
+        .ok()
+        .and_then(|p| p.active_claude_account_id)
+        .unwrap_or_else(|| "default".to_string());
+
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Some(cached) = load_cached_claude_usage(now_secs) {
+    if let Some(cached) = load_cached_claude_usage(&cache_key, now_secs) {
         log::trace!("Claude usage fetch hit cache (source={request_source})");
         return Ok(cached);
     }
 
-    let (source, mut credentials) = load_claude_credentials()?;
+    let (source, mut credentials) = load_claude_credentials(app)?;
     let usage_client = build_usage_client()?;
 
     let oauth = credentials.claude_ai_oauth.clone().ok_or_else(|| {
@@ -1220,7 +1316,7 @@ pub(crate) async fn get_claude_usage_with_source(
         fetched_at,
     };
 
-    save_cached_claude_usage(&snapshot, fetched_at);
+    save_cached_claude_usage(&cache_key, &snapshot, fetched_at);
     log::trace!("Claude usage fetch success (source={request_source})");
     Ok(snapshot)
 }
@@ -1293,6 +1389,243 @@ fn emit_progress(app: &AppHandle, stage: &str, message: &str, percent: u8) {
     if let Err(e) = app.emit_all("claude-cli:install-progress", &progress) {
         log::warn!("Failed to emit install progress: {}", e);
     }
+}
+
+// =============================================================================
+// Claude account management (commands)
+// =============================================================================
+
+/// Per-account summary returned to the frontend. Adds the runtime-computed
+/// `has_credentials` flag so the UI can distinguish "account exists but
+/// needs `/login`" from "account ready to use".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountSummary {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub created_at: u64,
+    pub has_credentials: bool,
+    pub config_dir: String,
+}
+
+impl ClaudeAccountSummary {
+    fn from_account(app: &AppHandle, acct: &ClaudeAccount) -> Self {
+        let dir = accounts::get_account_config_dir(app, &acct.id)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let health = accounts::inspect_account(app, &acct.id);
+        Self {
+            id: acct.id.clone(),
+            name: acct.name.clone(),
+            color: acct.color.clone(),
+            created_at: acct.created_at,
+            has_credentials: health.has_credentials,
+            config_dir: dir,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountsState {
+    pub accounts: Vec<ClaudeAccountSummary>,
+    pub active_account_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_claude_accounts(app: AppHandle) -> Result<ClaudeAccountsState, String> {
+    let prefs = crate::load_preferences_sync(&app)?;
+    let mut accounts_out: Vec<ClaudeAccountSummary> = prefs
+        .claude_accounts
+        .iter()
+        .map(|a| ClaudeAccountSummary::from_account(&app, a))
+        .collect();
+    // Oldest first — stable ordering that survives renames.
+    accounts_out.sort_by_key(|a| a.created_at);
+
+    Ok(ClaudeAccountsState {
+        accounts: accounts_out,
+        active_account_id: prefs.active_claude_account_id.clone(),
+    })
+}
+
+#[tauri::command]
+pub async fn create_claude_account(
+    app: AppHandle,
+    name: String,
+    color: String,
+) -> Result<ClaudeAccountSummary, String> {
+    // Canonicalize AND validate input via the same helpers the on-disk
+    // scaffolding uses, so a whitespace-only name or malformed color fails
+    // BEFORE we create any filesystem artifacts to roll back.
+    let canonical_name = accounts::validate_name(&name)?;
+    let canonical_color = accounts::validate_color(&color)?;
+
+    // Fast-fail uniqueness check outside the mutation lock so we don't scaffold
+    // a dir just to discover the name is taken. The authoritative re-check
+    // inside the critical section below closes the race.
+    {
+        let existing = crate::load_preferences_sync(&app)?;
+        if existing
+            .claude_accounts
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(&canonical_name))
+        {
+            return Err(format!(
+                "An account named '{canonical_name}' already exists"
+            ));
+        }
+    }
+
+    let created = accounts::create_account_on_disk(&app, &canonical_name, &canonical_color)?;
+    let created_clone = created.clone();
+    if let Err(e) = accounts::mutate_preferences(&app, |prefs| {
+        // Authoritative uniqueness check inside the critical section.
+        if prefs
+            .claude_accounts
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(&created.name))
+        {
+            return Err(format!(
+                "An account named '{}' already exists",
+                created.name
+            ));
+        }
+        prefs.claude_accounts.push(created.clone());
+        Ok(())
+    }) {
+        // Roll back the on-disk dir if the prefs mutation fails so we don't
+        // leak orphaned account directories on uniqueness collisions or
+        // prefs-write errors.
+        let _ = accounts::delete_account_on_disk(&app, &created_clone.id);
+        return Err(e);
+    }
+
+    Ok(ClaudeAccountSummary::from_account(&app, &created_clone))
+}
+
+#[tauri::command]
+pub async fn delete_claude_account(app: AppHandle, id: String) -> Result<(), String> {
+    // If any Claude session is currently running, ripping any account dir
+    // out from under it corrupts in-flight token refreshes and kills the
+    // subprocess. The subprocess may have been spawned with this account's
+    // CLAUDE_CONFIG_DIR even if the user has since switched, so we check
+    // unconditionally regardless of whether the account is currently active.
+    // This mirrors `install_claude_cli`'s same safety guard.
+    //
+    // The check runs INSIDE `mutate_preferences` so it cannot race with a
+    // concurrent set_active_claude_account.
+    accounts::mutate_preferences(&app, |prefs| {
+        if !prefs.claude_accounts.iter().any(|a| a.id == id) {
+            return Err("Account not found".to_string());
+        }
+        let running = crate::chat::registry::get_running_sessions();
+        if !running.is_empty() {
+            return Err(format!(
+                "Cannot delete a Claude account while {} session(s) are still running. \
+                 Stop them and try again.",
+                running.len()
+            ));
+        }
+        prefs.claude_accounts.retain(|a| a.id != id);
+        if prefs.active_claude_account_id.as_deref() == Some(&id) {
+            prefs.active_claude_account_id = None;
+        }
+        Ok(())
+    })?;
+
+    // Only remove the dir after preferences have been updated — if the dir
+    // removal fails, the account is already out of prefs so it won't be
+    // re-referenced. The leftover dir is an ignorable nuisance at worst.
+    if let Err(e) = accounts::delete_account_on_disk(&app, &id) {
+        log::warn!("Deleted account '{id}' from prefs but failed to remove dir: {e}");
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_active_claude_account(
+    app: AppHandle,
+    id: Option<String>,
+) -> Result<(), String> {
+    accounts::mutate_preferences(&app, |prefs| {
+        if let Some(ref target_id) = id {
+            if !prefs.claude_accounts.iter().any(|a| &a.id == target_id) {
+                return Err("Account not found".to_string());
+            }
+        }
+        prefs.active_claude_account_id = id.clone();
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rename_claude_account(
+    app: AppHandle,
+    id: String,
+    name: String,
+    color: Option<String>,
+) -> Result<ClaudeAccountSummary, String> {
+    // Canonicalize inputs outside the lock; validators are cheap and
+    // share implementation with create_claude_account so the two commands
+    // cannot drift.
+    let canonical_name = accounts::validate_name(&name)?;
+    let canonical_color = color
+        .as_deref()
+        .map(accounts::validate_color)
+        .transpose()?;
+
+    // Capture the updated account inside the critical section so the
+    // returned summary always reflects *this* write, even if another
+    // rename races in after we release the mutation lock.
+    let mut updated_account: Option<ClaudeAccount> = None;
+    accounts::mutate_preferences(&app, |prefs| {
+        if prefs
+            .claude_accounts
+            .iter()
+            .any(|a| a.id != id && a.name.eq_ignore_ascii_case(&canonical_name))
+        {
+            return Err(format!(
+                "An account named '{canonical_name}' already exists"
+            ));
+        }
+        let account = prefs
+            .claude_accounts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "Account not found".to_string())?;
+        account.name = canonical_name.clone();
+        if let Some(c) = &canonical_color {
+            account.color = c.clone();
+        }
+        updated_account = Some(account.clone());
+        Ok(())
+    })?;
+
+    let updated = updated_account.ok_or_else(|| "Account not found".to_string())?;
+    Ok(ClaudeAccountSummary::from_account(&app, &updated))
+}
+
+/// Returns the shell command the user should run to log in to a given
+/// account (with `CLAUDE_CONFIG_DIR` preset). We intentionally do NOT spawn
+/// this ourselves: `claude /login` opens a browser OAuth flow and is best
+/// handled in the user's preferred terminal.
+#[tauri::command]
+pub async fn get_claude_account_login_command(
+    app: AppHandle,
+    id: String,
+) -> Result<String, String> {
+    let prefs = crate::load_preferences_sync(&app)?;
+    if !prefs.claude_accounts.iter().any(|a| a.id == id) {
+        return Err("Account not found".to_string());
+    }
+    let binary = resolve_cli_binary(&app);
+    accounts::build_login_command(&app, &id, &binary)
 }
 
 #[cfg(test)]

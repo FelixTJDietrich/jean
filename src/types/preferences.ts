@@ -1087,6 +1087,23 @@ export interface AppPreferences {
   jean_mcp_enabled: boolean // Expose Jean MCP server to spawned CLIs through explicit CLI config entries
   jean_mcp_max_depth: number // Max recursive spawn depth via Jean MCP (default 3)
   jean_mcp_rate_limit_per_minute: number // Per-source rate limit for session-spawning tools (default 20)
+  claude_accounts: ClaudeAccount[] // Named Claude subscription profiles (home/work/etc.)
+  active_claude_account_id: string | null // Currently-active Claude account; null = use ~/.claude/ directly
+}
+
+/**
+ * A named Claude subscription profile. Each account has an isolated
+ * `CLAUDE_CONFIG_DIR` so personal vs work tokens don't collide; transcripts
+ * are symlinked to `~/.claude/` so `--resume` works across account switches.
+ *
+ * Field names use snake_case to match the Rust struct exactly (see CLAUDE.md
+ * "Rust-TypeScript Serialization Convention").
+ */
+export interface ClaudeAccount {
+  id: string
+  name: string
+  color: string // hex like "#3b82f6"
+  created_at: number // unix ms
 }
 
 export type TerminalBackgroundMode = 'auto' | 'light' | 'dark' | 'custom'
@@ -1920,4 +1937,6 @@ export const defaultPreferences: AppPreferences = {
   jean_mcp_enabled: true, // Default: enabled
   jean_mcp_max_depth: 3,
   jean_mcp_rate_limit_per_minute: 20,
+  claude_accounts: [], // Default: no named accounts
+  active_claude_account_id: null, // Default: use ~/.claude/ directly
 }

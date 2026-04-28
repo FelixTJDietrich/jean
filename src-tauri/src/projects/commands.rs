@@ -46,7 +46,6 @@ use super::types::{
     WorktreePermanentlyDeletedEvent, WorktreeSetupCompleteEvent, WorktreeUnarchivedEvent,
 };
 use crate::chat::types::LabelData;
-use crate::claude_cli::resolve_cli_binary;
 use crate::coderabbit_cli::resolve_coderabbit_binary;
 use crate::codex_cli::resolve_cli_binary as resolve_codex_cli_binary;
 use crate::gh_cli::config::resolve_gh_binary;
@@ -6811,12 +6810,7 @@ fn generate_pr_content_from_inputs(
 
     log::trace!("Generating PR content with Claude CLI (JSON schema)");
 
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
-    let mut cmd = silent_command(&cli_path);
+    let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
@@ -7417,12 +7411,7 @@ fn generate_commit_message_once(
 
     log::trace!("Generating commit message with Claude CLI (JSON schema)");
 
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
-    let mut cmd = silent_command(&cli_path);
+    let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
@@ -7936,14 +7925,9 @@ fn generate_review(
         });
     }
 
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
     log::trace!("Running code review with Claude CLI (JSON schema)");
 
-    let mut cmd = silent_command(&cli_path);
+    let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
@@ -9031,14 +9015,9 @@ fn generate_release_notes_content(
         return Ok(response);
     }
 
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
     log::trace!("Generating release notes with Claude CLI (JSON schema)");
 
-    let mut cmd = silent_command(&cli_path);
+    let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,

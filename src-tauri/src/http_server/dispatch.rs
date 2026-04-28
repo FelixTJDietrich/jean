@@ -2126,7 +2126,7 @@ pub async fn dispatch_command(
             to_value(result)
         }
         "get_claude_usage" => {
-            let result = crate::claude_cli::get_claude_usage().await?;
+            let result = crate::claude_cli::get_claude_usage(app.clone()).await?;
             to_value(result)
         }
         "get_available_cli_versions" => {
@@ -2182,6 +2182,44 @@ pub async fn dispatch_command(
         "update_commandcode_cli" => {
             crate::commandcode_cli::update_commandcode_cli(app.clone()).await?;
             Ok(Value::Null)
+        }
+        "list_claude_accounts" => {
+            let result = crate::claude_cli::list_claude_accounts(app.clone()).await?;
+            to_value(result)
+        }
+        "create_claude_account" => {
+            let name: String = from_field(&args, "name")?;
+            let color: String = from_field(&args, "color")?;
+            let result = crate::claude_cli::create_claude_account(app.clone(), name, color).await?;
+            emit_cache_invalidation(app, &["claude-accounts"]);
+            to_value(result)
+        }
+        "delete_claude_account" => {
+            let id: String = from_field(&args, "id")?;
+            crate::claude_cli::delete_claude_account(app.clone(), id).await?;
+            emit_cache_invalidation(app, &["claude-accounts"]);
+            Ok(Value::Null)
+        }
+        "set_active_claude_account" => {
+            let id: Option<String> = from_field_opt(&args, "id")?;
+            crate::claude_cli::set_active_claude_account(app.clone(), id).await?;
+            emit_cache_invalidation(app, &["claude-accounts", "claude-usage"]);
+            Ok(Value::Null)
+        }
+        "rename_claude_account" => {
+            let id: String = from_field(&args, "id")?;
+            let name: String = from_field(&args, "name")?;
+            let color: Option<String> = from_field_opt(&args, "color")?;
+            let result =
+                crate::claude_cli::rename_claude_account(app.clone(), id, name, color).await?;
+            emit_cache_invalidation(app, &["claude-accounts"]);
+            to_value(result)
+        }
+        "get_claude_account_login_command" => {
+            let id: String = from_field(&args, "id")?;
+            let result =
+                crate::claude_cli::get_claude_account_login_command(app.clone(), id).await?;
+            to_value(result)
         }
         "check_cursor_cli_installed" => {
             let result = crate::cursor_cli::check_cursor_cli_installed(app.clone()).await?;

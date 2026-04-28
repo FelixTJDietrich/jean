@@ -22,7 +22,6 @@ use super::types::{
     AllSessionsEntry, AllSessionsResponse, Backend, ChatMessage, ClaudeContext, EffortLevel,
     LabelData, MessageRole, RunStatus, Session, ThinkingLevel, WorktreeIndex, WorktreeSessions,
 };
-use crate::claude_cli::resolve_cli_binary;
 use crate::http_server::EmitExt;
 use crate::platform::silent_command;
 use crate::projects::github_issues::{
@@ -6328,14 +6327,9 @@ fn execute_summarization_claude(
         });
     }
 
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
     log::trace!("Executing one-shot Claude summarization with JSON schema");
 
-    let mut cmd = silent_command(&cli_path);
+    let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
     cmd.args([
         "--print",
@@ -7280,14 +7274,9 @@ pub async fn check_mcp_health(
 }
 
 fn check_mcp_health_claude(app: &AppHandle) -> Result<McpHealthResult, String> {
-    let cli_path = resolve_cli_binary(app);
-    if !cli_path.exists() {
-        return Err("Claude CLI not installed".to_string());
-    }
-
     log::debug!("Running: claude mcp list");
 
-    let output = silent_command(&cli_path)
+    let output = crate::claude_cli::spawn_claude_command(app)?
         .args(["mcp", "list"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

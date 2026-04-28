@@ -66,3 +66,29 @@ export interface ClaudeUsageSnapshot {
   extraUsageLimit: number | null
   fetchedAt: number
 }
+
+// =============================================================================
+// Claude account profiles
+// =============================================================================
+
+/**
+ * Per-account summary as returned by the Rust `list_claude_accounts` command.
+ * This is the runtime view (enriched with `hasCredentials`/`configDir`).
+ * The persisted shape (`ClaudeAccount` in `@/types/preferences`) is a subset.
+ *
+ * Field names are camelCase because the Rust struct has
+ * `#[serde(rename_all = "camelCase")]`.
+ */
+export interface ClaudeAccountSummary {
+  id: string
+  name: string
+  color: string // hex like "#3b82f6"
+  createdAt: number // unix ms
+  hasCredentials: boolean // whether .credentials.json exists on disk
+  configDir: string // absolute path to CLAUDE_CONFIG_DIR
+}
+
+export interface ClaudeAccountsState {
+  accounts: ClaudeAccountSummary[]
+  activeAccountId: string | null
+}

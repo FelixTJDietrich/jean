@@ -348,6 +348,10 @@ pub struct AppPreferences {
     pub jean_mcp_max_depth: u32, // Max recursive spawn depth via Jean MCP (default 3)
     #[serde(default = "default_jean_mcp_rate_limit")]
     pub jean_mcp_rate_limit_per_minute: u32, // Per-source rate limit for session-spawning tools (default 20)
+    #[serde(default)]
+    pub claude_accounts: Vec<ClaudeAccount>, // Named Claude subscription profiles (home/work/etc.)
+    #[serde(default)]
+    pub active_claude_account_id: Option<String>, // Currently-selected Claude account; None = use ~/.claude/ directly
 }
 
 fn default_jean_mcp_enabled() -> bool {
@@ -395,6 +399,22 @@ pub struct CustomCliProfile {
     pub file_path: String,
     #[serde(default = "default_true")]
     pub supports_thinking: Option<bool>,
+}
+
+/// A named Claude subscription profile (e.g., "Personal", "Work").
+///
+/// Each account gets an isolated `CLAUDE_CONFIG_DIR` under
+/// `<app_data>/claude-accounts/<id>/`. `.credentials.json` is per-account,
+/// but transcripts/plugins/skills are symlinked to `~/.claude/` so that
+/// `--resume` works across accounts in the same session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeAccount {
+    pub id: String,
+    pub name: String,
+    /// Hex color (e.g. "#3b82f6") shown on the pill switcher and account dot.
+    pub color: String,
+    /// Unix ms. Stable sort key so the UI order stays consistent.
+    pub created_at: u64,
 }
 
 fn slugify_profile_name(name: &str) -> String {
@@ -1904,6 +1924,8 @@ impl Default for AppPreferences {
             jean_mcp_enabled: default_jean_mcp_enabled(),
             jean_mcp_max_depth: default_jean_mcp_max_depth(),
             jean_mcp_rate_limit_per_minute: default_jean_mcp_rate_limit(),
+            claude_accounts: Vec::new(),
+            active_claude_account_id: None,
         }
     }
 }
@@ -4258,6 +4280,13 @@ pub fn run() {
             claude_cli::get_available_cli_versions,
             claude_cli::install_claude_cli,
             claude_cli::uninstall_claude_cli,
+            // Claude account (profile) commands
+            claude_cli::list_claude_accounts,
+            claude_cli::create_claude_account,
+            claude_cli::delete_claude_account,
+            claude_cli::set_active_claude_account,
+            claude_cli::rename_claude_account,
+            claude_cli::get_claude_account_login_command,
             // Codex CLI management commands
             codex_cli::check_codex_cli_installed,
             codex_cli::detect_codex_in_path,

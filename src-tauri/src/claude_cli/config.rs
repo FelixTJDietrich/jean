@@ -1,8 +1,12 @@
 //! Configuration and path management for the embedded Claude CLI
 
-use crate::platform::{get_wsl_config, get_wsl_home_dir, silent_command};
 use std::path::PathBuf;
+use std::process::Command;
+
 use tauri::{AppHandle, Manager};
+
+use super::accounts::{resolve_active_config_dir, ActiveConfigDir};
+use crate::platform::{get_wsl_config, get_wsl_home_dir, silent_command};
 
 /// Directory name for storing the Claude CLI binary
 pub const CLI_DIR_NAME: &str = "claude-cli";
@@ -135,6 +139,66 @@ pub fn ensure_cli_dir(app: &AppHandle) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&cli_dir)
         .map_err(|e| format!("Failed to create CLI directory: {e}"))?;
     Ok(cli_dir)
+}
+
+/// **The single choke point for spawning the Claude CLI.**
+///
+/// Every non-UI Claude subprocess in Jean MUST go through this function —
+/// direct `silent_command(&resolve_cli_binary(app))` is forbidden because it
+/// silently bypasses the active-account `CLAUDE_CONFIG_DIR` injection.
+///
+/// Contract:
+/// * Fails if the embedded binary is missing.
+/// * Fails if an active Claude account is configured but its config dir is
+///   unresolvable (missing on disk, stale id, unreadable prefs with an id
+///   set). This is intentional: we refuse to silently fall back to the
+///   shared `~/.claude/` and bill the wrong subscription.
+/// * Applies `CLAUDE_CONFIG_DIR=<account-dir>` when an account is active;
+///   leaves it unset when no account is selected (preserving pre-accounts
+///   behavior).
+///
+/// The caller owns all other args/env/stdio/cwd. See callers in
+/// `chat/naming.rs`, `chat/commands.rs`, `projects/commands.rs`, and
+/// `chat/claude.rs` for usage examples.
+pub fn spawn_claude_command(app: &AppHandle) -> Result<Command, String> {
+    let cli_path = resolve_cli_binary(app);
+    if !cli_path.exists() {
+        return Err(format!(
+            "Claude CLI not found at {}. Install it in Settings > Advanced.",
+            cli_path.display()
+        ));
+    }
+
+    let mut cmd = silent_command(&cli_path);
+
+    // Scrub any ambient Anthropic / Claude auth state from the parent
+    // process so the child CANNOT accidentally use the wrong subscription.
+    // Concretely: an `ANTHROPIC_API_KEY` set in Jean's launching shell would
+    // take precedence over the account's `.credentials.json` and bill the
+    // API directly, defeating the whole profiles feature. We strip the
+    // known auth-bearing env vars; downstream functionality (custom
+    // profiles, region hints) is set explicitly by the caller.
+    //
+    // Docs: auth precedence at https://code.claude.com/docs/en/authentication
+    for var in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        cmd.env_remove(var);
+    }
+
+    match resolve_active_config_dir(app)? {
+        ActiveConfigDir::Default => {
+            // No account: also clear any stale CLAUDE_CONFIG_DIR the shell
+            // may have set so we predictably use ~/.claude/.
+            cmd.env_remove("CLAUDE_CONFIG_DIR");
+        }
+        ActiveConfigDir::Account(dir) => {
+            cmd.env("CLAUDE_CONFIG_DIR", &dir);
+        }
+    }
+    Ok(cmd)
 }
 
 #[cfg(test)]

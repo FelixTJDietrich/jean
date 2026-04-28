@@ -734,7 +734,7 @@ async fn refresh_claude_usage_cache(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let _ = crate::claude_cli::get_claude_usage_with_source("background").await?;
+    let _ = crate::claude_cli::get_claude_usage_with_source(app, "background").await?;
     Ok(())
 }
 

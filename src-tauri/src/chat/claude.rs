@@ -279,10 +279,31 @@ fn split_fast_model(model: &str) -> (&str, bool) {
     }
 }
 
+/// Auth-bearing env vars Jean refuses to inherit into the Claude child
+/// process. An `ANTHROPIC_API_KEY` left over in Jean's launching shell
+/// would otherwise take precedence over the selected account's
+/// `.credentials.json` and bill the API directly, silently defeating the
+/// profiles feature. Keep in sync with `claude_cli::config::spawn_claude_command`.
+///
+/// Docs: <https://code.claude.com/docs/en/authentication>
+const CLAUDE_AUTH_ENV_VARS_TO_CLEAR: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
 /// Build CLI arguments for Claude CLI.
 ///
-/// Returns a tuple of (args, env_vars) where env_vars are (key, value) pairs.
-#[allow(clippy::too_many_arguments)]
+/// Returns a tuple of `(args, env_vars, env_clear)`:
+/// * `args` — command-line arguments.
+/// * `env_vars` — `(key, value)` pairs SET on the child process.
+/// * `env_clear` — env var names UNSET on the child (even if inherited).
+///
+/// Errors: if an active Claude account is configured but its `CLAUDE_CONFIG_DIR`
+/// is unresolvable (stale id, missing dir), this returns `Err` rather than
+/// silently falling back to `~/.claude/`. The caller must not spawn Claude
+/// in that case — billing would go to the wrong subscription.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_claude_args(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -298,7 +319,7 @@ fn build_claude_args(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
-) -> (Vec<String>, Vec<(String, String)>) {
+) -> Result<(Vec<String>, Vec<(String, String)>, Vec<&'static str>), String> {
     let mut args = Vec::new();
     let mut env_vars = Vec::new();
 
@@ -917,6 +938,27 @@ fn build_claude_args(
         "1".to_string(),
     ));
 
+    // Active Claude account: scopes .credentials.json to a per-account dir
+    // so users can switch between subscriptions (e.g. personal/work)
+    // mid-session. When no account is active, we leave CLAUDE_CONFIG_DIR
+    // unset so the CLI uses its default ~/.claude/ — preserving the
+    // pre-profiles behavior. A misconfigured account propagates as `Err`
+    // so the spawn aborts rather than silently billing the wrong account.
+    let mut env_clear: Vec<&'static str> = CLAUDE_AUTH_ENV_VARS_TO_CLEAR.to_vec();
+    match crate::claude_cli::accounts::resolve_active_config_dir(app)? {
+        crate::claude_cli::accounts::ActiveConfigDir::Default => {
+            // Also scrub any ambient CLAUDE_CONFIG_DIR so we predictably
+            // land on ~/.claude/ when no account is active.
+            env_clear.push("CLAUDE_CONFIG_DIR");
+        }
+        crate::claude_cli::accounts::ActiveConfigDir::Account(dir) => {
+            env_vars.push((
+                "CLAUDE_CONFIG_DIR".to_string(),
+                dir.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+
     // Debug env vars
     env_vars.push(("JEAN_SESSION_ID".to_string(), session_id.to_string()));
     env_vars.push(("JEAN_WORKTREE_ID".to_string(), worktree_id.to_string()));
@@ -936,7 +978,7 @@ fn build_claude_args(
         env_vars.push(("JEAN_CLAUDE_SESSION_ID".to_string(), claude_sid.to_string()));
     }
 
-    (args, env_vars)
+    Ok((args, env_vars, env_clear))
 }
 
 fn append_mcp_config_args(args: &mut Vec<String>, mcp_config: Option<&str>) {
@@ -1019,8 +1061,10 @@ pub fn execute_claude_detached(
         return Err(error_msg);
     }
 
-    // Build args
-    let (args, env_vars) = build_claude_args(
+    // Build args. If an account is selected but its config dir is missing,
+    // `build_claude_args` returns Err so we abort BEFORE spawning — silently
+    // falling back to ~/.claude/ would bill the wrong subscription.
+    let (args, env_vars, env_clear) = match build_claude_args(
         app,
         session_id,
         worktree_id,
@@ -1035,7 +1079,19 @@ pub fn execute_claude_detached(
         mcp_config,
         chrome_enabled,
         custom_profile_name,
-    );
+    ) {
+        Ok(v) => v,
+        Err(msg) => {
+            log::error!("Claude account resolution failed: {msg}");
+            let error_event = ErrorEvent {
+                session_id: session_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                error: msg.clone(),
+            };
+            let _ = app.emit_all("chat:error", &error_event);
+            return Err(msg);
+        }
+    };
 
     // Log the full Claude CLI command for debugging
     log::debug!(
@@ -1063,6 +1119,7 @@ pub fn execute_claude_detached(
         output_file,
         working_dir,
         &env_refs,
+        &env_clear,
     )
     .map_err(|e| {
         let error_msg = format!("Failed to start Claude CLI: {e}");
@@ -2243,5 +2300,23 @@ mod tests {
         assert!(args.contains(&"mcp__jean-dev__*".to_string()));
         assert!(args.contains(&"mcp__github".to_string()));
         assert!(args.contains(&"mcp__github__*".to_string()));
+    }
+
+    /// The auth-scrub list must include every documented high-precedence
+    /// env var from Claude's auth docs. If Anthropic adds a new one, this
+    /// test is how we notice at upgrade time — failing here is a SIGNAL,
+    /// not an "update the test" task.
+    #[test]
+    fn auth_scrub_list_covers_documented_high_precedence_vars() {
+        // https://code.claude.com/docs/en/authentication — vars that
+        // override subscription OAuth at the CLI level.
+        let required = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+        for var in required {
+            assert!(
+                CLAUDE_AUTH_ENV_VARS_TO_CLEAR.contains(&var),
+                "CLAUDE_AUTH_ENV_VARS_TO_CLEAR must contain {var:?} to prevent \
+                 an ambient value from overriding the selected account."
+            );
+        }
     }
 }

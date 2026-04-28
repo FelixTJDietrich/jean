@@ -131,6 +131,11 @@ pub fn spawn_detached_process(
 /// Uses `nohup` and shell backgrounding to fully detach the process.
 /// The process reads input from a file and writes output to the NDJSON file.
 ///
+/// * `env_vars` — env vars to SET on the child (`KEY=value` form).
+/// * `env_clear` — env var names to UNSET (via `env -u KEY`) so they aren't
+///   inherited from Jean's launching shell. Used to scrub ambient Anthropic
+///   auth vars that would otherwise override the account's credentials.
+///
 /// Returns the PID of the detached Claude CLI process.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -141,6 +146,7 @@ pub fn spawn_detached_claude(
     output_file: &Path,
     working_dir: &Path,
     env_vars: &[(&str, &str)],
+    env_clear: &[&str],
 ) -> Result<u32, String> {
     // Build the shell command:
     // cat input.jsonl | nohup /path/to/claude [args] >> output.jsonl 2>&1 & echo $!
@@ -183,18 +189,31 @@ pub fn spawn_detached_claude(
         .collect::<Vec<_>>()
         .join(" ");
 
+    // Build the `env -u VAR1 -u VAR2 ...` prefix that actually *unsets*
+    // inherited vars (plain `KEY=` assignment only sets them to empty).
+    // Empty when the caller provides nothing to clear.
+    let env_unsets = env_clear
+        .iter()
+        .map(|k| format!("-u {}", shell_escape(k)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Compose the "launch" prefix — some combination of `env -u ...` and
+    // `KEY=val` pairs — that applies to the nohup/claude invocation only
+    // (not the upstream `cat`, which would otherwise eat the env tweaks).
+    let launch_prefix = match (env_unsets.is_empty(), env_exports.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("env {env_unsets} "),
+        (true, false) => format!("{env_exports} "),
+        (false, false) => format!("env {env_unsets} {env_exports} "),
+    };
+
     // The full shell command - use cat pipe instead of file redirection
     // Claude CLI with --print requires piped stdin, not file redirection
     // NOTE: env vars must be placed AFTER the pipe so they apply to Claude, not cat
-    let shell_cmd = if env_exports.is_empty() {
-        format!(
-            "cat {input_path_escaped} | nohup {cli_path_escaped} {args_str} >> {output_path_escaped} 2>&1 & echo $!"
-        )
-    } else {
-        format!(
-            "cat {input_path_escaped} | {env_exports} nohup {cli_path_escaped} {args_str} >> {output_path_escaped} 2>&1 & echo $!"
-        )
-    };
+    let shell_cmd = format!(
+        "cat {input_path_escaped} | {launch_prefix}nohup {cli_path_escaped} {args_str} >> {output_path_escaped} 2>&1 & echo $!"
+    );
 
     log::trace!("Spawning detached Claude CLI");
     log::trace!("Shell command: {shell_cmd}");
@@ -279,6 +298,11 @@ pub fn spawn_detached_claude(
 ///
 /// Runs claude.exe directly with stdout/stderr redirected to the output file.
 /// When WSL is enabled, routes through `wsl.exe` with proper path translation.
+///
+/// * `env_vars` — env vars to SET on the child.
+/// * `env_clear` — env var names to UNSET (via `Command::env_remove` on
+///   native, `env -u` on WSL) so they aren't inherited from Jean's process.
+///
 /// Returns the PID of the detached process.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
@@ -289,6 +313,7 @@ pub fn spawn_detached_claude(
     output_file: &Path,
     working_dir: &Path,
     env_vars: &[(&str, &str)],
+    env_clear: &[&str],
 ) -> Result<u32, String> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -332,6 +357,16 @@ pub fn spawn_detached_claude(
             .collect::<Vec<_>>()
             .join(" ");
 
+        // Build `env -u VAR1 -u VAR2 …` prefix that *unsets* inherited vars
+        // (KEY=val on the same line only ASSIGNS, can't unset). Used so an
+        // ambient ANTHROPIC_API_KEY in Jean's shell cannot leak in and bill
+        // the wrong account.
+        let env_unsets = env_clear
+            .iter()
+            .map(|k| format!("-u '{}'", k.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+
         let args_str = args
             .iter()
             .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
@@ -339,15 +374,15 @@ pub fn spawn_detached_claude(
             .join(" ");
 
         let cli_quoted = format!("'{}'", cli_name.replace('\'', "'\\''"));
-        let shell_cmd = if env_exports.is_empty() {
-            format!(
-                "cat {unix_input_escaped} | nohup {cli_quoted} {args_str} >> {unix_output_escaped} 2>&1 & echo $!"
-            )
-        } else {
-            format!(
-                "cat {unix_input_escaped} | {env_exports} nohup {cli_quoted} {args_str} >> {unix_output_escaped} 2>&1 & echo $!"
-            )
+        let launch_prefix = match (env_unsets.is_empty(), env_exports.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("env {env_unsets} "),
+            (true, false) => format!("{env_exports} "),
+            (false, false) => format!("env {env_unsets} {env_exports} "),
         };
+        let shell_cmd = format!(
+            "cat {unix_input_escaped} | {launch_prefix}nohup {cli_quoted} {args_str} >> {unix_output_escaped} 2>&1 & echo $!"
+        );
 
         log::trace!("Spawning detached Claude CLI via WSL");
         log::trace!("WSL shell command: {shell_cmd}");
@@ -414,6 +449,11 @@ pub fn spawn_detached_claude(
             .stderr(err_file)
             .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 
+        // Clear ambient auth env vars FIRST, then set ours. Ordering matters:
+        // `env_remove` after `env` would undo what we just set.
+        for key in env_clear {
+            cmd.env_remove(key);
+        }
         for (key, value) in env_vars {
             cmd.env(key, value);
         }

@@ -993,6 +993,20 @@ export function useMainWindowEventListeners() {
                     queryKey: ['saved-contexts'],
                   })
                   break
+                case 'claude-accounts':
+                  queryClient.invalidateQueries({
+                    queryKey: ['claude-cli', 'accounts'],
+                  })
+                  // Auth state is per-account, so invalidate auth too.
+                  queryClient.invalidateQueries({
+                    queryKey: ['claude-cli', 'auth'],
+                  })
+                  break
+                case 'claude-usage':
+                  queryClient.invalidateQueries({
+                    queryKey: ['claude-cli', 'usage'],
+                  })
+                  break
               }
             }
             pendingKeys.clear()
