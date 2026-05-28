@@ -106,6 +106,21 @@ export function ClaudeAccountPill() {
     if (!open) setLoginHint(null)
   }, [])
 
+  // Memoize so React reference-compares equal across renders when only
+  // unrelated state changes, preventing unnecessary button re-renders.
+  // MUST be declared before any conditional `return` below — React
+  // requires the same hook count on every render of this component, so
+  // moving this past the early returns triggers React error #310
+  // ("Rendered more hooks than during the previous render") on the
+  // transition from the loading-skeleton path to the rendered-pill path.
+  const pillStyle = useMemo(
+    () =>
+      activeAccount
+        ? { boxShadow: `inset 0 0 0 1px ${activeAccount.color}40` }
+        : undefined,
+    [activeAccount]
+  )
+
   // -----------------------------------------------------------------------
   // Render: still loading or no accounts yet → compact CTA.
   // -----------------------------------------------------------------------
@@ -166,15 +181,6 @@ export function ClaudeAccountPill() {
   const missingCredentials = activeAccount != null && !activeAccount.hasCredentials
   const pillLabel = activeAccount ? activeAccount.name : 'Default'
   const pillDotColor = activeAccount?.color ?? null
-  // Memoize so React reference-compares equal across renders when only
-  // unrelated state changes, preventing unnecessary button re-renders.
-  const pillStyle = useMemo(
-    () =>
-      activeAccount
-        ? { boxShadow: `inset 0 0 0 1px ${activeAccount.color}40` }
-        : undefined,
-    [activeAccount]
-  )
 
   return (
     <>
