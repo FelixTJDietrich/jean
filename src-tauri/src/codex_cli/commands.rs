@@ -10,6 +10,7 @@ use tauri::AppHandle;
 use super::config::{ensure_cli_dir, get_cli_binary_path, get_cli_dir, resolve_cli_binary};
 use crate::gh_cli::resolve_github_api_token;
 use crate::http_server::EmitExt;
+#[cfg(target_os = "macos")]
 use crate::platform::silent_command;
 
 /// GitHub API URL for Codex CLI releases
@@ -964,7 +965,10 @@ pub async fn check_codex_cli_installed(app: AppHandle) -> Result<CodexCliStatus,
     }
 
     // Get version
-    let version = match silent_command(&binary_path).arg("--version").output() {
+    let version = match crate::platform::cli_command(&binary_path.to_string_lossy(), None)
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => {
             let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             log::debug!(
@@ -1579,6 +1583,55 @@ async fn find_asset_url(
     Err(format!("Release for version {version} not found"))
 }
 
+#[tauri::command]
+pub async fn check_codex_cli_version_exists(
+    app: AppHandle,
+    version: String,
+) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    let target = resolve_codex_runtime_target()?;
+    let asset_names = codex_asset_name_candidates(target);
+    let client = build_github_client()?;
+    let token = resolve_github_api_token(&app);
+    let tags = [
+        format!("rust-v{version}"),
+        format!("codex-v{version}"),
+        format!("v{version}"),
+    ];
+
+    for tag in tags {
+        let mut request = client
+            .get(format!("{CODEX_RELEASES_API}/tags/{tag}"))
+            .header("Accept", GITHUB_API_ACCEPT)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        if let Some(ref token) = token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Failed to check Codex version: {e}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!("GitHub API returned status: {}", response.status()));
+        }
+        let release: GitHubRelease = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Codex release: {e}"))?;
+        return Ok(find_matching_asset_url(&release, &asset_names).is_some());
+    }
+
+    Ok(false)
+}
+
 fn find_matching_candidate_asset(
     release: &GitHubRelease,
     candidates: &[CodexAssetCandidate],
@@ -1756,7 +1809,7 @@ pub async fn install_codex_cli(app: AppHandle, version: Option<String>) -> Resul
     emit_progress(&app, "verifying", "Verifying installation...", 80);
 
     // Verify the binary works
-    let version_output = silent_command(&binary_path)
+    let version_output = crate::platform::cli_command(&binary_path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .map_err(|e| format!("Failed to verify Codex CLI: {e}"))?;

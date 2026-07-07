@@ -305,6 +305,26 @@ export interface WorktreePathExistsEvent {
       createdAt: string
     }[]
   }
+  /** PR context to use when creating a new worktree with the suggested name */
+  pr_context?: {
+    number: number
+    title: string
+    body?: string
+    headRefName: string
+    baseRefName: string
+    comments: {
+      author: { login: string }
+      body: string
+      createdAt: string
+    }[]
+    reviews: {
+      author: { login: string }
+      body: string
+      state: string
+      submittedAt: string
+    }[]
+    diff?: string
+  }
   /** Security alert context to use when creating a new worktree with the suggested name */
   security_context?: SecurityAlertContext
   /** Advisory context to use when creating a new worktree with the suggested name */
@@ -486,6 +506,26 @@ export interface ReviewResponse {
   findings: ReviewFinding[]
   /** Overall review verdict */
   approval_status: 'approved' | 'changes_requested' | 'needs_discussion'
+}
+
+export type ReviewJobStatus = 'running' | 'completed' | 'failed' | 'cancelled'
+
+export interface ReviewJob {
+  id: string
+  reviewRunId: string
+  worktreeId: string
+  worktreePath: string
+  sessionId?: string
+  source: 'ai' | 'coderabbit-cli' | string
+  status: ReviewJobStatus
+  findingCount?: number
+  error?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface StartReviewJobResponse {
+  job: ReviewJob
 }
 
 // =============================================================================

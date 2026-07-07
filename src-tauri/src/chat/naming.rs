@@ -374,6 +374,7 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
         &mut cmd,
         request.custom_profile_name.as_deref(),
     );
+    crate::chat::claude::apply_custom_profile_env(&mut cmd, request.custom_profile_name.as_deref());
     cmd.args([
         "--print",
         "--input-format",
@@ -381,6 +382,8 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
         "--output-format",
         "stream-json",
         "--verbose",
+        "--tools",
+        "default",
         "--model",
         model_alias,
         "--no-session-persistence",
@@ -433,8 +436,6 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
         // 3 turns: tool call + tool result + final response
         cmd.arg("--max-turns").arg("3");
     } else {
-        // No tools needed for text-only messages
-        cmd.arg("--tools").arg("");
         cmd.arg("--max-turns").arg("1");
     }
 

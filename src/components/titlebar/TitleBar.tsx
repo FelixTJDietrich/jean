@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { isLinux, isMacOS, openExternal } from '@/lib/platform'
 import { Button } from '@/components/ui/button'
@@ -12,13 +12,26 @@ import { useUIStore } from '@/store/ui-store'
 import { useCommandContext } from '@/lib/commands'
 import {
   ArrowUpCircle,
+  Download,
   Github,
   Heart,
   PanelLeft,
   PanelLeftClose,
   Settings,
+  X,
 } from 'lucide-react'
 import { usePreferences } from '@/services/preferences'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import {
+  CLI_DISPLAY_NAMES,
+  resolveCliPathUpdateAction,
+} from '@/lib/cli-update'
+import type { PendingCliUpdate } from '@/store/ui-store'
+import { toast } from 'sonner'
 import { formatShortcutDisplay, DEFAULT_KEYBINDINGS } from '@/types/keybindings'
 import { isNativeApp } from '@/lib/environment'
 import { UnreadBell } from '@/components/unread/UnreadBell'
@@ -188,6 +201,7 @@ export function TitleBar({
           </Tooltip>
         )}
         <ClaudeAccountPill />
+        <CliUpdatesIndicator />
         {appVersion && <UpdateIndicator />}
         {appVersion && (
           <button
@@ -204,6 +218,94 @@ export function TitleBar({
         {native && isLinux && <LinuxWindowControls />}
       </div>
     </div>
+  )
+}
+
+function CliUpdatesIndicator() {
+  const updates = useUIStore(state => state.availableCliUpdates)
+  const dismissCliUpdateNotice = useUIStore(state => state.dismissCliUpdateNotice)
+  const openCliUpdateModal = useUIStore(state => state.openCliUpdateModal)
+  const openCliLoginModal = useUIStore(state => state.openCliLoginModal)
+  const [open, setOpen] = useState(false)
+
+  const triggerUpdate = useCallback((update: PendingCliUpdate) => {
+    if (update.cliSource === 'path') {
+      const action = resolveCliPathUpdateAction(
+        update.type,
+        update.cliPath,
+        update.packageManager,
+        update.latestVersion
+      )
+      if (action) {
+        openCliLoginModal(update.type, action[0], action[1], 'update')
+      } else {
+        toast.error(
+          `Can't auto-update ${CLI_DISPLAY_NAMES[update.type]}. Update it manually via your package manager.`
+        )
+        return
+      }
+    } else {
+      openCliUpdateModal(update.type)
+    }
+    dismissCliUpdateNotice(update.type)
+  }, [dismissCliUpdateNotice, openCliUpdateModal, openCliLoginModal])
+
+  // Auto-close popover when all updates have been acted on / dismissed
+  useEffect(() => {
+    if (updates.length === 0) setOpen(false)
+  }, [updates.length])
+
+  if (updates.length === 0) return null
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button className="relative mr-1.5 flex items-center gap-1 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary hover:bg-primary/25 transition-colors cursor-pointer">
+              <Download className="size-3" />
+              <span>{updates.length}</span>
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {updates.length} CLI update{updates.length > 1 ? 's' : ''} available
+        </TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" className="w-72 p-0">
+        <div className="divide-y">
+          {updates.map(update => (
+            <div
+              key={update.type}
+              className="flex items-center justify-between px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="text-xs font-medium truncate">
+                  {CLI_DISPLAY_NAMES[update.type]}
+                </p>
+                <p className="text-[0.625rem] text-muted-foreground">
+                  v{update.currentVersion} → v{update.latestVersion}
+                </p>
+              </div>
+              <div className="flex items-center gap-1 ml-2 shrink-0">
+                <button
+                  onClick={() => triggerUpdate(update)}
+                  className="rounded px-2 py-0.5 text-[0.625rem] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+                >
+                  Update
+                </button>
+                <button
+                  onClick={() => dismissCliUpdateNotice(update.type)}
+                  className="rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 

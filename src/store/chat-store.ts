@@ -35,7 +35,7 @@ export interface ScheduledWakeupState extends ScheduledWakeup {
 }
 import type { ReviewResponse } from '@/types/projects'
 import { invoke } from '@/lib/transport'
-import type { ClaudeModel, CodexModel } from '@/types/preferences'
+import type { ClaudeModel, CodexModel, CliBackend } from '@/types/preferences'
 export type { ClaudeModel, CodexModel }
 
 /** Default model to use when none is selected (fallback only - preferences take priority) */
@@ -150,10 +150,7 @@ interface ChatUIState {
   effortLevels: Record<string, EffortLevel>
 
   // Selected backend per session (claude, codex, opencode, or cursor)
-  selectedBackends: Record<
-    string,
-    'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'commandcode'
-  >
+  selectedBackends: Record<string, CliBackend>
 
   // Selected model per session (for tracking what model was used)
   selectedModels: Record<string, string>
@@ -384,6 +381,14 @@ interface ChatUIState {
 
   // Actions - Streaming content (session-based)
   appendStreamingContent: (sessionId: string, chunk: string) => void
+  /**
+   * Hot path: append a streamed text chunk to BOTH `streamingContents` and
+   * `streamingContentBlocks` in a single atomic set(). The rAF chunk flush
+   * calls this once per frame — one set() means one subscriber notification
+   * sweep instead of two (appendStreamingContent + addTextBlock), and no
+   * transient state where the string and blocks disagree.
+   */
+  appendStreamingChunk: (sessionId: string, text: string) => void
   setStreamingContent: (sessionId: string, content: string) => void
   clearStreamingContent: (sessionId: string) => void
 
@@ -452,10 +457,7 @@ interface ChatUIState {
   getEffortLevel: (sessionId: string) => EffortLevel
 
   // Actions - Selected backend (session-based)
-  setSelectedBackend: (
-    sessionId: string,
-    backend: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'commandcode'
-  ) => void
+  setSelectedBackend: (sessionId: string, backend: CliBackend) => void
 
   // Actions - Selected model (session-based)
   setSelectedModel: (sessionId: string, model: string) => void
@@ -567,6 +569,11 @@ interface ChatUIState {
   enqueueMessage: (sessionId: string, message: QueuedMessage) => void
   dequeueMessage: (sessionId: string) => QueuedMessage | undefined
   removeQueuedMessage: (sessionId: string, messageId: string) => void
+  updateQueuedMessage: (
+    sessionId: string,
+    messageId: string,
+    message: string
+  ) => void
   moveQueuedMessageFront: (sessionId: string, messageId: string) => void
   clearQueue: (sessionId: string) => void
   getQueueLength: (sessionId: string) => number
@@ -1318,6 +1325,39 @@ export const useChatStore = create<ChatUIState>()(
           }),
           undefined,
           'appendStreamingContent'
+        ),
+
+      appendStreamingChunk: (sessionId, text) =>
+        set(
+          state => {
+            if (!text) return state
+            const blocks = state.streamingContentBlocks[sessionId] ?? []
+            const lastBlock = blocks[blocks.length - 1]
+            // Mirror addTextBlock: merge into a trailing text block, otherwise
+            // start a new one (e.g. after a tool_use/thinking block).
+            let newBlocks: ContentBlock[]
+            if (lastBlock && lastBlock.type === 'text') {
+              newBlocks = [...blocks]
+              newBlocks[newBlocks.length - 1] = {
+                type: 'text',
+                text: lastBlock.text + text,
+              }
+            } else {
+              newBlocks = [...blocks, { type: 'text', text }]
+            }
+            return {
+              streamingContents: {
+                ...state.streamingContents,
+                [sessionId]: (state.streamingContents[sessionId] ?? '') + text,
+              },
+              streamingContentBlocks: {
+                ...state.streamingContentBlocks,
+                [sessionId]: newBlocks,
+              },
+            }
+          },
+          undefined,
+          'appendStreamingChunk'
         ),
 
       setStreamingContent: (sessionId, content) =>
@@ -2549,6 +2589,25 @@ export const useChatStore = create<ChatUIState>()(
           'removeQueuedMessage'
         ),
 
+      updateQueuedMessage: (sessionId, messageId, message) =>
+        set(
+          state => {
+            const queue = state.messageQueues[sessionId] ?? []
+            const idx = queue.findIndex(m => m.id === messageId)
+            if (idx === -1 || queue[idx]?.message === message) return state
+            return {
+              messageQueues: {
+                ...state.messageQueues,
+                [sessionId]: queue.map(m =>
+                  m.id === messageId ? { ...m, message } : m
+                ),
+              },
+            }
+          },
+          undefined,
+          'updateQueuedMessage'
+        ),
+
       moveQueuedMessageFront: (sessionId, messageId) =>
         set(
           state => {
@@ -2901,6 +2960,8 @@ export const useChatStore = create<ChatUIState>()(
               state.sendingSessionIds
             const { [sessionId]: _wi, ...waitingForInputSessionIds } =
               state.waitingForInputSessionIds
+            const { [sessionId]: _reviewing, ...reviewingSessions } =
+              state.reviewingSessions
             const { [sessionId]: _sp, ...streamingPlanApprovals } =
               state.streamingPlanApprovals
             const { [sessionId]: _em, ...executingModes } = state.executingModes
@@ -2920,10 +2981,7 @@ export const useChatStore = create<ChatUIState>()(
                 sendStarted > 0
                   ? { ...state.completedDurations, [sessionId]: elapsed }
                   : state.completedDurations,
-              reviewingSessions: {
-                ...state.reviewingSessions,
-                [sessionId]: true,
-              },
+              reviewingSessions,
             }
           },
           undefined,

@@ -28,10 +28,15 @@ import {
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/store/chat-store'
+import { convertFileSrc } from '@/lib/transport'
 
 interface MarkdownProps {
   children: string
-  /** Enable streaming mode with incomplete markdown handling */
+  /**
+   * Enable streaming mode: auto-closes incomplete markdown and skips the
+   * expensive rehype-raw HTML pass (raw HTML shows as literal text until the
+   * completed message re-renders without `streaming`).
+   */
   streaming?: boolean
   className?: string
   /** Rendering context; tool-call markdown needs a wider ordered-list gutter. */
@@ -132,6 +137,12 @@ function tableToMarkdown(data: string[][]): string {
   const separator = `| ${header.map(() => '---').join(' | ')} |`
   const bodyLines = rows.map(row => `| ${row.join(' | ')} |`)
   return [headerLine, separator, ...bodyLines].join('\n')
+}
+
+function markdownImageSrc(src: string | undefined): string | undefined {
+  if (!src) return src
+  if (/^(https?:|data:|blob:|asset:|\/api\/|#)/i.test(src)) return src
+  return convertFileSrc(src)
 }
 
 /**
@@ -386,7 +397,7 @@ const components: Components = {
   // Images
   img: ({ src, alt }) => (
     <img
-      src={src}
+      src={markdownImageSrc(src)}
       alt={alt || ''}
       className="max-w-full h-auto rounded-md my-4"
     />
@@ -532,6 +543,13 @@ const compactComponents: Components = {
   ),
 }
 
+// Module-level plugin arrays keep references stable across renders.
+const remarkPlugins = [remarkGfm]
+// rehype-raw re-parses the full accumulated text as HTML on every render —
+// the dominant per-frame cost while streaming — so streaming mode skips it
+// and only completed (non-streaming) renders apply it.
+const rehypePlugins = [rehypeRaw]
+
 /**
  * Memoized markdown renderer to prevent expensive re-parsing
  * ReactMarkdown is expensive, so we avoid re-renders when content hasn't changed
@@ -568,8 +586,8 @@ const Markdown = memo(function Markdown({
       <MarkdownTableContext.Provider value={contextValue}>
         <ReactMarkdown
           components={componentsToUse}
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeRaw]}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={streaming ? undefined : rehypePlugins}
         >
           {content}
         </ReactMarkdown>

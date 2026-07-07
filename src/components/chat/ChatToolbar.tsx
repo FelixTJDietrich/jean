@@ -10,7 +10,7 @@ import {
   performGitPull,
 } from '@/services/git-status'
 import { useChatStore } from '@/store/chat-store'
-import { useRemotePicker } from '@/hooks/useRemotePicker'
+import { pushNeedsRemotePicker, useRemotePicker } from '@/hooks/useRemotePicker'
 import { useAllBackendsMcpHealth } from '@/services/mcp'
 import { getModelFastInfo, type ClaudeModel } from '@/types/preferences'
 import {
@@ -98,6 +98,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   worktreeId,
   activeSessionId,
   projectId,
+  runScripts,
   loadedIssueContexts,
   loadedPRContexts,
   loadedSecurityContexts,
@@ -131,6 +132,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   enabledMcpServers,
   onToggleMcpServer,
   onOpenProjectSettings,
+  onRunCommand,
 }: ChatToolbarProps) {
   const {
     statuses: mcpStatuses,
@@ -309,7 +311,8 @@ export const ChatToolbar = memo(function ChatToolbar({
 
   const handlePushClick = useCallback(() => {
     if (!activeWorktreePath || !worktreeId) return
-    pickRemoteOrRun(async remote => {
+
+    const runPush = async (remote?: string) => {
       const { setWorktreeLoading, clearWorktreeLoading } =
         useChatStore.getState()
       setWorktreeLoading(worktreeId, 'push')
@@ -330,7 +333,13 @@ export const ChatToolbar = memo(function ChatToolbar({
       } finally {
         clearWorktreeLoading(worktreeId)
       }
-    })
+    }
+
+    if (pushNeedsRemotePicker(prNumber)) {
+      pickRemoteOrRun(runPush)
+    } else {
+      runPush()
+    }
   }, [activeWorktreePath, worktreeId, projectId, prNumber, pickRemoteOrRun])
 
   const executeRevertLastCommit = useCallback(async () => {
@@ -398,7 +407,6 @@ export const ChatToolbar = memo(function ChatToolbar({
             onReview={onReview}
             onMerge={onMerge}
             onMergePr={onMergePr}
-            onOpenMagicModal={onOpenMagicModal}
             handlePullClick={handlePullClick}
             handlePushClick={handlePushClick}
           />
@@ -444,6 +452,8 @@ export const ChatToolbar = memo(function ChatToolbar({
             prDisplayStatus={displayStatus}
             worktreeId={worktreeId}
             onAttach={onAttach}
+            runScripts={runScripts}
+            onRunCommand={onRunCommand}
           />
 
           {isMobile && (

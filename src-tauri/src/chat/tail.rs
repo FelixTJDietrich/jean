@@ -17,6 +17,34 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// instead of 50ms reduces per-event latency by up to 45ms.
 pub const POLL_INTERVAL_FAST: Duration = Duration::from_millis(5);
 
+/// Slow polling interval used after a sustained quiet period.
+/// During long silent phases (e.g. the model thinking), waking 20x/sec per
+/// active run wastes CPU on file reads and liveness checks — back off to
+/// 250ms until data flows again.
+pub const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(250);
+
+/// How long a poll loop must go without any new line before backing off
+/// from `POLL_INTERVAL` to `POLL_INTERVAL_IDLE`.
+pub const IDLE_BACKOFF_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// Decide how long to sleep before the next poll.
+///
+/// - New lines arrived this poll → `POLL_INTERVAL_FAST` (5ms) for low
+///   streaming latency.
+/// - Quiet for less than `IDLE_BACKOFF_THRESHOLD` → `POLL_INTERVAL` (50ms).
+/// - Quiet for longer → `POLL_INTERVAL_IDLE` (250ms). The first poll after
+///   new data is written still returns it, so the worst-case extra latency
+///   is one idle interval; streaming then resumes at the fast interval.
+pub fn next_poll_interval(had_data: bool, quiet_for: Duration) -> Duration {
+    if had_data {
+        POLL_INTERVAL_FAST
+    } else if quiet_for >= IDLE_BACKOFF_THRESHOLD {
+        POLL_INTERVAL_IDLE
+    } else {
+        POLL_INTERVAL
+    }
+}
+
 /// Tailer for reading new lines from an NDJSON file.
 ///
 /// Maintains position in the file and returns only new complete lines
@@ -324,5 +352,40 @@ mod tests {
         // Verify the fast (active) poll interval
         assert_eq!(POLL_INTERVAL_FAST, Duration::from_millis(5));
         assert!(POLL_INTERVAL_FAST < POLL_INTERVAL);
+
+        // Verify the idle backoff interval keeps the ordering fast < default < idle
+        assert_eq!(POLL_INTERVAL_IDLE, Duration::from_millis(250));
+        assert!(POLL_INTERVAL < POLL_INTERVAL_IDLE);
+    }
+
+    #[test]
+    fn test_next_poll_interval_fast_while_data_flows() {
+        // Data this poll → fast path, regardless of how quiet it was before
+        assert_eq!(next_poll_interval(true, Duration::ZERO), POLL_INTERVAL_FAST);
+        assert_eq!(
+            next_poll_interval(true, Duration::from_secs(60)),
+            POLL_INTERVAL_FAST
+        );
+    }
+
+    #[test]
+    fn test_next_poll_interval_default_when_recently_quiet() {
+        assert_eq!(next_poll_interval(false, Duration::ZERO), POLL_INTERVAL);
+        assert_eq!(
+            next_poll_interval(false, Duration::from_millis(1_999)),
+            POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn test_next_poll_interval_backs_off_after_sustained_quiet() {
+        assert_eq!(
+            next_poll_interval(false, IDLE_BACKOFF_THRESHOLD),
+            POLL_INTERVAL_IDLE
+        );
+        assert_eq!(
+            next_poll_interval(false, Duration::from_secs(60)),
+            POLL_INTERVAL_IDLE
+        );
     }
 }

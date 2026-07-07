@@ -1,4 +1,5 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
+import { Activity, Loader2 } from 'lucide-react'
 import { Markdown } from '@/components/ui/markdown'
 import type {
   ToolCall,
@@ -6,8 +7,17 @@ import type {
   Question,
   QuestionAnswer,
 } from '@/types/chat'
+import {
+  getAskUserQuestions,
+  normalizeQuestionMultipleField,
+} from '@/types/chat'
 import { AskUserQuestion } from './AskUserQuestion'
-import { ToolCallInline, TaskCallInline, StackedGroup } from './ToolCallInline'
+import {
+  ToolCallInline,
+  TaskCallInline,
+  StackedGroup,
+  TOOL_CALL_ROW_CLASS,
+} from './ToolCallInline'
 import {
   buildTimeline,
   findPlanFilePath,
@@ -15,6 +25,7 @@ import {
   getPlanTextBlockIndicesToHide,
   isDuplicatePlanTextBlock,
   resolvePlanContent,
+  type TimelineItem,
 } from './tool-call-utils'
 import { ToolCallsDisplay } from './ToolCallsDisplay'
 import { PlanDisplay } from './PlanFileDisplay'
@@ -23,6 +34,20 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
+
+function WorkingVisualRow() {
+  return (
+    <div className="rounded-md border border-border/50 bg-muted/30 min-w-0">
+      <div className={TOOL_CALL_ROW_CLASS}>
+        <Activity className="h-3.5 w-3.5 shrink-0 opacity-70" />
+        <span className="font-medium shrink-0 flex-none whitespace-nowrap">
+          Working…
+        </span>
+        <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin text-muted-foreground/50" />
+      </div>
+    </div>
+  )
+}
 
 interface StreamingMessageProps {
   /** Session ID for the streaming message */
@@ -43,6 +68,8 @@ interface StreamingMessageProps {
   onQuestionSkip: (toolCallId: string) => void
   /** Callback when user clicks a file path */
   onFileClick: (path: string) => void
+  /** Worktree path for resolving file mentions */
+  worktreePath?: string
   /** Check if a question has been answered */
   isQuestionAnswered: (sessionId: string, toolCallId: string) => boolean
   /** Get submitted answers for a question */
@@ -52,6 +79,8 @@ interface StreamingMessageProps {
   ) => QuestionAnswer[] | undefined
   /** Check if questions are being skipped for this session */
   areQuestionsSkipped: (sessionId: string) => boolean
+  /** Callback to copy a steered user prompt */
+  onCopySteeredText?: (text: string) => void
 }
 
 /**
@@ -66,43 +95,89 @@ export const StreamingMessage = memo(function StreamingMessage({
   onQuestionAnswer,
   onQuestionSkip,
   onFileClick,
+  worktreePath,
   isQuestionAnswered,
   getSubmittedAnswers,
   areQuestionsSkipped,
+  onCopySteeredText,
 }: StreamingMessageProps) {
-  const resolvedPlan = resolvePlanContent({
-    toolCalls,
-    messageContent: streamingContent,
-    contentBlocks,
-  })
-  const hiddenPlanTextBlockIndices = getPlanTextBlockIndicesToHide(
-    contentBlocks,
-    resolvedPlan.content
+  const resolvedPlan = useMemo(
+    () =>
+      resolvePlanContent({
+        toolCalls,
+        messageContent: streamingContent,
+        contentBlocks,
+      }),
+    [toolCalls, streamingContent, contentBlocks]
   )
-  const fallbackPrePlanText = getIntroTextBeforeDuplicatePlan(
-    streamingContent,
-    resolvedPlan.content
+  const hiddenPlanTextBlockIndices = useMemo(
+    () => getPlanTextBlockIndicesToHide(contentBlocks, resolvedPlan.content),
+    [contentBlocks, resolvedPlan.content]
   )
+  const fallbackPrePlanText = useMemo(
+    () =>
+      getIntroTextBeforeDuplicatePlan(streamingContent, resolvedPlan.content),
+    [streamingContent, resolvedPlan.content]
+  )
+
+  // Timeline construction is O(blocks + tools) and runs on every streaming
+  // frame otherwise — memoize on the immutable store slices it derives from.
+  const timelineData = useMemo(() => {
+    if (contentBlocks.length === 0) return null
+    let timeline: TimelineItem[]
+    try {
+      timeline = buildTimeline(contentBlocks, toolCalls)
+    } catch (e) {
+      logger.error('Failed to build streaming timeline', {
+        sessionId,
+        error: e,
+      })
+      return { error: true as const }
+    }
+    // First contentBlocks index per text block content — replaces a per-item
+    // O(n) findIndex during render.
+    const textBlockIndexByText = new Map<string, number>()
+    contentBlocks.forEach((block, index) => {
+      if (block.type === 'text' && !textBlockIndexByText.has(block.text)) {
+        textBlockIndexByText.set(block.text, index)
+      }
+    })
+    // Find all incomplete item indices for spinner (show on all in-progress tools)
+    // Use === undefined check since empty string is a valid "completed" output (e.g. Read tools)
+    const incompleteIndices = new Set<number>()
+    timeline.forEach((item, idx) => {
+      if (item.type === 'task' && item.taskTool.output === undefined)
+        incompleteIndices.add(idx)
+      else if (item.type === 'standalone' && item.tool.output === undefined)
+        incompleteIndices.add(idx)
+      else if (
+        item.type === 'stackedGroup' &&
+        item.items.some(i => i.type === 'tool' && i.tool.output === undefined)
+      )
+        incompleteIndices.add(idx)
+    })
+    return {
+      error: false as const,
+      timeline,
+      textBlockIndexByText,
+      incompleteIndices,
+    }
+  }, [contentBlocks, toolCalls, sessionId])
 
   return (
     <div className="text-foreground/90">
       {/* Render streaming content blocks inline if available */}
-      {contentBlocks.length > 0 ? (
+      {timelineData ? (
         (() => {
-          let timeline
-          try {
-            timeline = buildTimeline(contentBlocks, toolCalls)
-          } catch (e) {
-            logger.error('Failed to build streaming timeline', {
-              sessionId,
-              error: e,
-            })
+          if (timelineData.error) {
             return (
               <div className="text-sm text-muted-foreground italic">
                 [Streaming content could not be rendered]
               </div>
             )
           }
+          const { timeline, textBlockIndexByText, incompleteIndices } =
+            timelineData
           const hasRenderedTextItem = timeline.some(
             item => item.type === 'text'
           )
@@ -112,25 +187,6 @@ export const StreamingMessage = memo(function StreamingMessage({
                 ? streamingContent
                 : null))
             : null
-          // Find all incomplete item indices for spinner (show on all in-progress tools)
-          // Use === undefined check since empty string is a valid "completed" output (e.g. Read tools)
-          const incompleteIndices = new Set<number>()
-          timeline.forEach((item, idx) => {
-            if (item.type === 'task' && item.taskTool.output === undefined)
-              incompleteIndices.add(idx)
-            else if (
-              item.type === 'standalone' &&
-              item.tool.output === undefined
-            )
-              incompleteIndices.add(idx)
-            else if (
-              item.type === 'stackedGroup' &&
-              item.items.some(
-                i => i.type === 'tool' && i.tool.output === undefined
-              )
-            )
-              incompleteIndices.add(idx)
-          })
 
           return (
             <>
@@ -168,11 +224,7 @@ export const StreamingMessage = memo(function StreamingMessage({
                                   )
                                 case 'text': {
                                   const textBlockIndex =
-                                    contentBlocks.findIndex(
-                                      block =>
-                                        block.type === 'text' &&
-                                        block.text === item.text
-                                    )
+                                    textBlockIndexByText.get(item.text) ?? -1
                                   if (
                                     textBlockIndex >= 0 &&
                                     hiddenPlanTextBlockIndices.has(
@@ -195,7 +247,11 @@ export const StreamingMessage = memo(function StreamingMessage({
                                 }
                                 case 'userInput':
                                   return (
-                                    <SteeredPromptGroup texts={item.texts} />
+                                    <SteeredPromptGroup
+                                      texts={item.texts}
+                                      worktreePath={worktreePath}
+                                      onCopyText={onCopySteeredText}
+                                    />
                                   )
                                 case 'task':
                                   return (
@@ -231,18 +287,14 @@ export const StreamingMessage = memo(function StreamingMessage({
                                     sessionId,
                                     item.tool.id
                                   )
-                                  const rawInput = item.tool.input as {
-                                    questions: (Question & {
-                                      multiple?: boolean
-                                    })[]
-                                  }
                                   // Normalize OpenCode's "multiple" → "multiSelect"
                                   const normalizedQuestions =
-                                    rawInput.questions.map(q => ({
-                                      ...q,
-                                      multiSelect:
-                                        q.multiSelect ?? q.multiple === true,
-                                    }))
+                                    normalizeQuestionMultipleField(
+                                      (getAskUserQuestions(item.tool.input) ??
+                                        []) as (Question & {
+                                        multiple?: boolean
+                                      })[]
+                                    )
                                   return (
                                     <AskUserQuestion
                                       toolCallId={item.tool.id}
@@ -322,6 +374,9 @@ export const StreamingMessage = memo(function StreamingMessage({
                           </ErrorBoundary>
                         )
                       })}
+                      {timeline.at(-1)?.type === 'userInput' && (
+                        <WorkingVisualRow />
+                      )}
                       {resolvedPlan.content && !hasRenderedPlanItem && (
                         <div data-plan-display>
                           <PlanDisplay

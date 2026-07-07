@@ -91,31 +91,8 @@ pub fn resolve_cli_binary(app: &AppHandle) -> PathBuf {
             ) {
                 return PathBuf::from(unix_path);
             }
-        } else {
-            // Try to find claude in system PATH
-            let which_cmd = if cfg!(target_os = "windows") {
-                "where"
-            } else {
-                "which"
-            };
-
-            if let Ok(output) = silent_command(which_cmd).arg("claude").output() {
-                if output.status.success() {
-                    // On Windows, `where` can return multiple paths; take only the first line
-                    let path_str = String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    if !path_str.is_empty() {
-                        let path = PathBuf::from(&path_str);
-                        if path.exists() {
-                            return path;
-                        }
-                    }
-                }
-            }
+        } else if let Some(path) = crate::platform::find_cli_in_host_path("claude", None) {
+            return path;
         }
         // Fallback: if PATH lookup fails, still return Jean-managed path
         log::warn!("claude_cli_source is 'path' but could not find claude in PATH, falling back to Jean-managed binary");

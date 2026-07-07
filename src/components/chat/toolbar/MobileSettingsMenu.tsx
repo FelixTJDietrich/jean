@@ -3,6 +3,7 @@ import {
   Brain,
   ChevronRight,
   CircleDot,
+  ClipboardCopy,
   ExternalLink,
   FolderOpen,
   Github,
@@ -58,6 +59,7 @@ import { isNativeApp } from '@/lib/environment'
 import {
   CODEX_EFFORT_LEVEL_OPTIONS,
   EFFORT_LEVEL_OPTIONS,
+  GROK_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
@@ -85,13 +87,7 @@ import { getResumeCommand } from '@/components/chat/session-card-utils'
 interface MobileSettingsMenuProps {
   isDisabled: boolean
   providerLocked?: boolean
-  selectedBackend:
-    | 'claude'
-    | 'codex'
-    | 'opencode'
-    | 'cursor'
-    | 'pi'
-    | 'commandcode'
+  selectedBackend: CliBackend
   selectedProvider: string | null
   backendModelLabel: ReactNode
   backendModelLabelText: string
@@ -133,11 +129,12 @@ interface MobileSettingsMenuProps {
 
   worktreeId?: string | null
   onAttach?: () => void
+  runScripts?: string[]
+  onRunCommand?: (command: string) => void
 }
 
 export function MobileSettingsMenu({
   isDisabled,
-  providerLocked,
   selectedBackend,
   selectedProvider,
   backendModelLabel,
@@ -174,14 +171,21 @@ export function MobileSettingsMenu({
   prDisplayStatus,
   worktreeId,
   onAttach,
+  runScripts = [],
+  onRunCommand,
 }: MobileSettingsMenuProps) {
   const isPi = selectedBackend === 'pi'
-  const usesEffortControl = useAdaptiveThinking || isCodex || isPi
+  const isGrok = selectedBackend === 'grok'
+  const singleRunScript =
+    runScripts.length === 1 ? (runScripts[0] ?? null) : null
+  const usesEffortControl = useAdaptiveThinking || isCodex || isPi || isGrok
   const effortLevelOptions = isPi
     ? PI_EFFORT_LEVEL_OPTIONS
     : isCodex
       ? CODEX_EFFORT_LEVEL_OPTIONS
-      : EFFORT_LEVEL_OPTIONS
+      : isGrok
+        ? GROK_EFFORT_LEVEL_OPTIONS
+        : EFFORT_LEVEL_OPTIONS
   const displayedEffortLevel =
     isCodex || isPi
       ? selectedEffortLevel === 'max'
@@ -189,7 +193,9 @@ export function MobileSettingsMenu({
         : selectedEffortLevel === 'ultracode'
           ? 'xhigh'
           : selectedEffortLevel
-      : selectedEffortLevel
+      : isGrok && selectedEffortLevel === 'ultracode'
+        ? 'max'
+        : selectedEffortLevel
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
@@ -255,6 +261,14 @@ export function MobileSettingsMenu({
     if (!worktreeId) return
     useTerminalStore.getState().toggleModalTerminal(worktreeId)
   }, [worktreeId])
+
+  const handleRunCommand = useCallback(
+    (command: string) => {
+      setMenuOpen(false)
+      onRunCommand?.(command)
+    },
+    [onRunCommand]
+  )
 
   const handleOpenGitHub = useCallback(() => {
     const branch = worktree?.branch
@@ -348,45 +362,43 @@ export function MobileSettingsMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align={isMobile ? 'end' : 'start'} className="w-72">
-        {customCliProfiles.length > 0 &&
-          !providerLocked &&
-          selectedBackend === 'claude' && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
-                <span>Provider</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {providerDisplayName}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                <DropdownMenuRadioGroup
-                  value={selectedProvider ?? '__anthropic__'}
-                  onValueChange={handleProviderChange}
-                >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
-                  </DropdownMenuRadioItem>
-                  {customCliProfiles.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        Custom Providers
-                      </DropdownMenuLabel>
-                      {customCliProfiles.map(profile => (
-                        <DropdownMenuRadioItem
-                          key={profile.name}
-                          value={profile.name}
-                        >
-                          {profile.name}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )}
+        {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
+              <span>Provider</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {providerDisplayName}
+              </span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup
+                value={selectedProvider ?? '__anthropic__'}
+                onValueChange={handleProviderChange}
+              >
+                <DropdownMenuRadioItem value="__anthropic__">
+                  Anthropic
+                </DropdownMenuRadioItem>
+                {customCliProfiles.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">
+                      Custom Providers
+                    </DropdownMenuLabel>
+                    {customCliProfiles.map(profile => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                      >
+                        {profile.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
 
         <DropdownMenuItem onSelect={openBackendModelPicker}>
           <Sparkles className="h-4 w-4" />
@@ -544,6 +556,37 @@ export function MobileSettingsMenu({
           </DropdownMenuItem>
         )}
         {worktreeId && (
+          <>
+            {singleRunScript && (
+              <DropdownMenuItem
+                onSelect={() => handleRunCommand(singleRunScript)}
+              >
+                <Play className="h-4 w-4" />
+                Run
+              </DropdownMenuItem>
+            )}
+            {runScripts.length > 1 && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <Play className="mr-2 h-4 w-4" />
+                  Run
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {runScripts.map((cmd, i) => (
+                    <DropdownMenuItem
+                      key={i}
+                      onSelect={() => handleRunCommand(cmd)}
+                      className="font-mono text-xs"
+                    >
+                      {cmd}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+          </>
+        )}
+        {worktreeId && (
           <DropdownMenuItem onSelect={handleToggleTerminal}>
             <Terminal className="h-4 w-4" />
             Terminal
@@ -551,7 +594,7 @@ export function MobileSettingsMenu({
         )}
         {resumeCommand && (
           <DropdownMenuItem onSelect={handleCopyResumeCommand}>
-            <Play className="h-4 w-4" />
+            <ClipboardCopy className="h-4 w-4" />
             Resume Command
           </DropdownMenuItem>
         )}
@@ -598,11 +641,7 @@ export function MobileSettingsMenu({
                   />
                 )}
                 <span className="truncate">PR #{prNumber}</span>
-                {prDisplayStatus && (
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {getPrStatusDisplay(prDisplayStatus).label}
-                  </span>
-                )}
+                <ExternalLink className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" />
               </DropdownMenuItem>
             )}
             {stackedOnPR && (

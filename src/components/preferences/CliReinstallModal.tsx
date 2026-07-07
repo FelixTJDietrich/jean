@@ -28,6 +28,7 @@ import { useOpenCodeCliSetup } from '@/services/opencode-cli'
 import { usePiCliSetup } from '@/services/pi-cli'
 import { useCodeRabbitCliSetup } from '@/services/coderabbit-cli'
 import { useCommandCodeCliSetup } from '@/services/commandcode-cli'
+import { useGrokCliSetup } from '@/services/grok-cli'
 import { logger } from '@/lib/logger'
 import {
   SetupState,
@@ -49,6 +50,7 @@ interface CliSetupInterface {
     version: string,
     options?: { onSuccess?: () => void; onError?: (error: Error) => void }
   ) => void
+  checkManualVersion?: (version: string) => Promise<boolean>
   refetchStatus: () => void
 }
 
@@ -194,6 +196,25 @@ function PiCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
   )
 }
 
+export function GrokCliReinstallModal({ open, onOpenChange }: ModalProps) {
+  if (!open) return null
+  return (
+    <GrokCliReinstallModalContent open={open} onOpenChange={onOpenChange} />
+  )
+}
+
+function GrokCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
+  const setup = useGrokCliSetup()
+  return (
+    <CliReinstallModalUI
+      setup={setup}
+      cliType="grok"
+      open={open}
+      onOpenChange={onOpenChange}
+    />
+  )
+}
+
 export function CommandCodeCliReinstallModal({
   open,
   onOpenChange,
@@ -235,6 +256,7 @@ interface CliReinstallModalUIProps {
     | 'pi'
     | 'coderabbit'
     | 'commandcode'
+    | 'grok'
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -258,7 +280,9 @@ function CliReinstallModalUI({
               ? 'CodeRabbit CLI'
               : cliType === 'commandcode'
                 ? 'Command Code CLI'
-                : 'GitHub CLI'
+                : cliType === 'grok'
+                  ? 'Grok CLI'
+                  : 'GitHub CLI'
 
   // Store setup in ref for stable callback reference
   const setupRef = useRef(setup)
@@ -381,7 +405,9 @@ function CliReinstallModalUI({
                             ? 'secondary CodeRabbit code reviews'
                             : cliType === 'commandcode'
                               ? 'Command Code AI sessions'
-                              : 'GitHub integration'
+                              : cliType === 'grok'
+                                ? 'Grok AI sessions'
+                                : 'GitHub integration'
                   }.`}
           </DialogDescription>
         </DialogHeader>
@@ -418,6 +444,7 @@ function CliReinstallModalUI({
               currentVersion={isReinstall ? setup.status?.version : null}
               isLoading={setup.isVersionsLoading}
               onVersionChange={setSelectedVersion}
+              onCheckManualVersion={setup.checkManualVersion}
               onInstall={handleInstall}
             />
           )}

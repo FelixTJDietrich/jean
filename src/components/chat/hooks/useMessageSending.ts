@@ -14,7 +14,10 @@ import {
 import { skillQueryKeys } from '@/services/skills'
 import { buildMcpConfigJson } from '@/services/mcp'
 import { buildMessageWithRefs } from '@/components/chat/message-with-refs'
-import { DEFAULT_PARALLEL_EXECUTION_PROMPT } from '@/types/preferences'
+import {
+  DEFAULT_PARALLEL_EXECUTION_PROMPT,
+  type CliBackend,
+} from '@/types/preferences'
 import type {
   QueuedMessage,
   ExecutionMode,
@@ -40,9 +43,7 @@ interface UseMessageSendingParams {
   isCodexBackendRef: RefObject<boolean>
   mcpServersDataRef: RefObject<McpServerInfo[] | undefined>
   enabledMcpServersRef: RefObject<string[]>
-  selectedBackendRef: RefObject<
-    'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'commandcode'
-  >
+  selectedBackendRef: RefObject<CliBackend>
   preferences:
     | {
         custom_cli_profiles?: { name: string }[]
@@ -380,11 +381,26 @@ export function useMessageSending({
           queryClient.getQueryData<{ name: string }[]>(
             skillQueryKeys.cursorSkills()
           ) ?? []
+        const piSkills =
+          queryClient.getQueryData<{ name: string }[]>(
+            skillQueryKeys.piSkills()
+          ) ?? []
+        const commandcodeSkills =
+          queryClient.getQueryData<{ name: string }[]>(
+            skillQueryKeys.commandcodeSkills()
+          ) ?? []
+        const grokSkills =
+          queryClient.getQueryData<{ name: string }[]>(
+            skillQueryKeys.grokSkills()
+          ) ?? []
         const isSkill =
           claudeSkills.some(s => s.name === slashName) ||
           codexSkills.some(s => s.name === slashName) ||
           opencodeSkills.some(s => s.name === slashName) ||
-          cursorSkills.some(s => s.name === slashName)
+          cursorSkills.some(s => s.name === slashName) ||
+          piSkills.some(s => s.name === slashName) ||
+          commandcodeSkills.some(s => s.name === slashName) ||
+          grokSkills.some(s => s.name === slashName)
         if (!isSkill) {
           const claudeCommands =
             queryClient.getQueryData<{ name: string; path: string }[]>(
@@ -431,7 +447,8 @@ export function useMessageSending({
       const usesEffortLevel =
         useAdaptiveThinkingRef.current ||
         isCodexBackendRef.current ||
-        selectedBackend === 'pi'
+        selectedBackend === 'pi' ||
+        selectedBackend === 'grok'
       const queuedMessage: QueuedMessage = {
         id: generateId(),
         message,
@@ -477,10 +494,11 @@ export function useMessageSending({
             : backend === 'pi'
               ? (preferences?.pi_auto_steer_enabled ?? true)
               : (preferences?.codex_auto_steer_enabled ?? true)
+        const canSteerWithAttachments = backend === 'codex'
         if (
           (backend === 'codex' || backend === 'opencode' || backend === 'pi') &&
           autoSteerEnabled &&
-          !hasAttachments
+          (!hasAttachments || canSteerWithAttachments)
         ) {
           try {
             const steerMessage = buildMessageWithRefs(queuedMessage)
@@ -494,11 +512,20 @@ export function useMessageSending({
                 steerMessage
               )
             } else {
-              await steerCodexTurn(
-                activeWorktreeId,
-                activeSessionId,
-                steerMessage
-              )
+              if (hasAttachments) {
+                await steerCodexTurn(
+                  activeWorktreeId,
+                  activeSessionId,
+                  steerMessage,
+                  queuedMessage
+                )
+              } else {
+                await steerCodexTurn(
+                  activeWorktreeId,
+                  activeSessionId,
+                  steerMessage
+                )
+              }
             }
             console.log(
               `[Send] handleSubmit STEERED into running ${backend} turn`

@@ -17,6 +17,7 @@ use super::config::{
     resolve_cli_binary,
 };
 use crate::http_server::EmitExt;
+#[cfg(target_os = "macos")]
 use crate::platform::silent_command;
 use crate::ClaudeAccount;
 
@@ -157,7 +158,10 @@ pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatu
 
     // Try to get the version by running claude --version
     // Use the binary directly - shell wrapper causes PowerShell parsing issues on Windows
-    let version = match silent_command(&binary_path).arg("--version").output() {
+    let version = match crate::platform::cli_command(&binary_path.to_string_lossy(), None)
+        .arg("--version")
+        .output()
+    {
         Ok(output) => {
             if output.status.success() {
                 let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -382,6 +386,20 @@ async fn fetch_manifest(version: &str) -> Result<Manifest, String> {
         .json()
         .await
         .map_err(|e| format!("Failed to parse manifest: {e}"))
+}
+
+#[tauri::command]
+pub async fn check_claude_cli_version_exists(version: String) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    match fetch_manifest(version).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.contains("HTTP 404") => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Verify SHA256 checksum of downloaded data

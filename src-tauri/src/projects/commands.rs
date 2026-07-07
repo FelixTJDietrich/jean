@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
@@ -45,13 +46,17 @@ use super::types::{
     WorktreeDeletingEvent, WorktreeOrigin, WorktreePathExistsEvent,
     WorktreePermanentlyDeletedEvent, WorktreeSetupCompleteEvent, WorktreeUnarchivedEvent,
 };
-use crate::chat::types::LabelData;
+use crate::chat::types::{LabelData, Session, SessionMetadata, WorktreeSessions};
 use crate::coderabbit_cli::resolve_coderabbit_binary;
 use crate::codex_cli::resolve_cli_binary as resolve_codex_cli_binary;
 use crate::gh_cli::config::resolve_gh_binary;
 use crate::http_server::EmitExt;
 use crate::platform::silent_command;
 use crate::platform::wsl_aware_command;
+
+fn gh_command(gh: &Path, project_path: &str) -> std::process::Command {
+    crate::platform::resolved_cli_command(gh, Some(Path::new(project_path)))
+}
 
 static RELEASE_NOTES_PAREN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\(([^)]*)\)").expect("valid release notes parenthetical regex"));
@@ -96,6 +101,12 @@ const FAVICON_CANDIDATES: &[&str] = &[
     "assets/logo.png",
     ".idea/icon.svg",
 ];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkSessionToWorktreeResponse {
+    pub worktree: Worktree,
+    pub session: Session,
+}
 
 const ICON_SOURCE_FILES: &[&str] = &[
     "index.html",
@@ -241,6 +252,15 @@ pub fn generate_unique_suffix_name(
     }
 }
 
+fn generate_pr_worktree_name(pr_number: u32, head_ref_name: &str) -> String {
+    let sanitized_head = sanitize_folder_name(head_ref_name);
+    if sanitized_head.is_empty() {
+        format!("pr-{pr_number}")
+    } else {
+        format!("pr-{pr_number}-{sanitized_head}")
+    }
+}
+
 /// Get current Unix timestamp
 fn now() -> u64 {
     SystemTime::now()
@@ -283,6 +303,153 @@ fn take_review_process_pid(review_run_id: &str) -> Option<u32> {
         .unwrap()
         .remove(review_run_id)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewJobStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewJob {
+    pub id: String,
+    pub review_run_id: String,
+    pub worktree_id: String,
+    pub worktree_path: String,
+    pub session_id: Option<String>,
+    pub source: String,
+    pub status: ReviewJobStatus,
+    pub finding_count: Option<usize>,
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewJobStart {
+    pub id: String,
+    pub review_run_id: String,
+    pub worktree_id: String,
+    pub worktree_path: String,
+    pub session_id: Option<String>,
+    pub source: String,
+}
+
+#[derive(Default)]
+pub struct ReviewJobRegistry {
+    jobs: Mutex<HashMap<String, ReviewJob>>,
+}
+
+impl ReviewJobRegistry {
+    pub fn insert_running(&self, start: ReviewJobStart) -> ReviewJob {
+        let now = now();
+        let job = Self::build_running_job(start, now);
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(job.id.clone(), job.clone());
+        job
+    }
+
+    pub fn try_insert_running(&self, start: ReviewJobStart) -> Result<ReviewJob, String> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if jobs.values().any(|job| {
+            job.worktree_id == start.worktree_id && job.status == ReviewJobStatus::Running
+        }) {
+            return Err("A review is already running for this worktree".to_string());
+        }
+
+        let job = Self::build_running_job(start, now());
+        jobs.insert(job.id.clone(), job.clone());
+        Ok(job)
+    }
+
+    fn build_running_job(start: ReviewJobStart, now: u64) -> ReviewJob {
+        ReviewJob {
+            id: start.id,
+            review_run_id: start.review_run_id,
+            worktree_id: start.worktree_id,
+            worktree_path: start.worktree_path,
+            session_id: start.session_id,
+            source: start.source,
+            status: ReviewJobStatus::Running,
+            finding_count: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn get(&self, job_id: &str) -> Option<ReviewJob> {
+        self.jobs.lock().unwrap().get(job_id).cloned()
+    }
+
+    pub fn has_running_for_worktree(&self, worktree_id: &str) -> bool {
+        self.jobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|job| job.worktree_id == worktree_id && job.status == ReviewJobStatus::Running)
+    }
+
+    pub fn list(&self) -> Vec<ReviewJob> {
+        let mut jobs: Vec<_> = self.jobs.lock().unwrap().values().cloned().collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs
+    }
+
+    pub fn mark_completed(
+        &self,
+        job_id: &str,
+        session_id: String,
+        response: &ReviewResponse,
+    ) -> Option<ReviewJob> {
+        self.update(job_id, |job| {
+            job.status = ReviewJobStatus::Completed;
+            job.session_id = Some(session_id);
+            job.finding_count = Some(response.findings.len());
+            job.error = None;
+        })
+    }
+
+    pub fn mark_failed(&self, job_id: &str, error: String) -> Option<ReviewJob> {
+        self.update(job_id, |job| {
+            job.status = ReviewJobStatus::Failed;
+            job.error = Some(error);
+        })
+    }
+
+    pub fn mark_cancelled(&self, job_id: &str) -> Option<ReviewJob> {
+        self.update(job_id, |job| {
+            job.status = ReviewJobStatus::Cancelled;
+            job.error = Some("Review cancelled".to_string());
+        })
+    }
+
+    pub fn attach_session(&self, job_id: &str, session_id: String) -> Option<ReviewJob> {
+        self.update(job_id, |job| {
+            job.session_id = Some(session_id);
+        })
+    }
+
+    pub fn remove(&self, job_id: &str) -> Option<ReviewJob> {
+        self.jobs.lock().unwrap().remove(job_id)
+    }
+
+    fn update(&self, job_id: &str, update: impl FnOnce(&mut ReviewJob)) -> Option<ReviewJob> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let job = jobs.get_mut(job_id)?;
+        update(job);
+        job.updated_at = now();
+        Some(job.clone())
+    }
+}
+
+static REVIEW_JOB_REGISTRY: Lazy<ReviewJobRegistry> = Lazy::new(ReviewJobRegistry::default);
 
 /// List all projects
 /// Check if git global user identity is configured
@@ -890,12 +1057,20 @@ pub async fn get_worktree_diff(
     let (worktree, project_default_branch) =
         resolve_worktree_and_project_default(&app, &worktree_id)?;
     let base_branch = worktree.base_branch.unwrap_or(project_default_branch);
+    let has_head = git_has_head(&worktree.path);
     let mut args = match diff_type.as_str() {
-        "uncommitted" => vec![
-            "diff".to_string(),
-            "HEAD".to_string(),
-            "--unified=3".to_string(),
-        ],
+        "uncommitted" => {
+            let diff_base = if has_head {
+                "HEAD"
+            } else {
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            };
+            vec![
+                "diff".to_string(),
+                diff_base.to_string(),
+                "--unified=3".to_string(),
+            ]
+        }
         "branch" => vec![
             "diff".to_string(),
             "--unified=3".to_string(),
@@ -956,6 +1131,15 @@ fn git_output(repo_path: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn git_has_head(repo_path: &str) -> bool {
+    silent_command("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn parse_porcelain_files(porcelain: &str) -> Vec<(String, String)> {
     porcelain
         .lines()
@@ -991,6 +1175,217 @@ fn truncate_utf8(input: &str, max_bytes: usize) -> (String, bool) {
         ),
         true,
     )
+}
+
+fn run_git_with_input(repo_path: &Path, args: &[&str], input: &[u8]) -> Result<(), String> {
+    let mut child = silent_command("git")
+        .args(args)
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run git {}: {e}", args.join(" ")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .map_err(|e| format!("Failed to write to git {} stdin: {e}", args.join(" ")))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for git {}: {e}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("git {} failed: {stderr}", args.join(" ")))
+    }
+}
+
+fn git_output_bytes(repo_path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = silent_command("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {} failed: {stderr}", args.join(" ")));
+    }
+    Ok(output.stdout)
+}
+
+fn copy_untracked_files(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let output = git_output_bytes(
+        source_path,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    for raw_path in output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let relative = std::str::from_utf8(raw_path)
+            .map_err(|e| format!("Git returned a non-UTF8 untracked path: {e}"))?;
+        let source_file = source_path.join(relative);
+        if !source_file.is_file() {
+            continue;
+        }
+        let target_file = target_path.join(relative);
+        if let Some(parent) = target_file.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+        }
+        fs::copy(&source_file, &target_file).map_err(|e| {
+            format!(
+                "Failed to copy untracked file {} to {}: {e}",
+                source_file.display(),
+                target_file.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn copy_dirty_worktree_state(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let patch = git_output_bytes(source_path, &["diff", "--binary", "HEAD"])?;
+    if !patch.is_empty() {
+        run_git_with_input(
+            target_path,
+            &["apply", "--binary", "--whitespace=nowarn"],
+            &patch,
+        )?;
+    }
+    copy_untracked_files(source_path, target_path)
+}
+
+fn forked_session_name(source_name: &str) -> String {
+    let trimmed = source_name.trim();
+    if trimmed.is_empty() {
+        "Forked Session".to_string()
+    } else if trimmed.starts_with("Fork of ") {
+        trimmed.to_string()
+    } else {
+        format!("Fork of {trimmed}")
+    }
+}
+
+fn clear_session_runtime_state(session: &mut Session) {
+    session.claude_session_id = None;
+    session.codex_thread_id = None;
+    session.codex_goal = None;
+    session.opencode_session_id = None;
+    session.cursor_chat_id = None;
+    session.pi_session_id = None;
+    session.commandcode_session_id = None;
+    session.grok_session_id = None;
+    session.is_reviewing = false;
+    session.waiting_for_input = false;
+    session.waiting_for_input_type = None;
+    session.pending_permission_denials.clear();
+    session.pending_codex_permission_requests.clear();
+    session.pending_codex_command_approval_requests.clear();
+    session.pending_codex_user_input_requests.clear();
+    session.pending_codex_mcp_elicitation_requests.clear();
+    session.pending_codex_dynamic_tool_call_requests.clear();
+    session.denied_message_context = None;
+    session.queued_messages.clear();
+    session.scheduled_wakeup = None;
+    session.last_run_status = None;
+    session.last_run_execution_mode = None;
+    session.last_run_started_at = None;
+}
+
+fn prepare_forked_session(
+    source: &Session,
+    _new_worktree_id: &str,
+    order: u32,
+    created_at: u64,
+) -> Session {
+    let mut forked = source.clone();
+    forked.id = Uuid::new_v4().to_string();
+    forked.name = forked_session_name(&source.name);
+    forked.order = order;
+    forked.created_at = created_at;
+    forked.updated_at = created_at;
+    forked.last_opened_at = Some(created_at);
+    forked.archived_at = None;
+    forked.archived_by_base_close = None;
+    forked.session_naming_completed = false;
+    clear_session_runtime_state(&mut forked);
+    forked
+}
+
+fn prepare_forked_metadata(
+    source: Option<SessionMetadata>,
+    forked_session: &Session,
+    new_worktree_id: &str,
+) -> SessionMetadata {
+    let mut metadata = source.unwrap_or_else(|| {
+        SessionMetadata::new(
+            forked_session.id.clone(),
+            new_worktree_id.to_string(),
+            forked_session.name.clone(),
+            forked_session.order,
+        )
+    });
+    metadata.id = forked_session.id.clone();
+    metadata.worktree_id = new_worktree_id.to_string();
+    metadata.name = forked_session.name.clone();
+    metadata.order = forked_session.order;
+    metadata.created_at = forked_session.created_at;
+    metadata.claude_session_id = None;
+    metadata.codex_thread_id = None;
+    metadata.codex_goal = None;
+    metadata.opencode_session_id = None;
+    metadata.cursor_chat_id = None;
+    metadata.pi_session_id = None;
+    metadata.commandcode_session_id = None;
+    metadata.grok_session_id = None;
+    metadata.session_naming_completed = false;
+    metadata.archived_at = None;
+    metadata.archived_by_base_close = None;
+    metadata.pending_permission_denials.clear();
+    metadata.pending_codex_permission_requests.clear();
+    metadata.pending_codex_command_approval_requests.clear();
+    metadata.pending_codex_user_input_requests.clear();
+    metadata.pending_codex_mcp_elicitation_requests.clear();
+    metadata.pending_codex_dynamic_tool_call_requests.clear();
+    metadata.denied_message_context = None;
+    metadata.is_reviewing = false;
+    metadata.waiting_for_input = false;
+    metadata.waiting_for_input_type = None;
+    metadata.queued_messages.clear();
+    metadata.scheduled_wakeup = None;
+    metadata
+}
+
+fn copy_session_run_files(
+    app: &AppHandle,
+    source_session_id: &str,
+    target_session_id: &str,
+) -> Result<(), String> {
+    let source_dir = crate::chat::storage::get_session_dir(app, source_session_id)?;
+    if !source_dir.exists() {
+        return Ok(());
+    }
+    let target_dir = crate::chat::storage::get_session_dir(app, target_session_id)?;
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Failed to create forked session log directory: {e}"))?;
+    for entry in fs::read_dir(&source_dir)
+        .map_err(|e| format!("Failed to read source session log directory: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read source session log entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to read session log entry type: {e}"))?;
+        if file_type.is_file() {
+            fs::copy(entry.path(), target_dir.join(entry.file_name()))
+                .map_err(|e| format!("Failed to copy session log file: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Create a new worktree for a project (runs in background)
@@ -1048,7 +1443,7 @@ pub async fn create_worktree(
         // worktree:branch_exists / worktree:path_exists events (BranchConflictDialog).
         custom
     } else if let Some(ref ctx) = pr_context {
-        let pr_branch = ctx.head_ref_name.clone();
+        let pr_branch = generate_pr_worktree_name(ctx.number, &ctx.head_ref_name);
         // Check if this branch name already exists, if so, add a suffix
         if data.worktree_name_exists(&project_id, &pr_branch) {
             let mut counter = 2;
@@ -1346,6 +1741,7 @@ pub async fn create_worktree(
                     archived_worktree_id: archived_info.as_ref().map(|(id, _)| id.clone()),
                     archived_worktree_name: archived_info.map(|(_, name)| name),
                     issue_context: issue_context_clone.clone(),
+                    pr_context: pr_context_clone.clone(),
                     security_context: security_context_clone.clone(),
                     advisory_context: advisory_context_clone.clone(),
                     origin: worktree_origin_clone.clone(),
@@ -1920,6 +2316,196 @@ pub async fn create_worktree(
     Ok(pending_worktree)
 }
 
+/// Fork an existing Jean session into a new worktree and continue from there.
+///
+/// The new worktree is created at the source worktree's current HEAD. Dirty tracked changes
+/// are copied with a binary git patch, and untracked non-ignored files are copied directly.
+/// The Jean session metadata and run log files are copied, but backend-native resume IDs and
+/// pending runtime prompts are cleared so the next turn starts a fresh backend conversation in
+/// the forked working directory.
+#[tauri::command]
+pub async fn fork_session_to_worktree(
+    app: AppHandle,
+    source_worktree_id: String,
+    source_session_id: String,
+) -> Result<ForkSessionToWorktreeResponse, String> {
+    log::trace!(
+        "Forking session {source_session_id} from worktree {source_worktree_id} into a new worktree"
+    );
+
+    let mut data = load_projects_data(&app)?;
+    let source_worktree = data
+        .find_worktree(&source_worktree_id)
+        .cloned()
+        .ok_or_else(|| format!("Worktree not found: {source_worktree_id}"))?;
+    let project = data
+        .find_project(&source_worktree.project_id)
+        .cloned()
+        .ok_or_else(|| format!("Project not found: {}", source_worktree.project_id))?;
+
+    let source_sessions =
+        crate::chat::storage::load_sessions(&app, &source_worktree.path, &source_worktree_id)?;
+    let source_session = source_sessions
+        .find_session(&source_session_id)
+        .cloned()
+        .ok_or_else(|| format!("Session not found: {source_session_id}"))?;
+
+    let source_path = Path::new(&source_worktree.path);
+    if !source_path.exists() {
+        return Err(format!(
+            "Source worktree path does not exist: {}",
+            source_worktree.path
+        ));
+    }
+
+    let source_head = git_output(&source_worktree.path, &["rev-parse", "--verify", "HEAD"])?
+        .trim()
+        .to_string();
+    if source_head.is_empty() {
+        return Err("Cannot fork session: source worktree has no HEAD commit".to_string());
+    }
+
+    let base_name = {
+        let sanitized = sanitize_folder_name(&format!("fork-{}", source_worktree.name));
+        if sanitized == "fork-" {
+            "fork-session".to_string()
+        } else {
+            sanitized
+        }
+    };
+    let name = generate_unique_suffix_name(&base_name, &project.path, &project.id, Some(&data));
+
+    let project_worktrees_dir =
+        get_project_worktrees_dir(&project.name, project.worktrees_dir.as_deref())?;
+    allow_project_in_asset_scope(&app, &project.path);
+    if let Some(worktrees_dir) = project_worktrees_dir.to_str() {
+        allow_project_in_asset_scope(&app, worktrees_dir);
+    }
+    let worktree_path = project_worktrees_dir.join(sanitize_folder_name(&name));
+    if worktree_path.exists() {
+        return Err(format!(
+            "Cannot fork session: target worktree path already exists: {}",
+            worktree_path.display()
+        ));
+    }
+    let worktree_path_str = worktree_path
+        .to_str()
+        .ok_or_else(|| "Invalid fork worktree path".to_string())?
+        .to_string();
+
+    git::create_worktree(&project.path, &worktree_path_str, &name, &source_head)?;
+
+    let created_at = now();
+    let max_order = data
+        .worktrees
+        .iter()
+        .filter(|w| w.project_id == project.id)
+        .map(|w| w.order)
+        .max()
+        .unwrap_or(0);
+    let worktree_id = Uuid::new_v4().to_string();
+    let worktree = Worktree {
+        id: worktree_id.clone(),
+        project_id: project.id.clone(),
+        name: name.clone(),
+        path: worktree_path_str.clone(),
+        branch: name.clone(),
+        base_branch: source_worktree
+            .base_branch
+            .clone()
+            .or(Some(project.default_branch.clone())),
+        created_at,
+        setup_output: None,
+        setup_script: None,
+        setup_success: None,
+        session_type: SessionType::Worktree,
+        pr_number: source_worktree.pr_number,
+        pr_url: source_worktree.pr_url.clone(),
+        issue_number: source_worktree.issue_number,
+        linear_issue_identifier: source_worktree.linear_issue_identifier.clone(),
+        security_alert_number: source_worktree.security_alert_number,
+        security_alert_url: source_worktree.security_alert_url.clone(),
+        advisory_ghsa_id: source_worktree.advisory_ghsa_id.clone(),
+        advisory_url: source_worktree.advisory_url.clone(),
+        cached_pr_status: None,
+        cached_check_status: None,
+        cached_behind_count: None,
+        cached_ahead_count: None,
+        cached_status_at: None,
+        cached_uncommitted_added: None,
+        cached_uncommitted_removed: None,
+        cached_branch_diff_added: None,
+        cached_branch_diff_removed: None,
+        cached_base_branch_ahead_count: None,
+        cached_base_branch_behind_count: None,
+        cached_worktree_ahead_count: None,
+        cached_unpushed_count: None,
+        pr_push_remote: source_worktree.pr_push_remote.clone(),
+        pr_push_branch: source_worktree.pr_push_branch.clone(),
+        order: max_order + 1,
+        origin: Some(WorktreeOrigin::Manual),
+        archived_at: None,
+        labels: source_worktree.labels.clone(),
+        label: source_worktree.label.clone(),
+        last_opened_at: Some(created_at),
+    };
+
+    let result = (|| -> Result<ForkSessionToWorktreeResponse, String> {
+        copy_dirty_worktree_state(source_path, &worktree_path)?;
+
+        let mut forked_session =
+            prepare_forked_session(&source_session, &worktree_id, 0, created_at);
+        let source_metadata = crate::chat::storage::load_metadata(&app, &source_session_id)?;
+        copy_session_run_files(&app, &source_session_id, &forked_session.id)?;
+        let forked_metadata =
+            prepare_forked_metadata(source_metadata, &forked_session, &worktree_id);
+
+        let saved_session = crate::chat::storage::with_sessions_mut(
+            &app,
+            &worktree.path,
+            &worktree_id,
+            |sessions: &mut WorktreeSessions| {
+                sessions.sessions.clear();
+                sessions.sessions.push(forked_session.clone());
+                sessions.active_session_id = Some(forked_session.id.clone());
+                Ok(forked_session.clone())
+            },
+        )?;
+        crate::chat::storage::save_metadata(&app, &forked_metadata)?;
+        forked_session = saved_session;
+
+        data.add_worktree(worktree.clone());
+        save_projects_data(&app, &data)?;
+
+        let created_event = WorktreeCreatedEvent {
+            worktree: worktree.clone(),
+            auto_open_in_jean: false,
+        };
+        let _ = app.emit_all("worktree:created", &created_event);
+        let _ = app.emit_all(
+            "worktrees:changed",
+            &serde_json::json!({ "project_id": project.id }),
+        );
+        let _ = app.emit_all(
+            "cache:invalidate",
+            &serde_json::json!({ "keys": ["sessions", "projects"] }),
+        );
+
+        Ok(ForkSessionToWorktreeResponse {
+            worktree,
+            session: forked_session,
+        })
+    })();
+
+    if let Err(error) = result.as_ref() {
+        log::warn!("Fork session failed after git worktree creation; cleaning up {worktree_path_str}: {error}");
+        let _ = git::remove_worktree(&project.path, &worktree_path_str);
+        let _ = git::delete_branch(&project.path, &name);
+    }
+
+    result
+}
+
 fn parse_worktree_origin(origin: Option<&str>) -> Result<Option<WorktreeOrigin>, String> {
     match origin {
         Some("auto_fix") => Ok(Some(WorktreeOrigin::AutoFix)),
@@ -2103,6 +2689,7 @@ pub async fn create_worktree_from_existing_branch(
                     archived_worktree_id: archived_info.as_ref().map(|(id, _)| id.clone()),
                     archived_worktree_name: archived_info.map(|(_, name)| name),
                     issue_context: issue_context_clone.clone(),
+                    pr_context: pr_context_clone.clone(),
                     security_context: security_context_clone.clone(),
                     advisory_context: advisory_context_clone.clone(),
                     origin: None,
@@ -2532,8 +3119,10 @@ pub async fn checkout_pr(
     // Get valid base branch for creating the worktree
     let base_branch = git::get_valid_base_branch(&project.path, &project.default_branch)?;
 
-    // Generate worktree name from PR (for the directory/worktree name, not the branch)
-    let worktree_name = pr_detail.head_ref_name.clone();
+    // Generate worktree name from PR (for the directory/worktree name, not the branch).
+    // Fork PRs often use generic heads like "main"; scope by PR number to avoid
+    // producing ambiguous names like "main-2".
+    let worktree_name = generate_pr_worktree_name(pr_number, &pr_detail.head_ref_name);
     log::info!("[checkout_pr] Generated base worktree name: '{worktree_name}'");
 
     // Remove any archived worktree records for this PR from data so they don't
@@ -5369,7 +5958,7 @@ pub async fn link_worktree_pr(
     log::trace!("Linking PR #{pr_number} to worktree {worktree_id}");
 
     let gh = resolve_gh_binary(&app);
-    let output = silent_command(&gh)
+    let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "view",
@@ -5377,7 +5966,6 @@ pub async fn link_worktree_pr(
             "--json",
             "number,url,title",
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
@@ -5435,7 +6023,7 @@ pub async fn detect_open_pr_for_branch(
     let current_branch = git::get_current_branch(&worktree_path)?;
     let repo = get_repo_identifier(&worktree_path)?;
     let gh = resolve_gh_binary(&app);
-    let view_output = silent_command(&gh)
+    let view_output = gh_command(&gh, &worktree_path)
         .args([
             "api",
             "--method",
@@ -5448,7 +6036,6 @@ pub async fn detect_open_pr_for_branch(
             "-f",
             "per_page=1",
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh api: {e}"))?;
 
@@ -5492,9 +6079,8 @@ pub async fn detect_and_link_pr(
     log::trace!("Detecting PR for worktree {worktree_id} at {worktree_path}");
 
     let gh = resolve_gh_binary(&app);
-    let view_output = silent_command(&gh)
+    let view_output = gh_command(&gh, &worktree_path)
         .args(["pr", "view", "--json", "number,url,title"])
-        .current_dir(&worktree_path)
         .output();
 
     if let Ok(view_out) = view_output {
@@ -5583,7 +6169,7 @@ pub async fn trigger_coderabbit_pr_review(
     let gh = resolve_gh_binary(&app);
     let target_pr_number =
         pr_number.ok_or_else(|| "Open or link a PR in Jean first".to_string())?;
-    let output = silent_command(&gh)
+    let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "view",
@@ -5591,7 +6177,6 @@ pub async fn trigger_coderabbit_pr_review(
             "--json",
             "number,url",
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
@@ -5605,7 +6190,7 @@ pub async fn trigger_coderabbit_pr_review(
     let pr_url = view_json["url"].as_str().unwrap_or("").to_string();
 
     let comment_body = "@coderabbitai review".to_string();
-    let output = silent_command(&gh)
+    let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "comment",
@@ -5613,7 +6198,6 @@ pub async fn trigger_coderabbit_pr_review(
             "--body",
             &comment_body,
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh pr comment: {e}"))?;
 
@@ -6030,6 +6614,97 @@ fn extract_structured_output(output: &str) -> Result<String, String> {
     Err("No structured output found in Claude response".to_string())
 }
 
+fn extract_claude_stream_error(stdout: &str) -> Option<String> {
+    let mut assistant_text = String::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if parsed.get("type").and_then(|t| t.as_str()) == Some("result")
+            && parsed.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+        {
+            if parsed.get("subtype").and_then(|v| v.as_str()) == Some("error_max_turns") {
+                return Some("reached max turns before producing structured output".to_string());
+            }
+
+            if let Some(result) = parsed.get("result").and_then(|v| v.as_str()) {
+                let result = result.trim();
+                if !result.is_empty() {
+                    return Some(result.to_string());
+                }
+            }
+        }
+
+        if parsed.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+            if let Some(content) = parsed
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in content {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            assistant_text.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let assistant_text = assistant_text.trim();
+    let lower = assistant_text.to_lowercase();
+    let looks_like_error = lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("authenticate")
+        || lower.contains("unauthorized");
+
+    if assistant_text.is_empty() || !looks_like_error {
+        None
+    } else {
+        Some(assistant_text.to_string())
+    }
+}
+
+fn truncate_error_context(value: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 600;
+    let value = value.trim();
+    if value.chars().count() <= MAX_ERROR_CHARS {
+        value.to_string()
+    } else {
+        format!(
+            "{}…",
+            value.chars().take(MAX_ERROR_CHARS).collect::<String>()
+        )
+    }
+}
+
+fn format_claude_cli_failure(stderr: &str, stdout: &str) -> String {
+    if let Some(error) = extract_claude_stream_error(stdout) {
+        return format!("Claude CLI failed: {error}");
+    }
+
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return format!("Claude CLI failed: {}", truncate_error_context(stderr));
+    }
+
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        return format!("Claude CLI failed: {}", truncate_error_context(stdout));
+    }
+
+    "Claude CLI failed with no output".to_string()
+}
+
 /// Extract the first complete, balanced top-level JSON object from arbitrary
 /// text (PI/other CLIs may wrap JSON in prose). Brace-counts while respecting
 /// string literals and escapes, so braces inside strings don't break bounds.
@@ -6100,12 +6775,12 @@ fn build_claude_structured_output_args(model: &str, tools: &str, schema: &str) -
         "--no-session-persistence".to_string(),
         "--tools".to_string(),
         tools.to_string(),
+        "--tools".to_string(),
+        "default".to_string(),
         "--max-turns".to_string(),
-        "2".to_string(),
+        "3".to_string(),
         "--json-schema".to_string(),
         schema.to_string(),
-        "--permission-mode".to_string(),
-        "plan".to_string(),
     ]
 }
 
@@ -6404,9 +7079,8 @@ pub async fn create_pr_with_ai_content(
 
     // Check if a PR already exists for this branch before spending time/tokens on AI generation
     let gh = resolve_gh_binary(&app);
-    let view_output = silent_command(&gh)
+    let view_output = gh_command(&gh, &worktree_path)
         .args(["pr", "view", "--json", "number,url,title"])
-        .current_dir(&worktree_path)
         .output();
 
     if let Ok(view_out) = view_output {
@@ -6539,7 +7213,7 @@ pub async fn create_pr_with_ai_content(
 
     // Create the PR using gh CLI
     log::trace!("Creating PR with gh CLI");
-    let output = silent_command(&gh)
+    let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "create",
@@ -6550,7 +7224,6 @@ pub async fn create_pr_with_ai_content(
             "--body",
             &pr_content.body,
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
 
@@ -6558,9 +7231,8 @@ pub async fn create_pr_with_ai_content(
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("already exists") {
             // Try to look up the existing PR and link it to the worktree
-            let view_output = silent_command(&gh)
+            let view_output = gh_command(&gh, &worktree_path)
                 .args(["pr", "view", "--json", "number,url,title"])
-                .current_dir(&worktree_path)
                 .output();
 
             if let Ok(view_out) = view_output {
@@ -6625,9 +7297,99 @@ pub struct MergePrResponse {
     pub message: String,
 }
 
+/// Resolve a `gh pr merge` method flag the repository actually allows.
+///
+/// Returns `--squash`, `--merge`, or `--rebase`, preferring squash. Repositories
+/// often disable merge commits, so a hardcoded `--merge` would fail with exit
+/// code 1; this queries the repo settings and falls back to `--merge` when they
+/// can't be read.
+fn resolve_repo_merge_flag(gh: &std::path::Path, worktree_path: &str) -> &'static str {
+    let output = gh_command(gh, worktree_path)
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            if let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                return resolve_merge_flag_from_repo_settings(&settings);
+            }
+        }
+    }
+
+    "--merge"
+}
+
+fn resolve_merge_flag_from_repo_settings(settings: &serde_json::Value) -> &'static str {
+    if settings["squashMergeAllowed"].as_bool().unwrap_or(false) {
+        return "--squash";
+    }
+    if settings["mergeCommitAllowed"].as_bool().unwrap_or(false) {
+        return "--merge";
+    }
+    if settings["rebaseMergeAllowed"].as_bool().unwrap_or(false) {
+        return "--rebase";
+    }
+
+    "--merge"
+}
+
+#[cfg(test)]
+mod merge_pr_tests {
+    use super::*;
+
+    #[test]
+    fn selects_squash_when_allowed() {
+        let settings = serde_json::json!({
+            "squashMergeAllowed": true,
+            "mergeCommitAllowed": true,
+            "rebaseMergeAllowed": true
+        });
+
+        assert_eq!(resolve_merge_flag_from_repo_settings(&settings), "--squash");
+    }
+
+    #[test]
+    fn selects_merge_when_squash_is_disabled() {
+        let settings = serde_json::json!({
+            "squashMergeAllowed": false,
+            "mergeCommitAllowed": true,
+            "rebaseMergeAllowed": true
+        });
+
+        assert_eq!(resolve_merge_flag_from_repo_settings(&settings), "--merge");
+    }
+
+    #[test]
+    fn selects_rebase_when_only_rebase_is_allowed() {
+        let settings = serde_json::json!({
+            "squashMergeAllowed": false,
+            "mergeCommitAllowed": false,
+            "rebaseMergeAllowed": true
+        });
+
+        assert_eq!(resolve_merge_flag_from_repo_settings(&settings), "--rebase");
+    }
+
+    #[test]
+    fn falls_back_to_merge_for_missing_or_malformed_settings() {
+        let settings = serde_json::json!({
+            "squashMergeAllowed": "yes",
+            "rebaseMergeAllowed": null
+        });
+
+        assert_eq!(resolve_merge_flag_from_repo_settings(&settings), "--merge");
+    }
+}
+
 /// Merge the open GitHub PR for the current branch using `gh pr merge`.
 ///
-/// Checks mergeability first via `gh pr view`, then merges with `--merge --delete-branch`.
+/// Checks mergeability first via `gh pr view`, then merges with the merge method
+/// the repository allows (squash > merge commit > rebase, preferring squash).
 #[tauri::command]
 pub async fn merge_github_pr(
     app: AppHandle,
@@ -6636,14 +7398,13 @@ pub async fn merge_github_pr(
     let gh = resolve_gh_binary(&app);
 
     // 1. Check PR status and mergeability
-    let view_output = silent_command(&gh)
+    let view_output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "view",
             "--json",
             "number,state,mergeable,mergeStateStatus,url,title",
         ])
-        .current_dir(&worktree_path)
         .output()
         .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
@@ -6673,10 +7434,13 @@ pub async fn merge_github_pr(
 
     let title = pr_info["title"].as_str().unwrap_or("").to_string();
 
-    // 2. Merge the PR
-    let merge_output = silent_command(&gh)
-        .args(["pr", "merge", "--merge"])
-        .current_dir(&worktree_path)
+    // 2. Merge the PR using a method the repository actually allows. A
+    //    hardcoded `--merge` fails with exit code 1 on repos that disable merge
+    //    commits (e.g. squash-only repos like Planexpo), so resolve the method
+    //    from the repo settings first (preferring squash).
+    let merge_flag = resolve_repo_merge_flag(&gh, &worktree_path);
+    let merge_output = gh_command(&gh, &worktree_path)
+        .args(["pr", "merge", merge_flag])
         .output()
         .map_err(|e| format!("Failed to run gh pr merge: {e}"))?;
 
@@ -6808,10 +7572,29 @@ fn generate_pr_content_from_inputs(
         return Ok(response);
     }
 
+    if backend == crate::chat::types::Backend::Grok {
+        log::trace!("Generating PR content with Grok");
+        let json_str = crate::chat::grok::execute_one_shot_grok(
+            app,
+            &prompt,
+            model_str,
+            Some(std::path::Path::new(repo_path)),
+            reasoning_effort,
+        )?;
+        let json_str = extract_json_object_from_text(&json_str)?;
+        let mut response: PrContentResponse = serde_json::from_str(&json_str).map_err(|e| {
+            log::error!("Failed to parse Grok PR content JSON: {e}, content: {json_str}");
+            format!("Failed to parse PR content: {e}")
+        })?;
+        response.body = augment_pr_references_in_body(&response.body, related_pr_issue_refs);
+        return Ok(response);
+    }
+
     log::trace!("Generating PR content with Claude CLI (JSON schema)");
 
     let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
+    crate::chat::claude::apply_custom_profile_env(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
         "",
@@ -6853,11 +7636,7 @@ fn generate_pr_content_from_inputs(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Claude CLI failed: stderr={}, stdout={}",
-            stderr.trim(),
-            stdout.trim()
-        ));
+        return Err(format_claude_cli_failure(&stderr, &stdout));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6879,7 +7658,7 @@ fn generate_pr_content_from_inputs(
 // =============================================================================
 
 /// JSON schema for structured commit message generation
-const COMMIT_MESSAGE_SCHEMA: &str = r#"{"type":"object","properties":{"message":{"type":"string","description":"Commit message using Conventional Commits format. First line: type(scope): description (max 72 chars). Types: feat, fix, docs, style, refactor, perf, test, chore. Followed by blank line and optional body explaining what and why."}},"required":["message"],"additionalProperties":false}"#;
+const COMMIT_MESSAGE_SCHEMA: &str = r#"{"type":"object","properties":{"message":{"type":"string","description":"Commit message using Conventional Commits format. First line: type(scope): description (max 72 chars). Types: feat, fix, docs, style, refactor, perf, test, chore, ci. Followed by blank line and optional body explaining what and why."}},"required":["message"],"additionalProperties":false}"#;
 
 /// Prompt template for commit message generation
 const COMMIT_MESSAGE_PROMPT: &str = r#"Generate a conventional commit message for these staged changes.
@@ -6938,7 +7717,7 @@ fn validate_commit_message(message: &str, _diff_stat: &str, _status: &str) -> Re
     }
 
     static CONVENTIONAL_COMMIT_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^(feat|fix|docs|style|refactor|perf|test|chore)(\([a-z0-9._-]+\))?!?: .+")
+        Regex::new(r"^[a-z][a-z0-9-]*(\([a-z0-9._-]+\))?!?: .+")
             .expect("valid conventional commit regex")
     });
     if !CONVENTIONAL_COMMIT_RE.is_match(subject) {
@@ -7323,13 +8102,36 @@ fn generate_commit_message(
                 magic_backend,
                 reasoning_effort,
             )?;
-            validate_commit_message(&retry_response.message, prompt, prompt).map_err(|reason| {
-                format!(
-                    "AI generated invalid commit message twice. Last rejection: {reason}. Message: {}",
-                    commit_message_subject(&retry_response.message)
-                )
-            })?;
-            Ok(retry_response)
+            match validate_commit_message(&retry_response.message, prompt, prompt) {
+                Ok(()) => Ok(retry_response),
+                Err(second_reason) => {
+                    // Never block the commit on validation — keep whatever the
+                    // model produced and commit it anyway.
+                    log::warn!(
+                        "Commit message still invalid after retry ({second_reason}); committing it anyway: {}",
+                        commit_message_subject(&retry_response.message)
+                    );
+                    Ok(pick_fallback_commit_message(response, retry_response))
+                }
+            }
+        }
+    }
+}
+
+/// Choose a usable commit message when validation failed but we still want to
+/// commit. Never fails — prefers the most recent non-empty message and only
+/// synthesizes a default if both attempts have an empty subject.
+fn pick_fallback_commit_message(
+    first: CommitMessageResponse,
+    retry: CommitMessageResponse,
+) -> CommitMessageResponse {
+    if !commit_message_subject(&retry.message).is_empty() {
+        retry
+    } else if !commit_message_subject(&first.message).is_empty() {
+        first
+    } else {
+        CommitMessageResponse {
+            message: "chore: commit staged changes".to_string(),
         }
     }
 }
@@ -7409,10 +8211,27 @@ fn generate_commit_message_once(
         });
     }
 
+    if backend == crate::chat::types::Backend::Grok {
+        log::trace!("Generating commit message with Grok");
+        let json_str = crate::chat::grok::execute_one_shot_grok(
+            app,
+            prompt,
+            model_str,
+            working_dir,
+            reasoning_effort,
+        )?;
+        let json_str = extract_json_object_from_text(&json_str)?;
+        return serde_json::from_str(&json_str).map_err(|e| {
+            log::error!("Failed to parse Grok commit message JSON: {e}, content: {json_str}");
+            format!("Failed to parse commit message: {e}")
+        });
+    }
+
     log::trace!("Generating commit message with Claude CLI (JSON schema)");
 
     let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
+    crate::chat::claude::apply_custom_profile_env(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
         "",
@@ -7447,11 +8266,7 @@ fn generate_commit_message_once(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Claude CLI failed: stderr={}, stdout={}",
-            stderr.trim(),
-            stdout.trim()
-        ));
+        return Err(format_claude_cli_failure(&stderr, &stdout));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -7788,16 +8603,13 @@ fn execute_codex_review(
         working_dir
     );
 
-    let mut cmd = crate::platform::silent_command(&cli_path);
+    let mut cmd = crate::platform::cli_command(&cli_path.to_string_lossy(), working_dir);
     cmd.args(build_codex_review_args(
         actual_model,
         is_fast,
         &schema_file,
         working_dir,
     ));
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -7925,10 +8737,27 @@ fn generate_review(
         });
     }
 
+    if backend == crate::chat::types::Backend::Grok {
+        log::trace!("Running code review with Grok");
+        let json_str = crate::chat::grok::execute_one_shot_grok(
+            app,
+            prompt,
+            model_str,
+            working_dir,
+            reasoning_effort,
+        )?;
+        let json_str = extract_json_object_from_text(&json_str)?;
+        return serde_json::from_str(&json_str).map_err(|e| {
+            log::error!("Failed to parse Grok review JSON: {e}, content: {json_str}");
+            format!("Failed to parse review: {e}")
+        });
+    }
+
     log::trace!("Running code review with Claude CLI (JSON schema)");
 
     let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
+    crate::chat::claude::apply_custom_profile_env(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
         "none",
@@ -7979,11 +8808,7 @@ fn generate_review(
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Claude CLI failed: stderr={}, stdout={}",
-            stderr.trim(),
-            stdout.trim()
-        ));
+        return Err(format_claude_cli_failure(&stderr, &stdout));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8161,6 +8986,227 @@ pub async fn run_review_with_ai(
     );
 
     Ok(response)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartReviewJobResponse {
+    pub job: ReviewJob,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn start_review_job(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    source: String,
+    custom_prompt: Option<String>,
+    model: Option<String>,
+    custom_profile_name: Option<String>,
+    review_run_id: Option<String>,
+    reasoning_effort: Option<String>,
+    review_type: Option<String>,
+) -> Result<StartReviewJobResponse, String> {
+    let review_run_id = review_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let job_id = Uuid::new_v4().to_string();
+    REVIEW_JOB_REGISTRY.try_insert_running(ReviewJobStart {
+        id: job_id.clone(),
+        review_run_id: review_run_id.clone(),
+        worktree_id: worktree_id.clone(),
+        worktree_path: worktree_path.clone(),
+        session_id: None,
+        source: source.clone(),
+    })?;
+
+    let session = crate::chat::create_session(
+        app.clone(),
+        worktree_id.clone(),
+        worktree_path.clone(),
+        Some("Code Review".to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .inspect_err(|_| {
+        REVIEW_JOB_REGISTRY.remove(&job_id);
+    })?;
+
+    if let Err(error) = update_review_session_state(
+        app.clone(),
+        worktree_id.clone(),
+        worktree_path.clone(),
+        session.id.clone(),
+        Some(true),
+        None,
+    )
+    .await
+    {
+        REVIEW_JOB_REGISTRY.remove(&job_id);
+        return Err(error);
+    }
+
+    let job = REVIEW_JOB_REGISTRY
+        .attach_session(&job_id, session.id.clone())
+        .ok_or_else(|| "Review job reservation disappeared".to_string())?;
+    emit_review_job_update(&app, &job);
+
+    let task_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let review_app = task_app.clone();
+        let review_worktree_path = worktree_path.clone();
+        let review_source = source.clone();
+        let review_run_id_for_task = review_run_id.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            tauri::async_runtime::block_on(async move {
+                if review_source == "coderabbit-cli" {
+                    run_coderabbit_review(
+                        review_app,
+                        review_worktree_path,
+                        Some(review_run_id_for_task),
+                        review_type,
+                    )
+                    .await
+                } else {
+                    run_review_with_ai(
+                        review_app,
+                        review_worktree_path,
+                        custom_prompt,
+                        model,
+                        custom_profile_name,
+                        Some(review_run_id_for_task),
+                        reasoning_effort,
+                    )
+                    .await
+                }
+            })
+        })
+        .await
+        .map_err(|e| format!("Review task failed: {e}"))
+        .and_then(|result| result);
+
+        match result {
+            Ok(response) => {
+                let review_results = serde_json::to_value(&response).ok();
+                let _ = update_review_session_state(
+                    task_app.clone(),
+                    worktree_id.clone(),
+                    worktree_path.clone(),
+                    session.id.clone(),
+                    Some(false),
+                    review_results.map(Some),
+                )
+                .await;
+                if let Some(job) =
+                    REVIEW_JOB_REGISTRY.mark_completed(&job_id, session.id, &response)
+                {
+                    emit_review_job_update(&task_app, &job);
+                }
+            }
+            Err(error) => {
+                let cancelled = error.to_lowercase().contains("cancelled")
+                    || error.to_lowercase().contains("canceled");
+                let _ = update_review_session_state(
+                    task_app.clone(),
+                    worktree_id.clone(),
+                    worktree_path.clone(),
+                    session.id.clone(),
+                    Some(false),
+                    None,
+                )
+                .await;
+                let updated = if cancelled {
+                    REVIEW_JOB_REGISTRY.mark_cancelled(&job_id)
+                } else {
+                    REVIEW_JOB_REGISTRY.mark_failed(&job_id, error)
+                };
+                if let Some(job) = updated {
+                    emit_review_job_update(&task_app, &job);
+                }
+            }
+        }
+    });
+
+    Ok(StartReviewJobResponse { job })
+}
+
+#[tauri::command]
+pub async fn get_review_job(job_id: String) -> Result<Option<ReviewJob>, String> {
+    Ok(REVIEW_JOB_REGISTRY.get(&job_id))
+}
+
+#[tauri::command]
+pub async fn list_review_jobs(worktree_id: Option<String>) -> Result<Vec<ReviewJob>, String> {
+    let jobs = REVIEW_JOB_REGISTRY
+        .list()
+        .into_iter()
+        .filter(|job| {
+            worktree_id
+                .as_ref()
+                .map(|id| job.worktree_id == *id)
+                .unwrap_or(true)
+        })
+        .collect();
+    Ok(jobs)
+}
+
+#[tauri::command]
+pub async fn cancel_review_job(job_id: String) -> Result<bool, String> {
+    let Some(job) = REVIEW_JOB_REGISTRY.get(&job_id) else {
+        return Ok(false);
+    };
+    let cancelled = cancel_review_with_ai(job.review_run_id.clone()).await?;
+    if cancelled {
+        REVIEW_JOB_REGISTRY.mark_cancelled(&job_id);
+    }
+    Ok(cancelled)
+}
+
+fn emit_review_job_update(app: &AppHandle, job: &ReviewJob) {
+    let _ = app.emit("review-job:updated", job);
+}
+
+async fn update_review_session_state(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    is_reviewing: Option<bool>,
+    review_results: Option<Option<serde_json::Value>>,
+) -> Result<(), String> {
+    crate::chat::update_session_state(
+        app,
+        worktree_id,
+        worktree_path,
+        session_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        is_reviewing,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        review_results,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 fn map_coderabbit_severity(severity: &str) -> String {
@@ -8425,7 +9471,10 @@ pub async fn run_coderabbit_review(
         return Err("CodeRabbit CLI not installed".to_string());
     }
 
-    let mut cmd = silent_command(&binary_path);
+    let mut cmd = crate::platform::cli_command(
+        &binary_path.to_string_lossy(),
+        Some(std::path::Path::new(&worktree_path)),
+    );
     cmd.args(["review", "--agent", "--dir", &worktree_path]);
     if let Some(review_type) = review_type
         .as_deref()
@@ -8433,9 +9482,7 @@ pub async fn run_coderabbit_review(
     {
         cmd.args(["--type", review_type]);
     }
-    cmd.current_dir(&worktree_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let child = cmd
         .spawn()
@@ -8786,7 +9833,7 @@ pub async fn list_github_releases(
     log::trace!("Listing GitHub releases for: {project_path}");
 
     let gh = resolve_gh_binary(&app);
-    let output = silent_command(&gh)
+    let output = gh_command(&gh, &project_path)
         .args([
             "release",
             "list",
@@ -8795,7 +9842,6 @@ pub async fn list_github_releases(
             "--limit",
             "30",
         ])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("Failed to run gh CLI: {e}"))?;
 
@@ -9015,10 +10061,30 @@ fn generate_release_notes_content(
         return Ok(response);
     }
 
+    if backend == crate::chat::types::Backend::Grok {
+        log::trace!("Generating release notes with Grok");
+        let json_str = crate::chat::grok::execute_one_shot_grok(
+            app,
+            &prompt,
+            model_str,
+            Some(std::path::Path::new(project_path)),
+            reasoning_effort,
+        )?;
+        let json_str = extract_json_object_from_text(&json_str)?;
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str).map_err(|e| {
+            log::error!("Failed to parse Grok release notes JSON: {e}, content: {json_str}");
+            format!("Failed to parse release notes: {e}")
+        })?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
+    }
+
     log::trace!("Generating release notes with Claude CLI (JSON schema)");
 
     let mut cmd = crate::claude_cli::spawn_claude_command(app)?;
     crate::chat::claude::apply_custom_profile_settings(&mut cmd, custom_profile_name);
+    crate::chat::claude::apply_custom_profile_env(&mut cmd, custom_profile_name);
     cmd.args(build_claude_structured_output_args(
         model_str,
         "",
@@ -9053,11 +10119,7 @@ fn generate_release_notes_content(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Claude CLI failed: stderr={}, stdout={}",
-            stderr.trim(),
-            stdout.trim()
-        ));
+        return Err(format_claude_cli_failure(&stderr, &stdout));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -10762,6 +11824,10 @@ pub async fn list_codex_skills() -> Result<Vec<ClaudeSkill>, String> {
 
     if let Some(home) = get_home_dir() {
         collect_skills_from_dir(&home.join(".codex").join("skills"), &mut skills_map);
+        collect_skills_from_dir(
+            &jean_global_backend_skills_dir(&home, "codex"),
+            &mut skills_map,
+        );
     }
 
     let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
@@ -10779,6 +11845,10 @@ pub async fn list_opencode_skills() -> Result<Vec<ClaudeSkill>, String> {
 
     if let Some(home) = get_home_dir() {
         collect_skills_from_dir(&opencode_config_dir(&home).join("skills"), &mut skills_map);
+        collect_skills_from_dir(
+            &jean_global_backend_skills_dir(&home, "opencode"),
+            &mut skills_map,
+        );
     }
 
     let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
@@ -10796,12 +11866,53 @@ pub async fn list_cursor_skills() -> Result<Vec<ClaudeSkill>, String> {
 
     if let Some(home) = get_home_dir() {
         collect_skills_from_dir(&home.join(".cursor").join("skills-cursor"), &mut skills_map);
+        collect_skills_from_dir(
+            &jean_global_backend_skills_dir(&home, "cursor"),
+            &mut skills_map,
+        );
     }
 
     let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     log::trace!("Found {} Cursor skills", skills.len());
     Ok(skills)
+}
+
+/// List Jean-global Pi skills.
+#[tauri::command]
+pub async fn list_pi_skills() -> Result<Vec<ClaudeSkill>, String> {
+    list_jean_global_backend_skills("pi").await
+}
+
+/// List Jean-global Command Code skills.
+#[tauri::command]
+pub async fn list_commandcode_skills() -> Result<Vec<ClaudeSkill>, String> {
+    list_jean_global_backend_skills("commandcode").await
+}
+
+/// List Jean-global Grok skills.
+#[tauri::command]
+pub async fn list_grok_skills() -> Result<Vec<ClaudeSkill>, String> {
+    list_jean_global_backend_skills("grok").await
+}
+
+async fn list_jean_global_backend_skills(backend: &str) -> Result<Vec<ClaudeSkill>, String> {
+    let mut skills_map = std::collections::HashMap::new();
+
+    if let Some(home) = get_home_dir() {
+        collect_skills_from_dir(
+            &jean_global_backend_skills_dir(&home, backend),
+            &mut skills_map,
+        );
+    }
+
+    let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+fn jean_global_backend_skills_dir(home: &std::path::Path, backend: &str) -> std::path::PathBuf {
+    home.join(".jean").join("skills").join(backend)
 }
 
 fn opencode_config_dir(home: &std::path::Path) -> std::path::PathBuf {
@@ -11203,6 +12314,22 @@ pub async fn revert_last_local_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::types::Backend;
+    use std::path::Path;
+
+    fn run_test_git(repo: &Path, args: &[&str]) {
+        let output = silent_command("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parse_worktree_origin_preserves_manual_origin() {
@@ -11271,6 +12398,125 @@ mod tests {
     }
 
     #[test]
+    fn review_job_registry_starts_with_session_and_records_completion() {
+        let registry = ReviewJobRegistry::default();
+        let job = registry.insert_running(ReviewJobStart {
+            id: "job-1".to_string(),
+            review_run_id: "run-1".to_string(),
+            worktree_id: "wt-1".to_string(),
+            worktree_path: "/tmp/wt".to_string(),
+            session_id: Some("session-1".to_string()),
+            source: "ai".to_string(),
+        });
+
+        assert_eq!(job.status, ReviewJobStatus::Running);
+        assert_eq!(
+            registry.get("job-1").unwrap().session_id.as_deref(),
+            Some("session-1")
+        );
+
+        let response = ReviewResponse {
+            summary: "ok".to_string(),
+            findings: vec![],
+            approval_status: "approved".to_string(),
+        };
+        let completed = registry
+            .mark_completed("job-1", "session-1".to_string(), &response)
+            .unwrap();
+
+        assert_eq!(completed.status, ReviewJobStatus::Completed);
+        assert_eq!(completed.session_id.as_deref(), Some("session-1"));
+        assert_eq!(completed.finding_count, Some(0));
+        assert!(completed.error.is_none());
+    }
+
+    #[test]
+    fn review_job_registry_records_cancelled_state() {
+        let registry = ReviewJobRegistry::default();
+        registry.insert_running(ReviewJobStart {
+            id: "job-2".to_string(),
+            review_run_id: "run-2".to_string(),
+            worktree_id: "wt-1".to_string(),
+            worktree_path: "/tmp/wt".to_string(),
+            session_id: Some("session-1".to_string()),
+            source: "coderabbit-cli".to_string(),
+        });
+
+        let cancelled = registry.mark_cancelled("job-2").unwrap();
+
+        assert_eq!(cancelled.status, ReviewJobStatus::Cancelled);
+        assert_eq!(cancelled.error.as_deref(), Some("Review cancelled"));
+    }
+
+    #[test]
+    fn review_job_registry_detects_running_job_for_worktree() {
+        let registry = ReviewJobRegistry::default();
+        registry.insert_running(ReviewJobStart {
+            id: "job-3".to_string(),
+            review_run_id: "run-3".to_string(),
+            worktree_id: "wt-1".to_string(),
+            worktree_path: "/tmp/wt".to_string(),
+            session_id: Some("session-1".to_string()),
+            source: "ai".to_string(),
+        });
+
+        assert!(registry.has_running_for_worktree("wt-1"));
+        assert!(!registry.has_running_for_worktree("wt-2"));
+    }
+
+    #[test]
+    fn review_job_registry_try_insert_running_reserves_worktree_atomically() {
+        let registry = ReviewJobRegistry::default();
+        let first = registry
+            .try_insert_running(ReviewJobStart {
+                id: "job-4".to_string(),
+                review_run_id: "run-4".to_string(),
+                worktree_id: "wt-1".to_string(),
+                worktree_path: "/tmp/wt".to_string(),
+                session_id: None,
+                source: "ai".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(first.status, ReviewJobStatus::Running);
+        assert!(first.session_id.is_none());
+        assert!(registry
+            .try_insert_running(ReviewJobStart {
+                id: "job-5".to_string(),
+                review_run_id: "run-5".to_string(),
+                worktree_id: "wt-1".to_string(),
+                worktree_path: "/tmp/wt".to_string(),
+                session_id: None,
+                source: "ai".to_string(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn review_job_registry_can_attach_session_or_remove_reservation() {
+        let registry = ReviewJobRegistry::default();
+        registry
+            .try_insert_running(ReviewJobStart {
+                id: "job-6".to_string(),
+                review_run_id: "run-6".to_string(),
+                worktree_id: "wt-1".to_string(),
+                worktree_path: "/tmp/wt".to_string(),
+                session_id: None,
+                source: "ai".to_string(),
+            })
+            .unwrap();
+
+        let updated = registry
+            .attach_session("job-6", "session-6".to_string())
+            .unwrap();
+        assert_eq!(updated.session_id.as_deref(), Some("session-6"));
+
+        registry.remove("job-6");
+        assert!(registry.get("job-6").is_none());
+        assert!(!registry.has_running_for_worktree("wt-1"));
+    }
+
+    #[test]
     fn test_sanitize_folder_name() {
         assert_eq!(sanitize_folder_name("simple"), "simple");
         assert_eq!(sanitize_folder_name("feat/worktree-1"), "feat_worktree-1");
@@ -11282,6 +12528,19 @@ mod tests {
         assert_eq!(sanitize_folder_name("café"), "café");
         assert_eq!(sanitize_folder_name("a b\tc"), "a_b_c");
         assert_eq!(sanitize_folder_name("back\\slash"), "back_slash");
+    }
+
+    #[test]
+    fn pr_worktree_name_is_scoped_by_pr_number_for_generic_heads() {
+        assert_eq!(generate_pr_worktree_name(396, "main"), "pr-396-main");
+    }
+
+    #[test]
+    fn pr_worktree_name_sanitizes_slash_separated_heads() {
+        assert_eq!(
+            generate_pr_worktree_name(397, "feature/notifications"),
+            "pr-397-feature_notifications"
+        );
     }
 
     #[test]
@@ -11524,6 +12783,35 @@ Body
     }
 
     #[test]
+    fn format_claude_cli_failure_extracts_stream_json_auth_error() {
+        let stdout = r#"{"type":"system","subtype":"hook_response","output":"startup hook"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Failed to authenticate. API Error: 401 Invalid authentication credentials"}]},"error":"authentication_failed"}
+{"type":"result","is_error":true,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials"}"#;
+
+        let result = format_claude_cli_failure("", stdout);
+
+        assert_eq!(
+            result,
+            "Claude CLI failed: Failed to authenticate. API Error: 401 Invalid authentication credentials"
+        );
+        assert!(!result.contains("hook_response"));
+    }
+
+    #[test]
+    fn format_claude_cli_failure_does_not_report_max_turns_summary_as_error() {
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at the diff: two main features — WebSocket reconnect sends minimal payload."}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Looking at the diff: two main features — WebSocket reconnect sends minimal payload."}"#;
+
+        let result = format_claude_cli_failure("", stdout);
+
+        assert_eq!(
+            result,
+            "Claude CLI failed: reached max turns before producing structured output"
+        );
+        assert!(!result.contains("Looking at the diff"));
+    }
+
+    #[test]
     fn validate_commit_message_rejects_commit_guidance_meta_subject() {
         let result = validate_commit_message(
             "chore: inspect commit message guidance",
@@ -11594,6 +12882,54 @@ Body
     }
 
     #[test]
+    fn validate_commit_message_accepts_non_default_conventional_types() {
+        let ci_result = validate_commit_message(
+            "ci(nightly): drop macOS amd64 build artifacts",
+            ".github/workflows/release.yml | 10 ++++------",
+            "M  .github/workflows/release.yml",
+        );
+        assert!(ci_result.is_ok());
+
+        let build_result = validate_commit_message(
+            "build(release): assert package version before publishing",
+            "scripts/assert-release-version.js | 20 ++++++++++++++++++++",
+            "A  scripts/assert-release-version.js",
+        );
+        assert!(build_result.is_ok());
+    }
+
+    #[test]
+    fn pick_fallback_prefers_retry_then_first_then_default() {
+        let first = CommitMessageResponse {
+            message: "fix: first".into(),
+        };
+        let retry = CommitMessageResponse {
+            message: "ci(nightly): retry".into(),
+        };
+        assert_eq!(
+            pick_fallback_commit_message(first, retry).message,
+            "ci(nightly): retry"
+        );
+
+        let first = CommitMessageResponse {
+            message: "fix: first".into(),
+        };
+        let empty = CommitMessageResponse { message: "".into() };
+        assert_eq!(
+            pick_fallback_commit_message(first, empty).message,
+            "fix: first"
+        );
+
+        let empty1 = CommitMessageResponse { message: "".into() };
+        let empty2 = CommitMessageResponse {
+            message: "   ".into(),
+        };
+        assert!(pick_fallback_commit_message(empty1, empty2)
+            .message
+            .starts_with("chore:"));
+    }
+
+    #[test]
     fn build_commit_retry_prompt_includes_rejection_reason_and_original_context() {
         let retry_prompt = build_commit_retry_prompt(
             "Generate a conventional commit message.\nDiff:\n+new behavior",
@@ -11606,16 +12942,95 @@ Body
     }
 
     #[test]
-    fn test_build_claude_structured_output_args_uses_two_turns_and_plan_mode() {
+    fn test_build_claude_structured_output_args_includes_default_tools_without_plan_mode() {
         let args = build_claude_structured_output_args("sonnet", "none", REVIEW_SCHEMA);
 
-        assert!(args.windows(2).any(|w| w == ["--max-turns", "2"]));
-        assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+        assert!(args.windows(2).any(|w| w == ["--max-turns", "3"]));
+        assert!(!args.iter().any(|arg| arg == "--permission-mode"));
         assert!(args.windows(2).any(|w| w == ["--tools", "none"]));
+        assert!(args.windows(2).any(|w| w == ["--tools", "default"]));
         assert!(args.windows(2).any(|w| w == ["--model", "sonnet"]));
         assert!(args
             .windows(2)
             .any(|w| w == ["--json-schema", REVIEW_SCHEMA]));
+    }
+
+    #[test]
+    fn prepare_forked_session_clears_backend_resume_ids_and_runtime_state() {
+        let mut source = Session::new("Build auth".to_string(), 3, Backend::Codex);
+        source.claude_session_id = Some("claude-1".to_string());
+        source.codex_thread_id = Some("codex-1".to_string());
+        source.codex_goal = Some("ship the feature".to_string());
+        source.opencode_session_id = Some("opencode-1".to_string());
+        source.cursor_chat_id = Some("cursor-1".to_string());
+        source.pi_session_id = Some("pi-1".to_string());
+        source.commandcode_session_id = Some("command-1".to_string());
+        source.grok_session_id = Some("grok-1".to_string());
+        source.waiting_for_input = true;
+        source.is_reviewing = true;
+
+        let forked = prepare_forked_session(&source, "new-worktree", 0, 1234);
+
+        assert_ne!(forked.id, source.id);
+        assert_eq!(forked.name, "Fork of Build auth");
+        assert_eq!(forked.order, 0);
+        assert_eq!(forked.created_at, 1234);
+        assert_eq!(forked.updated_at, 1234);
+        assert_eq!(forked.backend, Backend::Codex);
+        assert_eq!(forked.claude_session_id, None);
+        assert_eq!(forked.codex_thread_id, None);
+        assert_eq!(forked.codex_goal, None);
+        assert_eq!(forked.opencode_session_id, None);
+        assert_eq!(forked.cursor_chat_id, None);
+        assert_eq!(forked.pi_session_id, None);
+        assert_eq!(forked.commandcode_session_id, None);
+        assert_eq!(forked.grok_session_id, None);
+        assert!(!forked.waiting_for_input);
+        assert!(!forked.is_reviewing);
+        assert!(forked.pending_codex_permission_requests.is_empty());
+        assert!(forked.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn copy_dirty_worktree_state_copies_tracked_changes_and_untracked_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let fork = temp.path().join("fork");
+        std::fs::create_dir(&repo).expect("repo dir");
+        run_test_git(&repo, &["init", "-b", "main"]);
+        run_test_git(&repo, &["config", "core.autocrlf", "false"]);
+        run_test_git(&repo, &["config", "core.eol", "lf"]);
+        run_test_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_test_git(&repo, &["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("tracked.txt"), "before\n").expect("write tracked");
+        run_test_git(&repo, &["add", "."]);
+        run_test_git(&repo, &["commit", "-m", "initial"]);
+        run_test_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fork",
+                fork.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        std::fs::write(repo.join("tracked.txt"), "after\n").expect("modify tracked");
+        std::fs::create_dir_all(repo.join("notes")).expect("notes dir");
+        std::fs::write(repo.join("notes/untracked.md"), "scratch\n").expect("write untracked");
+
+        copy_dirty_worktree_state(&repo, &fork).expect("copy dirty state");
+
+        assert_eq!(
+            std::fs::read_to_string(fork.join("tracked.txt")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fork.join("notes/untracked.md")).unwrap(),
+            "scratch\n"
+        );
     }
 
     #[test]

@@ -19,6 +19,14 @@ export type ModalTerminalDockMode = 'floating' | 'left' | 'right' | 'bottom'
 
 export type ModalBrowserDockMode = 'floating' | 'left' | 'right' | 'bottom'
 
+export interface PersistedTerminalInstance {
+  id: string
+  command: string | null
+  command_args?: string[] | null
+  label: string
+  kind?: 'panel' | 'session'
+}
+
 export interface BrowserTabPersisted {
   id: string
   url: string
@@ -50,6 +58,20 @@ export interface UIState {
   modal_terminal_width?: number
   /** Modal terminal height in pixels for bottom dock */
   modal_terminal_height?: number
+  /** Terminal instances persisted per worktree for web refresh reconnect */
+  terminal_instances?: Record<string, PersistedTerminalInstance[]>
+  /** Active terminal id per worktree */
+  terminal_active_ids?: Record<string, string>
+  /** Terminal panel open state per worktree */
+  terminal_panel_open?: Record<string, boolean>
+  /** Global terminal panel expanded/collapsed state */
+  terminal_visible?: boolean
+  /** Terminal panel height percentage */
+  terminal_height?: number
+  /** Session terminal id per session for full-screen terminal surfaces */
+  session_terminal_ids?: Record<string, string>
+  /** Session primary surface per session */
+  session_primary_surface?: Record<string, 'chat' | 'terminal'>
   /** Browser tabs persisted per worktree */
   browser_tabs?: Record<string, BrowserTabPersisted[]>
   /** Active browser tab id per worktree */
@@ -76,6 +98,8 @@ export interface UIState {
   dashboard_worktree_collapse_overrides?: Record<string, boolean>
   /** Project canvas settings per project */
   project_canvas_settings?: Record<string, ProjectCanvasSettingsState>
+  /** Favorited projects shown first in the GitHub Dashboard */
+  github_dashboard_favorite_project_ids?: string[]
   /** Last opened worktree+session per project: projectId → { worktree_id, session_id } */
   last_opened_per_project?: Record<
     string,
@@ -99,6 +123,13 @@ export const defaultUIState: UIState = {
   modal_terminal_width: 400,
   modal_terminal_height: 280,
   modal_terminal_pinned: false,
+  terminal_instances: {},
+  terminal_active_ids: {},
+  terminal_panel_open: {},
+  terminal_visible: false,
+  terminal_height: 30,
+  session_terminal_ids: {},
+  session_primary_surface: {},
   browser_tabs: {},
   browser_active_tab_ids: {},
   browser_side_pane_open: {},
@@ -109,5 +140,6 @@ export const defaultUIState: UIState = {
   browser_modal_height: 400,
   browser_bottom_panel_open: {},
   browser_bottom_panel_height: 360,
+  github_dashboard_favorite_project_ids: [],
   version: 1,
 }

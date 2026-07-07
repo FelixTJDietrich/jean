@@ -340,7 +340,10 @@ pub async fn check_commandcode_cli_installed(
             path: None,
         });
     }
-    let version = match silent_command(&binary_path).arg("--version").output() {
+    let version = match crate::platform::cli_command(&binary_path.to_string_lossy(), None)
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => parse_version(&output.stdout),
         Ok(output) => {
             log::warn!(
@@ -379,7 +382,8 @@ pub async fn check_commandcode_cli_auth(app: AppHandle) -> Result<CommandCodeAut
     ] {
         let output = match run_command_with_timeout(
             {
-                let mut command = silent_command(&binary_path);
+                let mut command =
+                    crate::platform::cli_command(&binary_path.to_string_lossy(), None);
                 command.args(args);
                 command
             },
@@ -452,7 +456,7 @@ pub async fn detect_commandcode_in_path(
         });
     };
 
-    let version = silent_command(&found_path)
+    let version = crate::platform::cli_command(&found_path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .ok()
@@ -481,7 +485,7 @@ pub async fn list_commandcode_models(app: AppHandle) -> Result<Vec<CommandCodeMo
     }
     let output = run_command_with_timeout(
         {
-            let mut command = silent_command(&binary_path);
+            let mut command = crate::platform::cli_command(&binary_path.to_string_lossy(), None);
             command.arg("--list-models");
             command
         },
@@ -641,6 +645,41 @@ pub async fn get_available_commandcode_versions(
     }
 }
 
+#[tauri::command]
+pub async fn check_commandcode_cli_version_exists(
+    _app: AppHandle,
+    version: String,
+) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Jean-App/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create npm registry client: {e}"))?;
+    let response = client
+        .get(COMMANDCODE_NPM_REGISTRY_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch Command Code npm metadata: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "npm registry returned status: {}",
+            response.status()
+        ));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse npm metadata: {e}"))?;
+    Ok(value
+        .get("versions")
+        .and_then(|versions| versions.as_object())
+        .is_some_and(|versions| versions.contains_key(version)))
+}
+
 fn commandcode_package(version: Option<&str>) -> String {
     match version.map(str::trim).filter(|v| !v.is_empty()) {
         Some("latest") | None => "command-code@latest".to_string(),
@@ -698,7 +737,7 @@ pub async fn install_commandcode_cli(
         ));
     }
 
-    let verify = silent_command(&binary_path)
+    let verify = crate::platform::cli_command(&binary_path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .map_err(|e| format!("Failed to verify Command Code CLI: {e}"))?;

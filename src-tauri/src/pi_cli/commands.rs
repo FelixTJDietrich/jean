@@ -203,7 +203,7 @@ pub async fn check_pi_cli_installed(app: AppHandle) -> Result<PiCliStatus, Strin
             path: None,
         });
     }
-    let version = silent_command(&path)
+    let version = crate::platform::cli_command(&path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .ok()
@@ -226,7 +226,7 @@ pub async fn detect_pi_in_path(_app: AppHandle) -> Result<PiPathDetection, Strin
             package_manager: None,
         });
     };
-    let version = silent_command(&path)
+    let version = crate::platform::cli_command(&path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .ok()
@@ -263,7 +263,9 @@ pub async fn list_pi_models(app: AppHandle) -> Result<Vec<PiModelInfo>, String> 
     if !path.exists() {
         return Ok(default_pi_models());
     }
-    let output = silent_command(&path).arg("--list-models").output();
+    let output = crate::platform::cli_command(&path.to_string_lossy(), None)
+        .arg("--list-models")
+        .output();
     let Ok(output) = output else {
         return Ok(default_pi_models());
     };
@@ -327,6 +329,32 @@ pub async fn get_available_pi_versions(_app: AppHandle) -> Result<Vec<PiReleaseI
         .unwrap_or_default();
     versions.sort_by_key(|release| std::cmp::Reverse(semver_parts(&release.version)));
     Ok(versions)
+}
+
+#[tauri::command]
+pub async fn check_pi_cli_version_exists(_app: AppHandle, version: String) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    let url = "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent";
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build PI HTTP client: {e}"))?;
+    let value: serde_json::Value = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch PI versions: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse PI version response: {e}"))?;
+    Ok(value
+        .get("versions")
+        .and_then(|v| v.as_object())
+        .is_some_and(|versions| versions.contains_key(version)))
 }
 
 #[tauri::command]

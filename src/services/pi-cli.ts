@@ -204,6 +204,9 @@ export function usePiCliSetup() {
     })
   }
 
+  const checkManualVersion = (version: string) =>
+    invoke<boolean>('check_pi_cli_version_exists', { version })
+
   return {
     status: status.data,
     isStatusLoading: status.isLoading,
@@ -216,6 +219,7 @@ export function usePiCliSetup() {
     installError: installMutation.error,
     progress: null,
     install,
+    checkManualVersion,
     refetchStatus: status.refetch,
   }
 }

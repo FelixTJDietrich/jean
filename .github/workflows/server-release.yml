@@ -1,0 +1,222 @@
+name: Server Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version/tag for manual runs (for example v0.1.60)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-server
+
+jobs:
+  metadata:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.version }}
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG="manual-${GITHUB_SHA::7}"
+          fi
+
+          VERSION="${RELEASE_TAG#v}"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building Jean server artifacts for $RELEASE_TAG"
+
+  build-binaries:
+    name: Build server binary (${{ matrix.arch }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+            asset: jean-server-linux-amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+            asset: jean-server-linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./src-server -> target
+          shared-key: server-${{ matrix.arch }}
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend bundle
+        run: bun run build
+
+      - name: Build jean-server
+        run: cd src-server && cargo build --release
+
+      - name: Package binary
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p artifacts
+          cp src-server/target/release/jean-server "artifacts/${ASSET}"
+          tar -C artifacts -czf "artifacts/${ASSET}-${VERSION}.tar.gz" "${ASSET}"
+          shasum -a 256 "artifacts/${ASSET}-${VERSION}.tar.gz" > "artifacts/${ASSET}-${VERSION}.tar.gz.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jean-server-linux-${{ matrix.arch }}
+          path: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" artifacts/*.tar.gz artifacts/*.sha256 --clobber
+
+  docker-image:
+    name: Build Docker image (${{ matrix.arch }})
+    needs: [metadata, build-binaries]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+            platform: linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: jean-server-linux-${{ matrix.arch }}
+          path: artifacts
+
+      - name: Prepare Docker context
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p docker-context
+          tar -xzf "artifacts/jean-server-linux-${ARCH}-${VERSION}.tar.gz" -C docker-context
+          mv "docker-context/jean-server-linux-${ARCH}" docker-context/jean-server
+          chmod +x docker-context/jean-server
+          cp scripts/docker-entrypoint.sh docker-context/docker-entrypoint.sh
+          cp Dockerfile.server-runtime docker-context/Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest-${{ matrix.arch }},enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ needs.metadata.outputs.tag }}-${{ matrix.arch }}
+            type=sha,prefix=sha-,suffix=-${{ matrix.arch }}
+
+      - name: Build and push architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-context
+          file: docker-context/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  docker-manifest:
+    name: Publish multi-arch Docker manifest
+    needs: [metadata, docker-image]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          create_manifest() {
+            local tag="$1"
+            docker buildx imagetools create \
+              -t "${IMAGE}:${tag}" \
+              "${IMAGE}:${tag}-amd64" \
+              "${IMAGE}:${tag}-arm64"
+          }
+
+          create_manifest "$RELEASE_TAG"
+          create_manifest "sha-${GITHUB_SHA::7}"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            create_manifest "latest"
+          fi

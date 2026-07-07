@@ -5,6 +5,7 @@ use tauri::AppHandle;
 
 use super::config::{ensure_cli_dir, get_cli_binary_path, get_cli_dir, resolve_cli_binary};
 use crate::http_server::EmitExt;
+#[cfg(target_os = "macos")]
 use crate::platform::silent_command;
 
 /// GitHub owner/repo for OpenCode releases.
@@ -52,6 +53,13 @@ struct GitHubRelease {
     tag_name: String,
     published_at: Option<String>,
     prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
 }
 
 /// Platform-specific asset info for download.
@@ -205,7 +213,10 @@ pub async fn check_opencode_cli_installed(app: AppHandle) -> Result<OpenCodeCliS
         });
     }
 
-    let version = match silent_command(&binary_path).arg("--version").output() {
+    let version = match crate::platform::cli_command(&binary_path.to_string_lossy(), None)
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => {
             let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let cleaned = version_str
@@ -526,6 +537,46 @@ pub async fn get_available_opencode_versions(
             Ok(load_opencode_versions_cache(&app).unwrap_or_else(fallback_opencode_versions))
         }
     }
+}
+
+#[tauri::command]
+pub async fn check_opencode_cli_version_exists(version: String) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    let platform_asset = if crate::platform::get_wsl_config().enabled {
+        let wsl = crate::platform::get_wsl_config();
+        wsl_opencode_platform_asset(&wsl.distro)?
+    } else {
+        get_platform_asset()?
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "https://api.github.com/repos/{GITHUB_REPO}/releases/tags/v{version}"
+        ))
+        .header("User-Agent", "jean-desktop")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to check OpenCode version: {e}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        return Err(format!("GitHub API returned status: {}", response.status()));
+    }
+
+    let release: GitHubRelease = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse OpenCode release: {e}"))?;
+    Ok(release
+        .assets
+        .iter()
+        .any(|asset| asset.name == platform_asset.asset_name))
 }
 
 /// Fetch OpenCode versions directly from the GitHub API (no fallback).
@@ -869,7 +920,7 @@ mod tests {
 
     #[test]
     fn parses_model_lines_from_plain_output() {
-        let output = "\u{1b}[1mModels cache refreshed\u{1b}[0m\nopencode/gpt-5.3-codex\nanthropic/claude-sonnet-4-6\nopenrouter/anthropic/claude-3.5-haiku:free\n";
+        let output = "\u{1b}[1mModels cache refreshed\u{1b}[0m\nopencode/gpt-5.5\nanthropic/claude-sonnet-4-6\nopenrouter/anthropic/claude-3.5-haiku:free\n";
 
         let models = parse_opencode_models_output(output);
 
@@ -877,7 +928,7 @@ mod tests {
             models,
             vec![
                 "anthropic/claude-sonnet-4-6".to_string(),
-                "opencode/gpt-5.3-codex".to_string(),
+                "opencode/gpt-5.5".to_string(),
                 "openrouter/anthropic/claude-3.5-haiku:free".to_string(),
             ]
         );
@@ -886,7 +937,7 @@ mod tests {
     #[test]
     fn ignores_verbose_json_metadata_and_deduplicates_models() {
         let output = r#"
-opencode/gpt-5.3-codex
+opencode/gpt-5.5
 {
   "id": "gpt-5.3-codex",
   "name": "GPT-5.3 Codex",
@@ -895,7 +946,7 @@ opencode/gpt-5.3-codex
   },
   "url": "https://opencode.ai/zen/v1"
 }
-opencode/gpt-5.3-codex
+opencode/gpt-5.5
 moonshotai/kimi-k2.5
 "#;
 
@@ -905,7 +956,7 @@ moonshotai/kimi-k2.5
             models,
             vec![
                 "moonshotai/kimi-k2.5".to_string(),
-                "opencode/gpt-5.3-codex".to_string(),
+                "opencode/gpt-5.5".to_string(),
             ]
         );
     }

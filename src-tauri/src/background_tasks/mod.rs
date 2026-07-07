@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -59,10 +59,6 @@ pub const DEFAULT_REMOTE_POLL_INTERVAL: u64 = 60;
 /// Default sweep polling interval in seconds (5 minutes)
 pub const DEFAULT_SWEEP_POLL_INTERVAL: u64 = 300;
 
-/// Default git sweep polling interval in seconds (60 seconds)
-/// This controls how often non-active worktrees get their git status polled (round-robin).
-pub const DEFAULT_GIT_SWEEP_INTERVAL: u64 = 60;
-
 /// Default usage polling interval in seconds (5 minutes)
 /// This refreshes Claude/Codex usage caches on the backend.
 pub const DEFAULT_USAGE_POLL_INTERVAL: u64 = 300;
@@ -79,6 +75,46 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn poll_interval_elapsed(now: u64, last: Option<u64>, interval_secs: u64) -> bool {
+    match last {
+        Some(last) => now.saturating_sub(last) >= interval_secs,
+        None => true,
+    }
+}
+
+fn git_sweep_interval_secs(configured_poll_interval_secs: u64) -> u64 {
+    configured_poll_interval_secs.max(DEFAULT_POLL_INTERVAL)
+}
+
+type WakeSignal = Arc<(Mutex<()>, Condvar)>;
+
+fn background_loop_wait_secs(configured_poll_interval_secs: u64) -> u64 {
+    configured_poll_interval_secs.clamp(1, DEFAULT_WAKEUP_POLL_INTERVAL)
+}
+
+fn should_poll_local(
+    now: u64,
+    last: Option<u64>,
+    is_immediate: bool,
+    configured_interval_secs: u64,
+) -> bool {
+    is_immediate || poll_interval_elapsed(now, last, configured_interval_secs)
+}
+
+fn wait_for_wake_signal(wake_signal: &WakeSignal, duration: Duration) {
+    let (lock, cvar) = &**wake_signal;
+    let guard = lock.lock().unwrap();
+    match cvar.wait_timeout(guard, duration) {
+        Ok((_guard, _timeout)) => {}
+        Err(_poisoned) => {}
+    }
+}
+
+fn notify_wake_signal(wake_signal: &WakeSignal) {
+    let (_, cvar) = &**wake_signal;
+    cvar.notify_all();
 }
 
 fn dev_usage_poll_override_enabled() -> bool {
@@ -104,7 +140,7 @@ fn usage_polling_enabled() -> bool {
 /// for the active worktree when the application is focused.
 ///
 /// Polling is split into local (git commands) and remote (API calls) categories:
-/// - Local polls run on focus changes with a short debounce (10s)
+/// - Local polls run on the configured git interval, with a short focus debounce (10s)
 /// - Remote polls run on a separate, longer interval (default 60s)
 pub struct BackgroundTaskManager {
     app: AppHandle,
@@ -143,6 +179,8 @@ pub struct BackgroundTaskManager {
     last_cleanup_poll_time: Arc<AtomicU64>,
     /// Timestamp of last wakeup scheduler tick
     last_wakeup_poll_time: Arc<AtomicU64>,
+    /// Wakes the polling loop when state changes instead of sleeping in 1s chunks.
+    wake_signal: WakeSignal,
 }
 
 impl BackgroundTaskManager {
@@ -174,6 +212,7 @@ impl BackgroundTaskManager {
             // Initialize to 0 so the first tick fires promptly after startup,
             // allowing any wakeups that expired while the app was closed to run.
             last_wakeup_poll_time: Arc::new(AtomicU64::new(0)),
+            wake_signal: Arc::new((Mutex::new(()), Condvar::new())),
         }
     }
 
@@ -208,6 +247,7 @@ impl BackgroundTaskManager {
         let usage_poll_in_flight = Arc::clone(&self.usage_poll_in_flight);
         let last_cleanup_poll_time = Arc::clone(&self.last_cleanup_poll_time);
         let last_wakeup_poll_time = Arc::clone(&self.last_wakeup_poll_time);
+        let wake_signal = Arc::clone(&self.wake_signal);
         let usage_poll_enabled = usage_polling_enabled();
 
         thread::spawn(move || {
@@ -316,7 +356,10 @@ impl BackgroundTaskManager {
 
                 // Only poll when app is focused
                 if !is_focused.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_secs(1));
+                    wait_for_wake_signal(
+                        &wake_signal,
+                        Duration::from_secs(DEFAULT_WAKEUP_POLL_INTERVAL),
+                    );
                     continue;
                 }
 
@@ -343,19 +386,19 @@ impl BackgroundTaskManager {
                         .unwrap_or(0);
 
                     // ================================================================
-                    // Local polling (git commands - fast, short debounce)
+                    // Local polling (git commands - configured interval, immediate on state changes)
                     // ================================================================
                     let last_local = {
                         let times = last_local_poll_times.lock().unwrap();
-                        times.get(&info.worktree_id).copied().unwrap_or(0)
+                        times.get(&info.worktree_id).copied()
                     };
-                    let time_since_local = now.saturating_sub(last_local);
                     let is_immediate_local = immediate_poll.swap(false, Ordering::Relaxed);
+                    let local_interval = poll_interval_secs.load(Ordering::Relaxed);
 
-                    let should_poll_local =
-                        is_immediate_local || time_since_local >= MIN_LOCAL_POLL_DEBOUNCE;
+                    let should_poll_local_now =
+                        should_poll_local(now, last_local, is_immediate_local, local_interval);
 
-                    if should_poll_local {
+                    if should_poll_local_now {
                         {
                             let mut times = last_local_poll_times.lock().unwrap();
                             times.insert(info.worktree_id.clone(), now);
@@ -390,21 +433,19 @@ impl BackgroundTaskManager {
                     if let (Some(pr_number), Some(pr_url)) = (&info.pr_number, &info.pr_url) {
                         let last_remote = {
                             let times = last_remote_poll_times.lock().unwrap();
-                            times.get(&info.worktree_id).copied().unwrap_or(0)
+                            times.get(&info.worktree_id).copied()
                         };
-                        let time_since_remote = now.saturating_sub(last_remote);
                         let remote_interval = remote_poll_interval_secs.load(Ordering::Relaxed);
                         let is_immediate_remote =
                             immediate_remote_poll.swap(false, Ordering::Relaxed);
 
-                        let should_poll_remote =
-                            is_immediate_remote || time_since_remote >= remote_interval;
+                        let should_poll_remote = is_immediate_remote
+                            || poll_interval_elapsed(now, last_remote, remote_interval);
 
                         log::trace!(
-                            "Remote poll check: should_poll={}, is_immediate={}, time_since={}s, interval={}s",
+                            "Remote poll check: should_poll={}, is_immediate={}, interval={}s",
                             should_poll_remote,
                             is_immediate_remote,
-                            time_since_remote,
                             remote_interval
                         );
 
@@ -453,9 +494,8 @@ impl BackgroundTaskManager {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let last_sweep = last_sweep_poll_time.load(Ordering::Relaxed);
-                    let time_since_sweep = now.saturating_sub(last_sweep);
 
-                    if time_since_sweep >= DEFAULT_SWEEP_POLL_INTERVAL {
+                    if poll_interval_elapsed(now, Some(last_sweep), DEFAULT_SWEEP_POLL_INTERVAL) {
                         let worktrees = pr_worktrees.lock().unwrap().clone();
 
                         // Filter out the currently active worktree (already polled above)
@@ -513,9 +553,10 @@ impl BackgroundTaskManager {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let last_git_sweep = last_git_sweep_time.load(Ordering::Relaxed);
-                    let time_since_git_sweep = now.saturating_sub(last_git_sweep);
+                    let git_sweep_interval =
+                        git_sweep_interval_secs(poll_interval_secs.load(Ordering::Relaxed));
 
-                    if time_since_git_sweep >= DEFAULT_GIT_SWEEP_INTERVAL {
+                    if poll_interval_elapsed(now, Some(last_git_sweep), git_sweep_interval) {
                         let worktrees = all_worktrees.lock().unwrap().clone();
 
                         // Filter out the currently active worktree (already polled above)
@@ -553,20 +594,18 @@ impl BackgroundTaskManager {
                     }
                 }
 
-                // Wait for a short interval before next check
-                // Use 1-second sleep intervals to respond to shutdown/focus/immediate changes quickly
-                let interval = poll_interval_secs.load(Ordering::Relaxed);
-                for _ in 0..interval {
-                    // Break early if shutdown, unfocused, or immediate poll requested
-                    if shutdown.load(Ordering::Relaxed)
-                        || !is_focused.load(Ordering::Relaxed)
-                        || immediate_poll.load(Ordering::Relaxed)
-                        || immediate_remote_poll.load(Ordering::Relaxed)
-                    {
-                        break;
-                    }
-                    thread::sleep(Duration::from_secs(1));
+                // Wait until the next scheduler tick, or wake immediately on state changes.
+                if shutdown.load(Ordering::Relaxed)
+                    || !is_focused.load(Ordering::Relaxed)
+                    || immediate_poll.load(Ordering::Relaxed)
+                    || immediate_remote_poll.load(Ordering::Relaxed)
+                {
+                    continue;
                 }
+
+                let wait_secs =
+                    background_loop_wait_secs(poll_interval_secs.load(Ordering::Relaxed));
+                wait_for_wake_signal(&wake_signal, Duration::from_secs(wait_secs));
             }
         });
     }
@@ -576,6 +615,7 @@ impl BackgroundTaskManager {
     pub fn stop(&self) {
         log::trace!("Signaling background task manager to stop");
         self.shutdown.store(true, Ordering::Relaxed);
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Set whether the application is focused
@@ -598,27 +638,40 @@ impl BackgroundTaskManager {
 
                 let last_poll = {
                     let times = self.last_local_poll_times.lock().unwrap();
-                    times.get(&info.worktree_id).copied().unwrap_or(0)
+                    times.get(&info.worktree_id).copied()
                 };
-                let time_since = now.saturating_sub(last_poll);
+                let should_poll_local =
+                    poll_interval_elapsed(now, last_poll, MIN_LOCAL_POLL_DEBOUNCE);
 
                 log::trace!(
-                    "App gained focus: worktree={}, last_poll={}s ago, debounce={}s",
+                    "App gained focus: worktree={}, should_poll_local={}, debounce={}s",
                     info.worktree_id,
-                    time_since,
+                    should_poll_local,
                     MIN_LOCAL_POLL_DEBOUNCE
                 );
 
-                // Always trigger immediate local and remote poll on focus regain
-                // Branch changes and PR status updates happen while the app is unfocused
-                self.immediate_poll.store(true, Ordering::Relaxed);
-                self.immediate_remote_poll.store(true, Ordering::Relaxed);
+                if should_poll_local {
+                    self.immediate_poll.store(true, Ordering::Relaxed);
+                }
+
+                if info.pr_number.is_some() && info.pr_url.is_some() {
+                    let last_remote_poll = {
+                        let times = self.last_remote_poll_times.lock().unwrap();
+                        times.get(&info.worktree_id).copied()
+                    };
+                    let remote_interval = self.remote_poll_interval_secs.load(Ordering::Relaxed);
+                    if poll_interval_elapsed(now, last_remote_poll, remote_interval) {
+                        self.immediate_remote_poll.store(true, Ordering::Relaxed);
+                    }
+                }
             } else {
                 log::trace!("App gained focus: no active worktree");
             }
         } else if !focused && was_focused {
             log::trace!("App lost focus: polling paused");
         }
+
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Set the active worktree for polling
@@ -640,6 +693,8 @@ impl BackgroundTaskManager {
         if should_poll_immediately {
             self.immediate_poll.store(true, Ordering::Relaxed);
         }
+
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Set the local polling interval in seconds
@@ -649,6 +704,7 @@ impl BackgroundTaskManager {
         let clamped = seconds.clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
         log::trace!("Setting local git poll interval to {clamped} seconds");
         self.poll_interval_secs.store(clamped, Ordering::Relaxed);
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Get the current local polling interval in seconds
@@ -665,6 +721,7 @@ impl BackgroundTaskManager {
         log::trace!("Setting remote poll interval to {clamped} seconds");
         self.remote_poll_interval_secs
             .store(clamped, Ordering::Relaxed);
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Get the current remote polling interval in seconds
@@ -679,6 +736,7 @@ impl BackgroundTaskManager {
     pub fn trigger_immediate_poll(&self) {
         log::trace!("Triggering immediate local git poll");
         self.immediate_poll.store(true, Ordering::Relaxed);
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Set all worktrees with open PRs for sweep polling.
@@ -687,21 +745,28 @@ impl BackgroundTaskManager {
     /// to detect PR merges even when the worktree isn't actively selected.
     pub fn set_pr_worktrees(&self, worktrees: Vec<ActiveWorktreeInfo>) {
         log::trace!("Setting {} PR worktrees for sweep polling", worktrees.len());
-        let mut guard = self.pr_worktrees.lock().unwrap();
-        *guard = worktrees;
+        {
+            let mut guard = self.pr_worktrees.lock().unwrap();
+            *guard = worktrees;
+        }
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Set all worktrees for git status sweep polling.
     ///
-    /// The sweep polls these worktrees round-robin at a slow interval (60s)
-    /// to keep uncommitted diff stats up to date even when not actively selected.
+    /// The sweep polls these worktrees round-robin at the configured git interval,
+    /// but never faster than once per minute, to keep uncommitted diff stats up to
+    /// date even when not actively selected.
     pub fn set_all_worktrees(&self, worktrees: Vec<ActiveWorktreeInfo>) {
         log::trace!(
             "Setting {} worktrees for git status sweep polling",
             worktrees.len()
         );
-        let mut guard = self.all_worktrees.lock().unwrap();
-        *guard = worktrees;
+        {
+            let mut guard = self.all_worktrees.lock().unwrap();
+            *guard = worktrees;
+        }
+        notify_wake_signal(&self.wake_signal);
     }
 
     /// Trigger an immediate remote poll
@@ -711,6 +776,7 @@ impl BackgroundTaskManager {
     pub fn trigger_immediate_remote_poll(&self) {
         log::trace!("Triggering immediate remote poll");
         self.immediate_remote_poll.store(true, Ordering::Relaxed);
+        notify_wake_signal(&self.wake_signal);
     }
 }
 
@@ -763,4 +829,40 @@ fn emit_git_status(app: &AppHandle, status: GitBranchStatus) -> Result<(), Strin
 fn emit_pr_status(app: &AppHandle, status: PrStatus) -> Result<(), String> {
     app.emit_all("pr:status-update", &status)
         .map_err(|e| format!("Failed to emit pr:status-update event: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_interval_elapsed_when_no_previous_poll_exists() {
+        assert!(poll_interval_elapsed(100, None, 60));
+    }
+
+    #[test]
+    fn poll_interval_elapsed_only_after_configured_interval() {
+        assert!(!poll_interval_elapsed(159, Some(100), 60));
+        assert!(poll_interval_elapsed(160, Some(100), 60));
+    }
+
+    #[test]
+    fn git_sweep_interval_never_runs_faster_than_default_polling() {
+        assert_eq!(git_sweep_interval_secs(10), DEFAULT_POLL_INTERVAL);
+        assert_eq!(git_sweep_interval_secs(300), 300);
+    }
+
+    #[test]
+    fn background_loop_wait_is_capped_by_wakeup_tick() {
+        assert_eq!(background_loop_wait_secs(600), DEFAULT_WAKEUP_POLL_INTERVAL);
+        assert_eq!(background_loop_wait_secs(5), 5);
+        assert_eq!(background_loop_wait_secs(0), 1);
+    }
+
+    #[test]
+    fn normal_local_poll_uses_configured_interval() {
+        assert!(!should_poll_local(159, Some(100), false, 60));
+        assert!(should_poll_local(160, Some(100), false, 60));
+        assert!(should_poll_local(101, Some(100), true, 600));
+    }
 }

@@ -11,9 +11,14 @@ import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
 } from './ToolCallInline'
+import { EditedFilesDisplay } from './EditedFilesDisplay'
 import { StreamingMessage } from './StreamingMessage'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
-import { isDuplicatePlanTextBlock, resolvePlanContent } from './tool-call-utils'
+import {
+  coalesceContentBlocks,
+  isDuplicatePlanTextBlock,
+  resolvePlanContent,
+} from './tool-call-utils'
 import type { ComponentProps } from 'react'
 
 type StreamingMessageProps = ComponentProps<typeof StreamingMessage>
@@ -28,8 +33,9 @@ function summarizeLatest(
   streamingContent: string
 ): { label: string; detail?: string } {
   // Prefer the most recent content block (preserves order of text + tools).
-  for (let i = contentBlocks.length - 1; i >= 0; i--) {
-    const block = contentBlocks[i]
+  const normalizedBlocks = coalesceContentBlocks(contentBlocks)
+  for (let i = normalizedBlocks.length - 1; i >= 0; i--) {
+    const block = normalizedBlocks[i]
     if (!block) continue
     if (block.type === 'tool_use') {
       const tc = toolCalls.find(t => t.id === block.tool_call_id)
@@ -140,7 +146,13 @@ function hasVisibleActivity(
 export const CompactStreamingTicker = memo(function CompactStreamingTicker(
   props: StreamingMessageProps
 ) {
-  const { contentBlocks, toolCalls, streamingContent } = props
+  const {
+    contentBlocks,
+    toolCalls,
+    streamingContent,
+    onCopySteeredText,
+    worktreePath,
+  } = props
   const [isOpen, setIsOpen] = useState(false)
 
   const {
@@ -181,7 +193,11 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
   if (hasPlan && !hasActivity) {
     return (
       <div className="space-y-3">
-        <SteeredPromptGroup texts={steeredTexts} />
+        <SteeredPromptGroup
+          texts={steeredTexts}
+          worktreePath={worktreePath}
+          onCopyText={onCopySteeredText}
+        />
         <StreamingMessage
           {...props}
           contentBlocks={planBlocks}
@@ -201,7 +217,11 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
 
   return (
     <div className="space-y-3">
-      <SteeredPromptGroup texts={steeredTexts} />
+      <SteeredPromptGroup
+        texts={steeredTexts}
+        worktreePath={worktreePath}
+        onCopyText={onCopySteeredText}
+      />
       <Collapsible open={isOpen} onOpenChange={setIsOpen} className="min-w-0">
         <div
           className={
@@ -248,6 +268,10 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
           </CollapsibleContent>
         </div>
       </Collapsible>
+      <EditedFilesDisplay
+        toolCalls={activityToolCalls}
+        worktreePath={worktreePath}
+      />
       {hasPlan && (
         <StreamingMessage
           {...props}

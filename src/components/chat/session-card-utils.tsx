@@ -12,6 +12,7 @@ import {
   type PermissionDenial,
   type LabelData,
 } from '@/types/chat'
+import { getNativeTerminalResumeLaunch } from '@/lib/native-cli-session'
 import { findPlanFilePath, resolvePlanContent } from './tool-call-utils'
 
 export type SessionStatus =
@@ -113,8 +114,17 @@ export interface ChatStoreState {
   executingModes: Record<string, ExecutionMode>
   executionModes: Record<string, ExecutionMode>
   activeToolCalls: Record<string, ToolCall[]>
-  streamingContents: Record<string, string>
-  streamingContentBlocks: Record<string, ContentBlock[]>
+  /**
+   * Lazy accessor for a session's live streaming text. Streaming text changes
+   * every animation frame during a run; exposing it as a getter instead of
+   * subscribed maps keeps card recomputation off the per-frame hot path —
+   * cards re-read it whenever any subscribed field (tool calls, sending
+   * state, …) changes.
+   */
+  getStreamingText: (sessionId: string) => {
+    content: string
+    blocks: ContentBlock[]
+  }
   answeredQuestions: Record<string, Set<string>>
   waitingForInputSessionIds: Record<string, boolean>
   reviewingSessions: Record<string, boolean>
@@ -164,6 +174,19 @@ export function getEffectiveSessionWaiting(
   return storeState.waitingForInputSessionIds[session.id] ?? false
 }
 
+export function shouldShowCodeReviewLoadingPanel({
+  session,
+  isSessionReviewing,
+  hasReviewResults,
+}: {
+  session: Session | null | undefined
+  isSessionReviewing: boolean
+  hasReviewResults: boolean
+}): boolean {
+  if (!session || !isSessionReviewing || hasReviewResults) return false
+  return session.name === 'Code Review' && session.messages.length === 0
+}
+
 export function computeSessionCardData(
   session: Session,
   storeState: ChatStoreState
@@ -173,8 +196,7 @@ export function computeSessionCardData(
     executingModes,
     executionModes,
     activeToolCalls,
-    streamingContents,
-    streamingContentBlocks,
+    getStreamingText,
     answeredQuestions,
     waitingForInputSessionIds,
     reviewingSessions,
@@ -184,8 +206,6 @@ export function computeSessionCardData(
 
   const sessionSending = sendingSessionIds[session.id] ?? false
   const toolCalls = activeToolCalls[session.id] ?? []
-  const streamingContent = streamingContents[session.id] ?? ''
-  const currentStreamingContentBlocks = streamingContentBlocks[session.id] ?? []
   const answeredSet = answeredQuestions[session.id]
 
   // Check streaming tool calls for waiting state
@@ -208,12 +228,14 @@ export function computeSessionCardData(
     session.pending_plan_message_id ?? null
 
   // Helper to extract inline plan from any plan tool call
-  const getInlinePlan = (tcs: typeof toolCalls): string | null =>
-    resolvePlanContent({
+  const getInlinePlan = (tcs: typeof toolCalls): string | null => {
+    const streaming = getStreamingText(session.id)
+    return resolvePlanContent({
       toolCalls: tcs,
-      messageContent: streamingContent,
-      contentBlocks: currentStreamingContentBlocks,
+      messageContent: streaming.content,
+      contentBlocks: streaming.blocks,
     }).content
+  }
 
   // Mirrors `canBeWaiting` filter in prefetchSessions (src/services/chat.ts).
   // A session's waiting flag is only meaningful while the run is active, resumable,
@@ -406,6 +428,9 @@ export function getResumeCommand(session: Session): string | null {
   if (session.backend === 'pi' && session.pi_session_id) {
     return `pi --session ${session.pi_session_id}`
   }
+  if (session.backend === 'grok' && session.grok_session_id) {
+    return `grok -s ${session.grok_session_id}`
+  }
   return null
 }
 
@@ -418,24 +443,8 @@ export function getResumeArgs(
   session: Session
 ): { command: string; args: string[] } | null {
   const cmd = session.terminal_command || ''
-  if (session.backend === 'claude' && session.claude_session_id) {
-    return {
-      command: cmd || 'claude',
-      args: ['--resume', session.claude_session_id],
-    }
-  }
-  if (session.backend === 'codex' && session.codex_thread_id) {
-    return {
-      command: cmd || 'codex',
-      args: ['resume', session.codex_thread_id],
-    }
-  }
-  if (session.backend === 'opencode' && session.opencode_session_id) {
-    return {
-      command: cmd || 'opencode',
-      args: ['-s', session.opencode_session_id],
-    }
-  }
+  const nativeLaunch = getNativeTerminalResumeLaunch(session)
+  if (nativeLaunch) return nativeLaunch
   if (session.backend === 'cursor' && session.cursor_chat_id) {
     return {
       command: cmd || 'cursor-agent',
@@ -446,6 +455,12 @@ export function getResumeArgs(
     return {
       command: cmd || 'pi',
       args: ['--session', session.pi_session_id],
+    }
+  }
+  if (session.backend === 'grok' && session.grok_session_id) {
+    return {
+      command: cmd || 'grok',
+      args: ['-s', session.grok_session_id],
     }
   }
   return null

@@ -102,6 +102,7 @@ import { WorktreeDropdownMenu } from '@/components/projects/WorktreeDropdownMenu
 import { LabelModal } from './LabelModal'
 import { useSessionArchive } from './hooks/useSessionArchive'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { pushNeedsRemotePicker, useRemotePicker } from '@/hooks/useRemotePicker'
 import { useIsTouchDevice } from '@/hooks/use-touch-device'
 import { useSwipeBack } from '@/hooks/useSwipeBack'
 import {
@@ -346,6 +347,8 @@ export function SessionChatModal({
     labelSessionId ? (state.sessionLabels[labelSessionId] ?? null) : null
   )
 
+
+
   // Rename session state
   const renameSession = useRenameSession()
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(
@@ -392,6 +395,32 @@ export function SessionChatModal({
     },
     [handleRenameSubmit]
   )
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    const handleRenameSessionCommand = (
+      e: CustomEvent<{ sessionId?: string }>
+    ) => {
+      const sessionId = e.detail?.sessionId
+      if (!sessionId) return
+      const session = sessions.find(s => s.id === sessionId)
+      if (!session || session.archived_at) return
+
+      setRenameValue(session.name)
+      setRenamingSessionId(session.id)
+    }
+
+    window.addEventListener(
+      'command:rename-session',
+      handleRenameSessionCommand as EventListener
+    )
+    return () =>
+      window.removeEventListener(
+        'command:rename-session',
+        handleRenameSessionCommand as EventListener
+      )
+  }, [isOpen, sessions])
 
   const renameInputRef = useCallback((node: HTMLInputElement | null) => {
     if (node) {
@@ -471,7 +500,7 @@ export function SessionChatModal({
   )
 
   const handleTabAuxClick = useCallback(
-    (e: MouseEvent<HTMLButtonElement>, session: Session) => {
+    (e: MouseEvent<HTMLDivElement>, session: Session) => {
       if (e.button !== 1) return
       e.preventDefault()
       e.stopPropagation()
@@ -539,10 +568,11 @@ export function SessionChatModal({
 
   const handleTabClick = useCallback(
     (sessionId: string) => {
+      if (renamingSessionId === sessionId) return
       const { setActiveSession } = useChatStore.getState()
       setActiveSession(worktreeId, sessionId)
     },
-    [worktreeId]
+    [renamingSessionId, worktreeId]
   )
 
   const reorderSessions = useReorderSessions()
@@ -585,7 +615,7 @@ export function SessionChatModal({
   }, [cards])
 
   const handleSessionDragStart = useCallback(
-    (e: React.DragEvent<HTMLButtonElement>, sessionId: string) => {
+    (e: React.DragEvent<HTMLDivElement>, sessionId: string) => {
       setDraggedSessionId(sessionId)
       e.dataTransfer.effectAllowed = 'move'
       e.dataTransfer.setData('text/plain', sessionId)
@@ -594,7 +624,7 @@ export function SessionChatModal({
   )
 
   const handleSessionDragOver = useCallback(
-    (e: React.DragEvent<HTMLButtonElement>, targetSessionId: string) => {
+    (e: React.DragEvent<HTMLDivElement>, targetSessionId: string) => {
       if (
         draggedSessionId &&
         buildReorderedSessionIdsWithinStatus(
@@ -611,7 +641,7 @@ export function SessionChatModal({
   )
 
   const handleSessionDrop = useCallback(
-    (e: React.DragEvent<HTMLButtonElement>, targetSessionId: string) => {
+    (e: React.DragEvent<HTMLDivElement>, targetSessionId: string) => {
       e.preventDefault()
       const sourceId =
         draggedSessionId || e.dataTransfer.getData('text/plain') || null
@@ -723,26 +753,41 @@ export function SessionChatModal({
     [worktreeId, worktreePath, defaultBranch, project?.id]
   )
 
+  const pickRemoteOrRun = useRemotePicker(worktreePath)
+
   const handlePush = useCallback(
-    async (e: React.MouseEvent) => {
+    (e: React.MouseEvent) => {
       e.stopPropagation()
-      const opToast = dismissibleToast.loading('Pushing changes...')
-      try {
-        const result = await gitPush(worktreePath, worktree?.pr_number)
-        triggerImmediateGitPoll()
-        if (project) fetchWorktreesStatus(project.id)
-        if (result.fellBack) {
-          opToast.warning(
-            'Could not push to PR branch, pushed to new branch instead'
+
+      const runPush = async (remote?: string) => {
+        const opToast = dismissibleToast.loading('Pushing changes...')
+        try {
+          const result = await gitPush(
+            worktreePath,
+            worktree?.pr_number,
+            remote
           )
-        } else {
-          opToast.success('Changes pushed')
+          triggerImmediateGitPoll()
+          if (project) fetchWorktreesStatus(project.id)
+          if (result.fellBack) {
+            opToast.warning(
+              'Could not push to PR branch, pushed to new branch instead'
+            )
+          } else {
+            opToast.success('Changes pushed')
+          }
+        } catch (error) {
+          opToast.error(`Push failed: ${error}`)
         }
-      } catch (error) {
-        opToast.error(`Push failed: ${error}`)
+      }
+
+      if (pushNeedsRemotePicker(worktree?.pr_number)) {
+        pickRemoteOrRun(runPush)
+      } else {
+        runPush()
       }
     },
-    [worktree, worktreePath, project]
+    [pickRemoteOrRun, worktree, worktreePath, project]
   )
 
   const handleUncommittedDiffClick = useCallback(() => {
@@ -1111,8 +1156,10 @@ export function SessionChatModal({
                     return (
                       <ContextMenu key={session.id}>
                         <ContextMenuTrigger asChild>
-                          <button
+                          <div
                             data-session-id={session.id}
+                            role="button"
+                            tabIndex={0}
                             draggable={renamingSessionId !== session.id}
                             onDragStart={e =>
                               handleSessionDragStart(e, session.id)
@@ -1124,6 +1171,13 @@ export function SessionChatModal({
                             onDragEnd={() => setDraggedSessionId(null)}
                             onClick={() => handleTabClick(session.id)}
                             onAuxClick={e => handleTabAuxClick(e, session)}
+                            onKeyDown={e => {
+                              if (renamingSessionId === session.id) return
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                handleTabClick(session.id)
+                              }
+                            }}
                             onDoubleClick={() =>
                               handleStartRenameImmediate(
                                 session.id,
@@ -1160,6 +1214,7 @@ export function SessionChatModal({
                                 onKeyDown={e =>
                                   handleRenameKeyDown(e, session.id)
                                 }
+                                onPointerDown={e => e.stopPropagation()}
                                 onClick={e => e.stopPropagation()}
                                 className="w-full min-w-0 bg-transparent text-base outline-none md:text-xs"
                               />
@@ -1191,7 +1246,7 @@ export function SessionChatModal({
                                 size="xs"
                               />
                             )}
-                          </button>
+                          </div>
                         </ContextMenuTrigger>
                         <ContextMenuContent className="w-64">
                           <ContextMenuItem
@@ -1212,6 +1267,13 @@ export function SessionChatModal({
                             {sessionLabel ? 'Remove Label' : 'Add Label'}
                           </ContextMenuItem>
                           <ContextMenuItem
+                            // "Mark as Idle" only clears the manual reviewing
+                            // flag. When review is driven by AI review_results,
+                            // clearing the flag leaves the session in review —
+                            // no effect — so disable it there.
+                            disabled={
+                              status === 'review' && !!session.review_results
+                            }
                             onSelect={() => {
                               const { reviewingSessions, setSessionReviewing } =
                                 useChatStore.getState()
@@ -1351,6 +1413,7 @@ export function SessionChatModal({
         sessionId={labelSessionId}
         currentLabel={currentLabel}
       />
+
       <CloseWorktreeDialog
         open={closeConfirmOpen}
         onOpenChange={setCloseConfirmOpen}

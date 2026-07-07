@@ -1,9 +1,28 @@
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { isNativeApp } from './environment'
 
-export const isMacOS = navigator.platform.includes('Mac')
-export const isWindows = navigator.platform.includes('Win')
-export const isLinux = navigator.platform.includes('Linux')
+export type PlatformName = 'mac' | 'windows' | 'linux'
+
+let serverPlatform: PlatformName = 'linux'
+
+export let isMacOS = false
+export let isWindows = false
+export let isLinux = true
+
+export function setServerPlatform(platform: PlatformName): void {
+  serverPlatform = platform
+  isMacOS = platform === 'mac'
+  isWindows = platform === 'windows'
+  isLinux = platform === 'linux'
+}
+
+export function getServerPlatform(): PlatformName {
+  return serverPlatform
+}
+
+export function isServerWindows(): boolean {
+  return serverPlatform === 'windows'
+}
 
 /**
  * Pre-open a blank browser tab synchronously during a user gesture.

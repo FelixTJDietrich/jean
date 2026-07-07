@@ -173,6 +173,7 @@ fn load_projects_data_internal(app: &AppHandle) -> Result<ProjectsData, String> 
         data.projects.len(),
         data.worktrees.len()
     );
+    crate::auto_fix::scheduler::refresh_auto_fix_scan_cache(&data.projects);
     Ok(data)
 }
 
@@ -210,6 +211,7 @@ fn save_projects_data_internal(app: &AppHandle, data: &ProjectsData) -> Result<(
         data.projects.len(),
         data.worktrees.len()
     );
+    crate::auto_fix::scheduler::refresh_auto_fix_scan_cache(&data.projects);
     Ok(())
 }
 

@@ -12,6 +12,7 @@ import { preferencesQueryKeys } from '@/services/preferences'
 import {
   resolveMagicPromptProvider,
   type AppPreferences,
+  type CliBackend,
   type NotificationSound,
 } from '@/types/preferences'
 import { triggerImmediateGitPoll } from '@/services/git-status'
@@ -21,6 +22,7 @@ import {
   normalizeCodexQuestions,
 } from '@/types/chat'
 import { playNotificationSound } from '@/lib/sounds'
+import { notifyIfBackground } from '@/lib/session-notifications'
 import { findPlanFilePath } from '@/components/chat/tool-call-utils'
 import { generateId } from '@/lib/uuid'
 import {
@@ -120,13 +122,13 @@ async function hydrateCompletedSessionFromBackend(
   queryClient: QueryClient,
   sessionId: string,
   worktreeId: string
-): Promise<void> {
+): Promise<Session | null> {
   const worktreePath = useChatStore.getState().worktreePaths[worktreeId]
   if (!worktreePath) {
     queryClient.invalidateQueries({
       queryKey: chatQueryKeys.session(sessionId),
     })
-    return
+    return null
   }
 
   try {
@@ -136,11 +138,13 @@ async function hydrateCompletedSessionFromBackend(
       worktreePath,
     })
     queryClient.setQueryData(chatQueryKeys.session(sessionId), session)
+    return session
   } catch (error) {
     console.error(
       '[useStreamingEvents] Failed to hydrate completed session from backend:',
       error
     )
+    return null
   } finally {
     queryClient.invalidateQueries({
       queryKey: chatQueryKeys.session(sessionId),
@@ -274,11 +278,10 @@ export default function useStreamingEvents({
     if (!isTauri()) return
 
     const {
-      appendStreamingContent,
+      appendStreamingChunk,
       addToolCall,
       updateToolCallOutput,
       appendToolEvent,
-      addTextBlock,
       addToolBlock,
       addThinkingBlock,
       addUserInputBlock,
@@ -286,6 +289,19 @@ export default function useStreamingEvents({
     } = useChatStore.getState()
     const cancelledRunIds = new Map<string, Set<string>>()
     const cancelledUntaggedSessionIds = new Set<string>()
+
+    // Fire a native OS banner (background-only) for a session lifecycle event,
+    // gated by the desktop_notifications_enabled preference. Body = session name.
+    const notifySession = (sessionId: string, title: string): void => {
+      const prefs = queryClient.getQueryData<AppPreferences>(
+        preferencesQueryKeys.preferences()
+      )
+      if (prefs?.desktop_notifications_enabled === false) return
+      const name = queryClient.getQueryData<Session>(
+        chatQueryKeys.session(sessionId)
+      )?.name
+      notifyIfBackground(title, name)
+    }
 
     // Hydrate ScheduleWakeup indicator store from backend so reloads do not
     // show historical tool_use blocks stuck in the "pending" spinner state.
@@ -393,8 +409,10 @@ export default function useStreamingEvents({
     function flushChunkBuffer() {
       chunkRafId = null
       for (const [sid, buffered] of Object.entries(chunkBuffer)) {
-        appendStreamingContent(sid, buffered)
-        addTextBlock(sid, buffered)
+        // Single atomic set() updates both streamingContents (string fallback,
+        // load-bearing for resume/dedupe/error paths) and streamingContentBlocks
+        // — one subscriber sweep per frame instead of two.
+        appendStreamingChunk(sid, buffered)
       }
       chunkBuffer = {}
     }
@@ -659,6 +677,7 @@ export default function useStreamingEvents({
         const next = [...current, request]
         setPendingCodexPermissionRequests(session_id, next)
         setWaitingForInput(session_id, true)
+        notifySession(session_id, 'Needs your input')
         persistCodexPendingState(session_id, worktree_id, {
           pendingCodexPermissionRequests: next,
         })
@@ -679,6 +698,7 @@ export default function useStreamingEvents({
           const next = [...current, request]
           setPendingCodexCommandApprovalRequests(session_id, next)
           setWaitingForInput(session_id, true)
+          notifySession(session_id, 'Needs your input')
           persistCodexPendingState(session_id, worktree_id, {
             pendingCodexCommandApprovalRequests: next,
           })
@@ -712,6 +732,7 @@ export default function useStreamingEvents({
         addToolCall(session_id, toolCall)
         addToolBlock(session_id, toolCall.id)
 
+        notifySession(session_id, 'Needs your input')
         persistCodexPendingState(session_id, worktree_id, {
           pendingCodexUserInputRequests: next,
         })
@@ -758,6 +779,7 @@ export default function useStreamingEvents({
           const next = [...current, request]
           setPendingCodexDynamicToolCallRequests(session_id, next)
           setWaitingForInput(session_id, true)
+          notifySession(session_id, 'Needs your input')
           persistCodexPendingState(session_id, worktree_id, {
             pendingCodexDynamicToolCallRequests: next,
           })
@@ -1013,6 +1035,7 @@ export default function useStreamingEvents({
             webAccessSoundsEnabled:
               preferences?.web_access_sounds_enabled ?? true,
           })
+          notifySession(sessionId, 'Needs your input')
         }
       } else if (event.payload.waiting_for_plan) {
         // Codex/Opencode plan-mode run completed with content — enter plan-waiting state.
@@ -1066,7 +1089,7 @@ export default function useStreamingEvents({
                     last_run_status: 'completed',
                     waiting_for_input: false,
                     waiting_for_input_type: undefined,
-                    is_reviewing: true,
+                    is_reviewing: false,
                   }
                 : old
           )
@@ -1083,7 +1106,7 @@ export default function useStreamingEvents({
                         last_run_status: 'completed' as const,
                         waiting_for_input: false,
                         waiting_for_input_type: undefined,
-                        is_reviewing: true,
+                        is_reviewing: false,
                       }
                     : s
                 ),
@@ -1180,6 +1203,7 @@ export default function useStreamingEvents({
           webAccessSoundsEnabled:
             preferences?.web_access_sounds_enabled ?? true,
         })
+        notifySession(sessionId, 'Needs your input')
       } else {
         // No blocking tools — add optimistic message FIRST, then batch-clear state.
         // This eliminates the flicker gap where neither streaming nor persisted content is visible.
@@ -1278,10 +1302,14 @@ export default function useStreamingEvents({
             webAccessSoundsEnabled:
               preferences?.web_access_sounds_enabled ?? true,
           })
+          notifySession(sessionId, 'Needs your input')
         } else {
           // 2. Update last_run_status + session state in caches so UI reflects immediately.
-          // CRITICAL: Include waiting_for_input/is_reviewing so useSessionStatePersistence's
-          // load effect doesn't overwrite Zustand with stale cache values.
+          // CRITICAL: Include waiting_for_input/is_reviewing so
+          // useSessionStatePersistence's load effect doesn't overwrite Zustand
+          // with stale cache values. A normal completed chat turn is not a code
+          // review; only the backend-created review session should carry
+          // is_reviewing=true while its review job is running.
           queryClient.setQueryData<Session>(
             chatQueryKeys.session(sessionId),
             old =>
@@ -1290,7 +1318,7 @@ export default function useStreamingEvents({
                     ...old,
                     last_run_status: 'completed',
                     waiting_for_input: false,
-                    is_reviewing: true,
+                    is_reviewing: false,
                   }
                 : old
           )
@@ -1306,7 +1334,7 @@ export default function useStreamingEvents({
                         ...s,
                         last_run_status: 'completed' as const,
                         waiting_for_input: false,
-                        is_reviewing: true,
+                        is_reviewing: false,
                       }
                     : s
                 ),
@@ -1339,6 +1367,7 @@ export default function useStreamingEvents({
             webAccessSoundsEnabled:
               preferences?.web_access_sounds_enabled ?? true,
           })
+          notifySession(sessionId, 'Session finished')
 
           // Auto-save context (fire-and-forget, no blocking)
           if (preferences?.auto_save_context === true) {
@@ -1562,6 +1591,8 @@ export default function useStreamingEvents({
       // Batch-clear all streaming state in a single Zustand set()
       useChatStore.getState().failSession(session_id)
 
+      notifySession(session_id, 'Session failed')
+
       // Invalidate sessions list to update last_run_status in tab bar
       if (sessionWorktreeId) {
         queryClient.invalidateQueries({
@@ -1686,6 +1717,7 @@ export default function useStreamingEvents({
           hasToolCalls || hasText || hasThinking || hasContentBlocks
         const hasQueuedMessages =
           (useChatStore.getState().messageQueues[session_id] ?? []).length > 0
+        const shouldHydrateCancelledFromBackend = !undo_send && !hasContent
         const shouldRestoreMessage =
           !hasQueuedMessages && (undo_send || !hasContent)
 
@@ -1862,6 +1894,21 @@ export default function useStreamingEvents({
             queryClient.invalidateQueries({
               queryKey: chatQueryKeys.sessions(resolvedWorktreeId),
             })
+            if (shouldHydrateCancelledFromBackend) {
+              void hydrateCompletedSessionFromBackend(
+                queryClient,
+                session_id,
+                resolvedWorktreeId
+              ).then(session => {
+                const lastHydratedMessage = session?.messages.at(-1)
+                const hydratedCancelledAssistant =
+                  lastHydratedMessage?.role === 'assistant' &&
+                  lastHydratedMessage.cancelled === true
+                if (hydratedCancelledAssistant) {
+                  useChatStore.getState().clearInputDraft(session_id)
+                }
+              })
+            }
           }
           queryClient.invalidateQueries({ queryKey: ['all-sessions'] })
         }
@@ -2012,6 +2059,7 @@ export default function useStreamingEvents({
               | 'pi'
               | 'commandcode'
           )
+          store.setSelectedBackend(session_id, value as CliBackend)
           break
         case 'model':
           store.setSelectedModel(session_id, value)

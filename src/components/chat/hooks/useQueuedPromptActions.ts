@@ -3,6 +3,7 @@ import {
   cancelChatMessage,
   persistMoveQueuedFront,
   persistRemoveQueued,
+  persistUpdateQueued,
   steerCodexTurn,
   steerOpencodeTurn,
   steerPiTurn,
@@ -27,6 +28,12 @@ function hasAttachments(msg: QueuedMessage): boolean {
   )
 }
 
+function supportsSteering(msg: QueuedMessage): boolean {
+  const backend = msg.backend ?? 'claude'
+  if (backend === 'codex') return true
+  return (backend === 'opencode' || backend === 'pi') && !hasAttachments(msg)
+}
+
 /**
  * Actions for the queued prompts panel: remove a queued prompt, or send a
  * specific queued prompt immediately.
@@ -48,6 +55,45 @@ export function useQueuedPromptActions() {
       const { worktreeId, worktreePath } = resolveWorktree(sessionId)
       if (worktreeId && worktreePath) {
         persistRemoveQueued(worktreeId, worktreePath, sessionId, messageId)
+      }
+    },
+    []
+  )
+
+  const handleEditQueuedMessage = useCallback(
+    async (sessionId: string, messageId: string, message: string) => {
+      const trimmed = message.trim()
+      if (!trimmed) return
+
+      const store = useChatStore.getState()
+      const msg = store
+        .getQueuedMessages(sessionId)
+        .find(m => m.id === messageId)
+      if (!msg || supportsSteering(msg)) return
+
+      const { worktreeId, worktreePath } = resolveWorktree(sessionId)
+      if (!worktreeId || !worktreePath) return
+
+      try {
+        const updated = await persistUpdateQueued(
+          worktreeId,
+          worktreePath,
+          sessionId,
+          messageId,
+          trimmed
+        )
+        if (!updated) {
+          // Another client already dequeued it — drop the stale local copy.
+          store.removeQueuedMessage(sessionId, messageId)
+          return
+        }
+        store.updateQueuedMessage(sessionId, messageId, trimmed)
+      } catch (error) {
+        logger.error('Failed to persist queued edit', {
+          error,
+          sessionId,
+          messageId,
+        })
       }
     },
     []
@@ -82,13 +128,13 @@ export function useQueuedPromptActions() {
         return
       }
 
-      // Busy Codex/OpenCode/Pi session: steer the running turn. Attachments can't be
-      // injected mid-turn, so those messages use the cancel+send path.
+      // Busy Codex/OpenCode/Pi session: steer the running turn. Codex accepts
+      // structured attachment input; other backends still use text-only steer.
       const backend = store.selectedBackends[sessionId] ?? 'claude'
       if (
         (backend === 'codex' || backend === 'opencode' || backend === 'pi') &&
         isSending &&
-        !hasAttachments(msg)
+        (backend === 'codex' || !hasAttachments(msg))
       ) {
         try {
           if (backend === 'pi') {
@@ -100,6 +146,8 @@ export function useQueuedPromptActions() {
               sessionId,
               msg.message
             )
+          } else if (hasAttachments(msg)) {
+            await steerCodexTurn(worktreeId, sessionId, msg.message, msg)
           } else {
             await steerCodexTurn(worktreeId, sessionId, msg.message)
           }
@@ -136,5 +184,9 @@ export function useQueuedPromptActions() {
     [handleRemoveQueuedMessage]
   )
 
-  return { handleRemoveQueuedMessage, handleSendQueuedNow }
+  return {
+    handleRemoveQueuedMessage,
+    handleEditQueuedMessage,
+    handleSendQueuedNow,
+  }
 }

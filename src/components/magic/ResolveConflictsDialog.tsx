@@ -22,6 +22,7 @@ import { useUIStore } from '@/store/ui-store'
 import { useWorktree, useProjects } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
+import { useAvailableGrokModels } from '@/services/grok-cli'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import {
   type CliBackend,
@@ -31,10 +32,15 @@ import {
 } from '@/types/preferences'
 import {
   CODEX_MODEL_OPTIONS,
-  MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
+  GROK_MODEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import { formatOpencodeModelLabel } from '@/components/chat/toolbar/toolbar-utils'
+import { BackendLabel } from '@/components/ui/backend-label'
+import {
+  getCatalogModelOptions,
+  useModelCatalog,
+} from '@/services/model-catalog'
 
 const RESOLVE_CONFLICTS_MODEL_KEY = 'resolve_conflicts_model'
 const RESOLVE_CONFLICTS_PROVIDER_KEY = 'resolve_conflicts_provider'
@@ -86,6 +92,10 @@ export function ResolveConflictsDialog({
   const { data: availableOpencodeModels } = useAvailableOpencodeModels({
     enabled: installedBackends.includes('opencode'),
   })
+  const { data: availableGrokModels } = useAvailableGrokModels({
+    enabled: installedBackends.includes('grok'),
+  })
+  const { data: modelCatalog } = useModelCatalog()
 
   const [resolveSelectionMode, setResolveSelectionMode] =
     useState<ResolveSelectionMode>('settings-default')
@@ -103,6 +113,25 @@ export function ResolveConflictsDialog({
     }))
   }, [availableOpencodeModels])
 
+  const grokModelOptions = useMemo(() => {
+    const models = availableGrokModels?.length
+      ? availableGrokModels.map(model => ({
+          value: `grok/${model.id}`,
+          label: model.label || model.id,
+        }))
+      : GROK_MODEL_OPTIONS
+    return models
+  }, [availableGrokModels])
+
+  const claudeModelOptions = useMemo(
+    () =>
+      getCatalogModelOptions(modelCatalog, 'claude').map(option => ({
+        ...option,
+        label: option.label.replace(/^Claude\s+/, ''),
+      })),
+    [modelCatalog]
+  )
+
   const resolveDefaults = useMemo(() => {
     const defaultBackend =
       project?.default_backend ?? preferences?.default_backend ?? 'claude'
@@ -117,13 +146,16 @@ export function ResolveConflictsDialog({
       (backend === 'codex'
         ? (preferences?.selected_codex_model ?? 'gpt-5.5')
         : backend === 'opencode'
-          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
+          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
           : backend === 'cursor'
             ? (preferences?.selected_cursor_model ?? 'cursor/auto')
             : backend === 'commandcode'
               ? (preferences?.selected_commandcode_model ??
                 'commandcode/default')
-              : (preferences?.selected_model ?? 'sonnet'))
+              : backend === 'grok'
+                ? (preferences?.selected_grok_model ??
+                  'grok/grok-composer-2.5-fast')
+                : (preferences?.selected_model ?? 'sonnet'))
     const provider = resolveMagicPromptProvider(
       preferences?.magic_prompt_providers,
       RESOLVE_CONFLICTS_PROVIDER_KEY,
@@ -164,9 +196,9 @@ export function ResolveConflictsDialog({
             { value: 'sonnet', label: `Sonnet${suffix(sonnetModel)}` },
             { value: 'haiku', label: `Haiku${suffix(haikuModel)}` },
           ]
-        : MODEL_OPTIONS
+        : claudeModelOptions
     },
-    [preferences?.custom_cli_profiles]
+    [claudeModelOptions, preferences?.custom_cli_profiles]
   )
 
   const resolveClaudeProvider =
@@ -186,11 +218,13 @@ export function ResolveConflictsDialog({
           return CODEX_MODEL_OPTIONS
         case 'opencode':
           return opencodeModelOptions
+        case 'grok':
+          return grokModelOptions
         default:
           return resolveClaudeModelOptions
       }
     },
-    [opencodeModelOptions, resolveClaudeModelOptions]
+    [grokModelOptions, opencodeModelOptions, resolveClaudeModelOptions]
   )
 
   const customResolveModelOptions = useMemo(
@@ -214,6 +248,10 @@ export function ResolveConflictsDialog({
         return 'Codex'
       case 'opencode':
         return 'OpenCode'
+      case 'cursor':
+        return 'Cursor'
+      case 'grok':
+        return 'Grok'
       default:
         return 'Claude'
     }
@@ -395,7 +433,9 @@ export function ResolveConflictsDialog({
                       size="sm"
                       hideIcon={
                         installedBackends.filter(backend =>
-                          ['claude', 'codex', 'opencode'].includes(backend)
+                          ['claude', 'codex', 'opencode', 'grok'].includes(
+                            backend
+                          )
                         ).length <= 1
                       }
                       onClick={() => setResolveSelectionMode('custom')}
@@ -411,6 +451,11 @@ export function ResolveConflictsDialog({
                       )}
                       {installedBackends.includes('opencode') && (
                         <SelectItem value="opencode">OpenCode</SelectItem>
+                      )}
+                      {installedBackends.includes('grok') && (
+                        <SelectItem value="grok">
+                          <BackendLabel backend="grok" />
+                        </SelectItem>
                       )}
                     </SelectContent>
                   </Select>

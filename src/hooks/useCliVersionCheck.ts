@@ -1,10 +1,9 @@
 /**
  * CLI Version Check Hook
  *
- * Checks for CLI updates on application startup and shows toast notifications.
- * Depending on the user's `auto_update_ai_backends` preference, updates are
- * either installed automatically in the background, or surfaced via a toast
- * with an "Update in background" action.
+ * Checks for CLI updates on application startup. Depending on the user's
+ * `auto_update_ai_backends` preference, updates are either installed
+ * automatically in the background or surfaced in the titlebar badge.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -131,7 +130,7 @@ function resolveCliInfo(
 
 /**
  * Hook that checks for CLI updates on startup and periodically (every hour).
- * Shows toast notifications when updates are detected.
+ * Surfaces pending manual updates in the titlebar badge.
  * Should be called once in App.tsx.
  */
 export function useCliVersionCheck() {
@@ -153,7 +152,7 @@ export function useCliVersionCheck() {
     enabled: shouldCheck,
   })
 
-  // Defer version fetches (GitHub API) by 10s — they're only for update toasts,
+  // Defer version fetches (GitHub API) by 10s — they're only for update checks,
   // no reason to compete with startup-critical queries.
   const [versionCheckReady, setVersionCheckReady] = useState(false)
   useEffect(() => {
@@ -217,6 +216,7 @@ export function useCliVersionCheck() {
     if (isLoading) return
 
     const updates: CliUpdateInfo[] = []
+    const currentlyOutdated = new Set<CliType>()
 
     // Resolve effective CLI info (falls back to path detection when Jean binary is missing)
     const claude = resolveCliInfo(
@@ -260,6 +260,7 @@ export function useCliVersionCheck() {
       const latestStable = versions.find(v => !v.prerelease)
       if (!latestStable || !isNewerVersion(latestStable.version, info.version))
         continue
+      currentlyOutdated.add(type)
       const key = `${type}:${info.version}→${latestStable.version}`
       if (notifiedRef.current.has(key)) continue
       notifiedRef.current.add(key)
@@ -273,26 +274,44 @@ export function useCliVersionCheck() {
       })
     }
 
-    if (updates.length > 0) {
-      logger.info('CLI updates available', { updates })
-      const autoUpdate = preferences?.auto_update_ai_backends ?? true
+    // Sync store: remove CLIs no longer outdated (e.g. user updated manually),
+    // merge in newly detected updates for the titlebar badge.
+    const { setAvailableCliUpdates, availableCliUpdates } =
+      useUIStore.getState()
+    const nextUpdates = availableCliUpdates.filter(u =>
+      currentlyOutdated.has(u.type)
+    )
+    for (const update of updates) {
+      const index = nextUpdates.findIndex(
+        existing => existing.type === update.type
+      )
+      if (index >= 0) nextUpdates[index] = update
+      else nextUpdates.push(update)
+    }
+
+    if (
+      nextUpdates.length !== availableCliUpdates.length ||
+      updates.length > 0
+    ) {
+      if (updates.length > 0) logger.info('CLI updates available', { updates })
+      setAvailableCliUpdates(nextUpdates)
+    }
+
+    const autoUpdate = preferences?.auto_update_ai_backends ?? true
+    if (autoUpdate && updates.length > 0) {
       const handleUpdates = () => {
-        if (autoUpdate) {
-          for (const update of updates) {
-            void runBackgroundUpdate(
-              update,
-              queryClient,
-              true,
-              notifiedRef.current
-            )
-          }
-        } else {
-          showUpdateToasts(updates, queryClient)
+        for (const update of updates) {
+          void runBackgroundUpdate(
+            update,
+            queryClient,
+            true,
+            notifiedRef.current
+          )
         }
       }
 
       if (isInitialCheckRef.current) {
-        // Delay initial notification to let the app settle
+        // Delay initial background updates to let the app settle
         setTimeout(handleUpdates, 5000)
       } else {
         handleUpdates()
@@ -364,37 +383,6 @@ export function useCliVersionCheck() {
 }
 
 /**
- * Show toast notifications for each CLI update.
- * The "Update" action runs the install in the background; failures fall back
- * to the existing modal flow so the user can see raw output.
- */
-function showUpdateToasts(updates: CliUpdateInfo[], queryClient: QueryClient) {
-  for (const update of updates) {
-    const cliName = CLI_DISPLAY_NAMES[update.type]
-    const toastId = `cli-update-${update.type}`
-
-    toast.info(`${cliName} update available`, {
-      id: toastId,
-      description: `v${update.currentVersion} → v${update.latestVersion}`,
-      duration: Infinity,
-      action: {
-        label: 'Update',
-        onClick: () => {
-          toast.dismiss(toastId)
-          void runBackgroundUpdate(update, queryClient, false)
-        },
-      },
-      cancel: {
-        label: 'Cancel',
-        onClick: () => {
-          toast.dismiss(toastId)
-        },
-      },
-    })
-  }
-}
-
-/**
  * Detect the "active session" guard error so we can fall back to a manual toast
  * (giving the user a chance to stop sessions before retrying).
  */
@@ -429,7 +417,7 @@ async function runBackgroundUpdate(
       })
       return
     }
-    showUpdateToasts([update], queryClient)
+    // Keep the badge visible so the user can retry manually after sessions stop.
   }
 
   toast.loading(`Updating ${cliName}…`, {
@@ -519,6 +507,7 @@ async function runBackgroundUpdate(
     queryClient.invalidateQueries({
       queryKey: CLI_QUERY_KEY_GETTERS[update.type](),
     })
+    useUIStore.getState().dismissCliUpdateNotice(update.type)
     toast.success(`${cliName} updated to v${update.latestVersion}`, {
       id: toastId,
       duration: 5000,

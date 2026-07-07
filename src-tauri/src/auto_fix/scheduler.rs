@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ use crate::projects::types::{Project, ProjectAutoFixSettings, Worktree, Worktree
 const AUTO_FIX_TICK_SECONDS: u64 = 10;
 const AUTO_YOLO_WATCH_SECONDS: u64 = 2;
 const AUTO_YOLO_WATCH_ATTEMPTS: usize = 900; // 30 minutes
+const AUTO_FIX_WORKTREE_READY_POLL_MS: u64 = 500;
+const AUTO_FIX_WORKTREE_READY_ATTEMPTS: usize = 240; // 2 minutes
 
 #[derive(Debug, Clone)]
 struct PendingAutoYolo {
@@ -29,6 +32,41 @@ struct PendingAutoYolo {
 static LAST_PROJECT_CHECKS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static PENDING_YOLO: OnceLock<Mutex<HashMap<String, PendingAutoYolo>>> = OnceLock::new();
 static YOLO_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Cached knowledge of whether any project has auto-fix enabled, so idle
+/// scheduler ticks can skip reading and parsing projects.json entirely.
+/// `UNKNOWN` (boot) forces one full scan, which refreshes the cache through
+/// `load_projects_data`; afterwards every projects.json load/save keeps it
+/// current via `refresh_auto_fix_scan_cache`.
+const AUTO_FIX_CACHE_UNKNOWN: u8 = 0;
+const AUTO_FIX_CACHE_DISABLED: u8 = 1;
+const AUTO_FIX_CACHE_ENABLED: u8 = 2;
+static AUTO_FIX_ENABLED_CACHE: AtomicU8 = AtomicU8::new(AUTO_FIX_CACHE_UNKNOWN);
+
+fn any_project_has_auto_fix_enabled(projects: &[Project]) -> bool {
+    projects.iter().any(|project| {
+        !project.is_folder
+            && project
+                .auto_fix_settings
+                .as_ref()
+                .is_some_and(|settings| settings.enabled)
+    })
+}
+
+/// Refresh the scheduler gate from freshly loaded/saved projects data.
+/// Called from `projects::storage` so every projects.json mutation updates it.
+pub fn refresh_auto_fix_scan_cache(projects: &[Project]) {
+    let state = if any_project_has_auto_fix_enabled(projects) {
+        AUTO_FIX_CACHE_ENABLED
+    } else {
+        AUTO_FIX_CACHE_DISABLED
+    };
+    AUTO_FIX_ENABLED_CACHE.store(state, Ordering::Relaxed);
+}
+
+fn auto_fix_scan_may_be_needed() -> bool {
+    AUTO_FIX_ENABLED_CACHE.load(Ordering::Relaxed) != AUTO_FIX_CACHE_DISABLED
+}
 
 fn last_project_checks() -> &'static Mutex<HashMap<String, u64>> {
     LAST_PROJECT_CHECKS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -142,7 +180,9 @@ pub fn start_auto_fix_scheduler(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             run_auto_yolo_watch(&app).await;
-            run_auto_fix_scan(&app).await;
+            if auto_fix_scan_may_be_needed() {
+                run_auto_fix_scan(&app).await;
+            }
             tokio::time::sleep(Duration::from_secs(AUTO_FIX_TICK_SECONDS)).await;
         }
     });
@@ -430,6 +470,7 @@ async fn start_issue_auto_fix(
         None,
         None,
         None,
+        None,
         Some("auto_fix".to_string()),
     )
     .await?;
@@ -460,17 +501,33 @@ async fn start_issue_auto_fix(
 }
 
 async fn wait_for_worktree_ready(app: &AppHandle, worktree_id: &str) -> Result<Worktree, String> {
-    for _ in 0..30 {
-        if let Ok(worktree) =
-            crate::projects::get_worktree(app.clone(), worktree_id.to_string()).await
-        {
-            return Ok(worktree);
+    let mut last_error: Option<String> = None;
+    for _ in 0..AUTO_FIX_WORKTREE_READY_ATTEMPTS {
+        match crate::projects::get_worktree(app.clone(), worktree_id.to_string()).await {
+            Ok(worktree) => return Ok(worktree),
+            Err(err) => last_error = Some(err),
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(AUTO_FIX_WORKTREE_READY_POLL_MS)).await;
     }
-    Err(format!(
-        "Timed out waiting for Mr. Robot worktree {worktree_id} to be ready"
+    Err(worktree_ready_timeout_message(
+        worktree_id,
+        last_error.as_deref(),
     ))
+}
+
+fn auto_fix_worktree_ready_timeout() -> Duration {
+    Duration::from_millis(AUTO_FIX_WORKTREE_READY_POLL_MS * AUTO_FIX_WORKTREE_READY_ATTEMPTS as u64)
+}
+
+fn worktree_ready_timeout_message(worktree_id: &str, last_error: Option<&str>) -> String {
+    let timeout_secs = auto_fix_worktree_ready_timeout().as_secs();
+    let mut message = format!(
+        "Timed out after {timeout_secs}s waiting for Mr. Robot worktree {worktree_id} to be ready"
+    );
+    if let Some(error) = last_error {
+        message.push_str(&format!(". Last error: {error}"));
+    }
+    message
 }
 
 async fn run_auto_yolo_watch(app: &AppHandle) {
@@ -752,7 +809,7 @@ fn disable_project_auto_fix(app: &AppHandle, project_id: &str) {
 fn default_model_for_backend(backend: &str) -> String {
     match backend {
         "codex" => "gpt-5.3-codex".to_string(),
-        "opencode" => "opencode/gpt-5.3-codex".to_string(),
+        "opencode" => "opencode/gpt-5.5".to_string(),
         "cursor" => "cursor/auto".to_string(),
         "pi" => "pi/sonnet".to_string(),
         "commandcode" => "commandcode/default".to_string(),
@@ -763,6 +820,54 @@ fn default_model_for_backend(backend: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_auto_fix_settings(enabled: bool) -> ProjectAutoFixSettings {
+        ProjectAutoFixSettings {
+            enabled,
+            interval_minutes: 15,
+            issue_limit: 1,
+            max_parallel_worktrees: 1,
+            included_labels: Vec::new(),
+            excluded_labels: Vec::new(),
+            planning_backend: "claude".to_string(),
+            planning_model: None,
+            auto_yolo_enabled: false,
+            yolo_backend: "claude".to_string(),
+            yolo_model: None,
+            active_hours_enabled: false,
+            active_hours_start: 20,
+            active_hours_end: 8,
+        }
+    }
+
+    fn test_project(
+        id: &str,
+        auto_fix_settings: Option<ProjectAutoFixSettings>,
+        is_folder: bool,
+    ) -> Project {
+        Project {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: String::new(),
+            default_branch: String::new(),
+            added_at: 0,
+            order: 0,
+            parent_id: None,
+            is_folder,
+            avatar_path: None,
+            default_avatar_path: None,
+            enabled_mcp_servers: None,
+            known_mcp_servers: Vec::new(),
+            custom_system_prompt: None,
+            default_provider: None,
+            default_backend: None,
+            worktrees_dir: None,
+            linear_api_key: None,
+            linear_team_id: None,
+            linked_project_ids: Vec::new(),
+            auto_fix_settings,
+        }
+    }
 
     fn test_worktree(
         id: &str,
@@ -812,6 +917,46 @@ mod tests {
             label: None,
             last_opened_at: None,
         }
+    }
+
+    #[test]
+    fn detects_any_project_with_auto_fix_enabled() {
+        assert!(!any_project_has_auto_fix_enabled(&[]));
+        assert!(!any_project_has_auto_fix_enabled(&[
+            test_project("no-settings", None, false),
+            test_project("disabled", Some(test_auto_fix_settings(false)), false),
+        ]));
+        // Folders are skipped by the scan, so they must not keep the gate open.
+        assert!(!any_project_has_auto_fix_enabled(&[test_project(
+            "folder",
+            Some(test_auto_fix_settings(true)),
+            true,
+        )]));
+        assert!(any_project_has_auto_fix_enabled(&[
+            test_project("disabled", Some(test_auto_fix_settings(false)), false),
+            test_project("enabled", Some(test_auto_fix_settings(true)), false),
+        ]));
+    }
+
+    #[test]
+    fn scan_cache_skips_ticks_only_when_known_disabled() {
+        // Unknown (boot) must scan so the cache can be populated.
+        AUTO_FIX_ENABLED_CACHE.store(AUTO_FIX_CACHE_UNKNOWN, Ordering::Relaxed);
+        assert!(auto_fix_scan_may_be_needed());
+
+        refresh_auto_fix_scan_cache(&[test_project(
+            "disabled",
+            Some(test_auto_fix_settings(false)),
+            false,
+        )]);
+        assert!(!auto_fix_scan_may_be_needed());
+
+        refresh_auto_fix_scan_cache(&[test_project(
+            "enabled",
+            Some(test_auto_fix_settings(true)),
+            false,
+        )]);
+        assert!(auto_fix_scan_may_be_needed());
     }
 
     #[test]
@@ -968,6 +1113,20 @@ mod tests {
     }
 
     #[test]
+    fn worktree_ready_waits_two_minutes() {
+        assert_eq!(auto_fix_worktree_ready_timeout(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn worktree_ready_timeout_message_includes_last_error() {
+        let message =
+            worktree_ready_timeout_message("worktree-1", Some("Worktree not found: worktree-1"));
+
+        assert!(message.contains("worktree-1"));
+        assert!(message.contains("Last error: Worktree not found: worktree-1"));
+    }
+
+    #[test]
     fn default_models_cover_all_auto_fix_backends() {
         assert_eq!(
             default_model_for_backend("claude"),
@@ -979,7 +1138,7 @@ mod tests {
         );
         assert_eq!(
             default_model_for_backend("opencode"),
-            "opencode/gpt-5.3-codex".to_string()
+            "opencode/gpt-5.5".to_string()
         );
         assert_eq!(
             default_model_for_backend("cursor"),

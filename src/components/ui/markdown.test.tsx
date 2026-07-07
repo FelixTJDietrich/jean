@@ -56,4 +56,38 @@ describe('Markdown', () => {
     expect(container.querySelectorAll('ol')).toHaveLength(1)
     expect(container.querySelector('pre')).not.toBeNull()
   })
+
+  it('renders raw HTML in completed messages', () => {
+    const { container } = render(
+      <Markdown>{'before <b>bold</b> after'}</Markdown>
+    )
+
+    expect(container.querySelector('b')).not.toBeNull()
+    expect(container.querySelector('b')?.textContent).toBe('bold')
+  })
+
+  it('skips the rehype-raw HTML pass while streaming', () => {
+    const { container } = render(
+      <Markdown streaming>{'before <b>bold</b> after'}</Markdown>
+    )
+
+    expect(container.querySelector('b')).toBeNull()
+    expect(container.textContent).toContain('<b>bold</b>')
+  })
+
+  it('converts app-data image paths into loadable file URLs', () => {
+    const { container } = render(
+      <Markdown>
+        {
+          '![Linear screenshot](</Users/me/Library/Application Support/com.jean.desktop/linear-context-images/ENG-123/image.png>)'
+        }
+      </Markdown>
+    )
+
+    const image = container.querySelector('img')
+
+    expect(image?.getAttribute('src')).toBe(
+      '/api/files/linear-context-images/ENG-123/image.png'
+    )
+  })
 })

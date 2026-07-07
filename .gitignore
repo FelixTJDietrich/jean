@@ -12,6 +12,7 @@ node_modules
 package-lock.json
 dist/*
 !dist/.gitkeep
+src-tauri/dist/
 dist-ssr
 *.local
 *.local.*
@@ -28,3 +29,10 @@ dist-ssr
 *.sln
 *.sw?
 .env
+test-results
+playwright-report
+playwright/.cache
+
+# Rust build artifacts for standalone server wrapper
+src-server/target/
+src-server/Cargo.lock

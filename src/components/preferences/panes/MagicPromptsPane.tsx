@@ -27,6 +27,12 @@ import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
 import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
+import { useAvailablePiModels } from '@/services/pi-cli'
+import { useAvailableGrokModels } from '@/services/grok-cli'
+import {
+  getCatalogModelOptions,
+  useModelCatalog,
+} from '@/services/model-catalog'
 import {
   formatCursorModelLabel,
   formatOpencodeModelLabel,
@@ -35,6 +41,8 @@ import {
   COMMANDCODE_MODEL_OPTIONS as COMMANDCODE_FALLBACK_OPTIONS,
   CURSOR_MODEL_OPTIONS as CURSOR_FALLBACK_OPTIONS,
   OPENCODE_MODEL_OPTIONS as OPENCODE_FALLBACK_OPTIONS,
+  PI_MODEL_OPTIONS as PI_FALLBACK_OPTIONS,
+  GROK_MODEL_OPTIONS as GROK_FALLBACK_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   DEFAULT_INVESTIGATE_ISSUE_PROMPT,
@@ -58,21 +66,32 @@ import {
   DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_MAGIC_PROMPT_PROVIDERS,
   DEFAULT_MAGIC_PROMPT_BACKENDS,
+  DEFAULT_MAGIC_PROMPT_MODES,
   CLAUDE_DEFAULT_MAGIC_PROMPT_BACKENDS,
   CODEX_DEFAULT_MAGIC_PROMPT_BACKENDS,
   OPENCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  PI_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  GROK_DEFAULT_MAGIC_PROMPT_BACKENDS,
   CODEX_DEFAULT_MAGIC_PROMPT_MODELS,
   CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
   OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS,
+  PI_DEFAULT_MAGIC_PROMPT_MODELS,
+  COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS,
+  GROK_DEFAULT_MAGIC_PROMPT_MODELS,
   codexModelOptions,
   isCommandCodeModel,
   isCodexModel,
   isCursorModel,
+  isGrokModel,
+  isPiModel,
   type MagicPrompts,
   type MagicPromptModels,
   type MagicPromptProviders,
   type MagicPromptBackends,
   type MagicPromptModel,
+  type MagicPromptModes,
+  type MagicPromptExecutionMode,
 } from '@/types/preferences'
 import { cn } from '@/lib/utils'
 import { BackendLabel } from '@/components/ui/backend-label'
@@ -87,6 +106,7 @@ interface PromptConfig {
   modelKey?: keyof MagicPromptModels
   providerKey?: keyof MagicPromptProviders
   backendKey?: keyof MagicPromptBackends
+  modeKey?: keyof MagicPromptModes
   label: string
   description: string
   variables: VariableInfo[]
@@ -108,6 +128,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_issue_model',
         providerKey: 'investigate_issue_provider',
         backendKey: 'investigate_issue_backend',
+        modeKey: 'investigate_issue_mode',
         label: 'Investigate Issue',
         description:
           'Prompt for analyzing GitHub issues loaded into the context.',
@@ -129,6 +150,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_pr_model',
         providerKey: 'investigate_pr_provider',
         backendKey: 'investigate_pr_backend',
+        modeKey: 'investigate_pr_mode',
         label: 'Investigate PR',
         description:
           'Prompt for analyzing GitHub pull requests loaded into the context.',
@@ -150,6 +172,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_workflow_run_model',
         providerKey: 'investigate_workflow_run_provider',
         backendKey: 'investigate_workflow_run_backend',
+        modeKey: 'investigate_workflow_run_mode',
         label: 'Investigate Workflow Run',
         description:
           'Prompt for investigating failed GitHub Actions workflow runs.',
@@ -177,6 +200,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_security_alert_model',
         providerKey: 'investigate_security_alert_provider',
         backendKey: 'investigate_security_alert_backend',
+        modeKey: 'investigate_security_alert_mode',
         label: 'Investigate Dependabot Alert',
         description:
           'Prompt for investigating Dependabot vulnerability alerts in dependencies.',
@@ -199,6 +223,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_advisory_model',
         providerKey: 'investigate_advisory_provider',
         backendKey: 'investigate_advisory_backend',
+        modeKey: 'investigate_advisory_mode',
         label: 'Investigate Security Advisory',
         description: 'Prompt for investigating repository security advisories.',
         variables: [
@@ -219,6 +244,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'investigate_linear_issue_model',
         providerKey: 'investigate_linear_issue_provider',
         backendKey: 'investigate_linear_issue_backend',
+        modeKey: 'investigate_linear_issue_mode',
         label: 'Investigate Linear Issue',
         description:
           'Prompt for analyzing Linear issues. Issue content is embedded directly since Claude CLI cannot access the Linear API.',
@@ -271,6 +297,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'review_comments_model',
         providerKey: 'review_comments_provider',
         backendKey: 'review_comments_backend',
+        modeKey: 'review_comments_mode',
         label: 'Review Comments',
         description:
           'Prompt for addressing inline PR review comments selected from the Review Comments dialog.',
@@ -352,6 +379,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         modelKey: 'resolve_conflicts_model',
         providerKey: 'resolve_conflicts_provider',
         backendKey: 'resolve_conflicts_backend',
+        modeKey: 'resolve_conflicts_mode',
         label: 'Resolve Conflicts',
         description: 'Instructions appended to conflict resolution prompts.',
         variables: [],
@@ -492,14 +520,6 @@ export function getMagicPromptItemId(key: keyof MagicPrompts): string {
   return `settings-magic-prompt-${key}`
 }
 
-const CLAUDE_MODEL_OPTIONS: { value: MagicPromptModel; label: string }[] = [
-  { value: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)' },
-  { value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)' },
-  { value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 (1M)' },
-  { value: 'sonnet', label: 'Sonnet 4.6' },
-  { value: 'haiku', label: 'Haiku' },
-]
-
 const CODEX_MODEL_OPTIONS: { value: MagicPromptModel; label: string }[] = [
   { value: 'gpt-5.5', label: 'GPT 5.5' },
   { value: 'gpt-5.5-fast', label: 'GPT 5.5 Fast' },
@@ -536,7 +556,19 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const { data: availableOpencodeModels } = useAvailableOpencodeModels()
   const { data: availableCursorModels } = useAvailableCursorModels()
   const { data: availableCommandCodeModels } = useAvailableCommandCodeModels()
+  const { data: availablePiModels } = useAvailablePiModels()
+  const { data: availableGrokModels } = useAvailableGrokModels()
+  const { data: modelCatalog } = useModelCatalog()
   const { installedBackends } = useInstalledBackends()
+
+  const claudeModelOptions = useMemo(
+    () =>
+      getCatalogModelOptions(modelCatalog, 'claude').map(option => ({
+        value: option.value as MagicPromptModel,
+        label: option.label.replace(/^Claude\s+/, ''),
+      })),
+    [modelCatalog]
+  )
 
   const formatOpenCodeLabel = (value: string) => {
     const formatted = formatOpencodeModelLabel(value)
@@ -582,6 +614,32 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     }))
   }, [availableCommandCodeModels])
 
+  const piModelOptions = useMemo(() => {
+    const models = availablePiModels?.length
+      ? availablePiModels.map(model => ({
+          value: `pi/${model.id}`,
+          label: model.label || model.id,
+        }))
+      : PI_FALLBACK_OPTIONS
+    return models.map(option => ({
+      value: option.value as MagicPromptModel,
+      label: option.label,
+    }))
+  }, [availablePiModels])
+
+  const grokModelOptions = useMemo(() => {
+    const models = availableGrokModels?.length
+      ? availableGrokModels.map(model => ({
+          value: `grok/${model.id}`,
+          label: model.label || model.id,
+        }))
+      : GROK_FALLBACK_OPTIONS
+    return models.map(option => ({
+      value: option.value as MagicPromptModel,
+      label: option.label,
+    }))
+  }, [availableGrokModels])
+
   const currentPrompts = preferences?.magic_prompts ?? DEFAULT_MAGIC_PROMPTS
   const currentModels =
     preferences?.magic_prompt_models ?? DEFAULT_MAGIC_PROMPT_MODELS
@@ -589,6 +647,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     preferences?.magic_prompt_providers ?? DEFAULT_MAGIC_PROMPT_PROVIDERS
   const currentBackends =
     preferences?.magic_prompt_backends ?? DEFAULT_MAGIC_PROMPT_BACKENDS
+  const currentModes =
+    preferences?.magic_prompt_modes ?? DEFAULT_MAGIC_PROMPT_MODES
   const profiles = useMemo(
     () => preferences?.custom_cli_profiles ?? [],
     [preferences?.custom_cli_profiles]
@@ -606,6 +666,10 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const currentBackend = selectedConfig.backendKey
     ? (currentBackends[selectedConfig.backendKey] ?? null)
     : undefined
+  const currentMode = selectedConfig.modeKey
+    ? (currentModes[selectedConfig.modeKey] ??
+      DEFAULT_MAGIC_PROMPT_MODES[selectedConfig.modeKey])
+    : undefined
   // Resolve effective backend for model filtering: per-operation override > global default_backend
   const effectiveBackend =
     currentBackend ?? preferences?.default_backend ?? 'claude'
@@ -619,22 +683,26 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const currentModelIsCommandCode = currentModel
     ? isCommandCodeModel(currentModel)
     : false
+  const currentModelIsPi = currentModel ? isPiModel(currentModel) : false
+  const currentModelIsGrok = currentModel ? isGrokModel(currentModel) : false
   const filteredClaudeOptions = useMemo(() => {
     if (
       !currentProvider ||
       currentModelIsCodex ||
       currentModelIsOpenCode ||
       currentModelIsCursor ||
-      currentModelIsCommandCode
+      currentModelIsCommandCode ||
+      currentModelIsPi ||
+      currentModelIsGrok
     ) {
-      return CLAUDE_MODEL_OPTIONS
+      return claudeModelOptions
     }
     const profile = profiles.find(p => p.name === currentProvider)
-    if (!profile?.settings_json) return CLAUDE_MODEL_OPTIONS
+    if (!profile?.settings_json) return claudeModelOptions
     try {
       const settings = JSON.parse(profile.settings_json)
       const env = settings?.env
-      if (!env) return CLAUDE_MODEL_OPTIONS
+      if (!env) return claudeModelOptions
       const suffix = (m?: string) => (m ? ` (${m})` : '')
       return [
         {
@@ -651,14 +719,17 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         },
       ] as { value: MagicPromptModel; label: string }[]
     } catch {
-      return CLAUDE_MODEL_OPTIONS
+      return claudeModelOptions
     }
   }, [
+    claudeModelOptions,
     currentProvider,
     currentModelIsCodex,
     currentModelIsCursor,
     currentModelIsCommandCode,
     currentModelIsOpenCode,
+    currentModelIsPi,
+    currentModelIsGrok,
     profiles,
   ])
 
@@ -822,8 +893,12 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           defaultModel = opencodeModelOptions[0]?.value
         } else if (backend === 'cursor') {
           defaultModel = cursorModelOptions[0]?.value
+        } else if (backend === 'pi') {
+          defaultModel = piModelOptions[0]?.value
         } else if (backend === 'commandcode') {
           defaultModel = commandCodeModelOptions[0]?.value
+        } else if (backend === 'grok') {
+          defaultModel = grokModelOptions[0]?.value
         }
       }
       patchPreferences.mutate({
@@ -850,9 +925,24 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       selectedConfig.modelKey,
       selectedConfig.defaultModel,
       cursorModelOptions,
+      piModelOptions,
       commandCodeModelOptions,
+      grokModelOptions,
       opencodeModelOptions,
     ]
+  )
+
+  const handleModeChange = useCallback(
+    (mode: MagicPromptExecutionMode) => {
+      if (!preferences || !selectedConfig.modeKey) return
+      patchPreferences.mutate({
+        magic_prompt_modes: {
+          ...currentModes,
+          [selectedConfig.modeKey]: mode,
+        },
+      })
+    },
+    [preferences, patchPreferences, currentModes, selectedConfig.modeKey]
   )
 
   const handleApplyClaudeDefaults = useCallback(() => {
@@ -888,6 +978,30 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     })
   }, [preferences, patchPreferences])
 
+  const handleApplyPiDefaults = useCallback(() => {
+    if (!preferences) return
+    patchPreferences.mutate({
+      magic_prompt_models: PI_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_prompt_backends: PI_DEFAULT_MAGIC_PROMPT_BACKENDS,
+    })
+  }, [preferences, patchPreferences])
+
+  const handleApplyCommandCodeDefaults = useCallback(() => {
+    if (!preferences) return
+    patchPreferences.mutate({
+      magic_prompt_models: COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_prompt_backends: COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+    })
+  }, [preferences, patchPreferences])
+
+  const handleApplyGrokDefaults = useCallback(() => {
+    if (!preferences) return
+    patchPreferences.mutate({
+      magic_prompt_models: GROK_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_prompt_backends: GROK_DEFAULT_MAGIC_PROMPT_BACKENDS,
+    })
+  }, [preferences, patchPreferences])
+
   // Flush pending save when switching prompts
   const prevSelectedKeyRef = useRef(selectedKey)
   useEffect(() => {
@@ -919,7 +1033,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   return (
     <div className="flex flex-col min-h-0 flex-1">
       {/* Preset buttons */}
-      <div className="flex items-center gap-2 mb-3 shrink-0">
+      <div className="flex items-center gap-2 mb-3 shrink-0 overflow-x-auto pb-1">
         <span className="text-xs text-muted-foreground">Presets:</span>
         <Button
           variant="outline"
@@ -957,12 +1071,64 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         >
           OpenCode Defaults
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleApplyPiDefaults}
+          disabled={!installedBackends.includes('pi')}
+          className="h-7 text-xs"
+        >
+          Pi Defaults
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleApplyCommandCodeDefaults}
+          disabled={!installedBackends.includes('commandcode')}
+          className="h-7 text-xs"
+        >
+          Command Code Defaults
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleApplyGrokDefaults}
+          disabled={!installedBackends.includes('grok')}
+          className="h-7 text-xs"
+        >
+          Grok Defaults
+        </Button>
       </div>
 
       {/* Master-detail layout */}
-      <div className="flex flex-1 min-h-0 gap-4">
+      <div className="flex flex-1 min-h-0 flex-col gap-3 md:flex-row md:gap-4">
+        <div className="md:hidden shrink-0">
+          <Select
+            value={selectedKey}
+            onValueChange={value => setSelectedKey(value as keyof MagicPrompts)}
+          >
+            <SelectTrigger aria-label="Magic prompt" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PROMPT_SECTIONS.map(section => (
+                <React.Fragment key={section.label}>
+                  {section.configs.map(config => (
+                    <SelectItem key={config.key} value={config.key}>
+                      {config.label}
+                    </SelectItem>
+                  ))}
+                </React.Fragment>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         {/* Sidebar list */}
-        <div className="w-[260px] shrink-0 overflow-y-auto pr-1">
+        <div
+          data-testid="magic-prompts-sidebar"
+          className="hidden w-[260px] shrink-0 overflow-y-auto pr-1 md:block"
+        >
           {PROMPT_SECTIONS.map((section, sectionIdx) => (
             <div key={section.label} className={sectionIdx > 0 ? 'mt-3' : ''}>
               <h4 className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1 px-2">
@@ -1008,17 +1174,21 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           </div>
 
           {/* Backend / Model / Provider / Reset row */}
-          <div className="flex items-center gap-2 mb-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 mb-2 shrink-0">
             {currentBackend !== undefined && (
-              <>
+              <div
+                data-testid="magic-prompt-backend-control"
+                className="flex items-center gap-2 max-md:w-full md:contents"
+              >
                 <span className="text-xs text-muted-foreground">Backend</span>
                 <Select
                   value={effectiveBackend}
                   onValueChange={handleBackendChange}
                 >
                   <SelectTrigger
+                    aria-label="Backend"
                     size="sm"
-                    className="w-[120px] text-xs"
+                    className="flex-1 text-xs md:w-[120px] md:flex-none"
                     hideIcon={installedBackends.length <= 1}
                   >
                     <SelectValue />
@@ -1035,17 +1205,30 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                         <BackendLabel backend="cursor" />
                       </SelectItem>
                     )}
+                    {installedBackends.includes('pi') && (
+                      <SelectItem value="pi" aria-label="PI (Beta)">
+                        <BackendLabel backend="pi" />
+                      </SelectItem>
+                    )}
                     {installedBackends.includes('commandcode') && (
-                      <SelectItem value="commandcode">
+                      <SelectItem
+                        value="commandcode"
+                        aria-label="Command Code (Beta)"
+                      >
                         <BackendLabel backend="commandcode" />
                       </SelectItem>
                     )}
                     {installedBackends.includes('codex') && (
                       <SelectItem value="codex">Codex</SelectItem>
                     )}
+                    {installedBackends.includes('grok') && (
+                      <SelectItem value="grok" aria-label="Grok (Beta)">
+                        <BackendLabel backend="grok" />
+                      </SelectItem>
+                    )}
                   </SelectContent>
                 </Select>
-              </>
+              </div>
             )}
             {currentProvider !== undefined &&
               profiles.length > 0 &&
@@ -1053,11 +1236,15 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
               !currentModelIsCursor &&
               !currentModelIsCommandCode &&
               !currentModelIsOpenCode &&
+              !currentModelIsPi &&
+              !currentModelIsGrok &&
               effectiveBackend !== 'opencode' &&
               effectiveBackend !== 'cursor' &&
               effectiveBackend !== 'commandcode' &&
-              effectiveBackend !== 'codex' && (
-                <>
+              effectiveBackend !== 'pi' &&
+              effectiveBackend !== 'codex' &&
+              effectiveBackend !== 'grok' && (
+                <div className="flex items-center gap-2 max-md:w-full md:contents">
                   <span className="text-xs text-muted-foreground">
                     Provider
                   </span>
@@ -1065,7 +1252,11 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                     value={currentProvider ?? 'anthropic'}
                     onValueChange={handleProviderChange}
                   >
-                    <SelectTrigger size="sm" className="w-[130px] text-xs">
+                    <SelectTrigger
+                      aria-label="Provider"
+                      size="sm"
+                      className="flex-1 text-xs md:w-[130px] md:flex-none"
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1077,10 +1268,13 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                       ))}
                     </SelectContent>
                   </Select>
-                </>
+                </div>
               )}
             {currentModel && (
-              <>
+              <div
+                data-testid="magic-prompt-model-control"
+                className="flex items-center gap-2 max-md:w-full md:contents"
+              >
                 <span className="text-xs text-muted-foreground">Model</span>
                 <Popover
                   open={modelPopoverOpen}
@@ -1090,8 +1284,9 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                     <Button
                       variant="outline"
                       role="combobox"
+                      aria-label="Model"
                       aria-expanded={modelPopoverOpen}
-                      className="w-[160px] h-8 text-xs justify-between font-normal"
+                      className="h-8 flex-1 justify-between text-xs font-normal md:w-[160px] md:flex-none"
                     >
                       <span className="truncate">
                         {(() => {
@@ -1101,6 +1296,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             ...opencodeModelOptions,
                             ...cursorModelOptions,
                             ...commandCodeModelOptions,
+                            ...piModelOptions,
+                            ...grokModelOptions,
                           ]
                           return (
                             allOptions.find(o => o.value === currentModel)
@@ -1111,7 +1308,11 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                                 ? formatCursorModelLabel(currentModel)
                                 : currentModel === 'commandcode/default'
                                   ? 'CLI default (no --model)'
-                                  : currentModel)
+                                  : isPiModel(currentModel)
+                                    ? currentModel.replace(/^pi\//, '')
+                                    : isGrokModel(currentModel)
+                                      ? currentModel.replace(/^grok\//, '')
+                                      : currentModel)
                           )
                         })()}
                       </span>
@@ -1123,7 +1324,11 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             ? cursorModelOptions
                             : effectiveBackend === 'commandcode'
                               ? commandCodeModelOptions
-                              : opencodeModelOptions
+                              : effectiveBackend === 'pi'
+                                ? piModelOptions
+                                : effectiveBackend === 'grok'
+                                  ? grokModelOptions
+                                  : opencodeModelOptions
                       ).length > 1 && (
                         <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-50" />
                       )}
@@ -1238,6 +1443,30 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             ))}
                           </CommandGroup>
                         )}
+                        {effectiveBackend === 'pi' && (
+                          <CommandGroup heading={<BackendLabel backend="pi" />}>
+                            {piModelOptions.map(opt => (
+                              <CommandItem
+                                key={opt.value}
+                                value={`${opt.label} ${opt.value}`}
+                                onSelect={() => {
+                                  handleModelChange(opt.value)
+                                  setModelPopoverOpen(false)
+                                }}
+                              >
+                                <span className="text-xs">{opt.label}</span>
+                                <Check
+                                  className={cn(
+                                    'ml-auto h-3 w-3',
+                                    currentModel === opt.value
+                                      ? 'opacity-100'
+                                      : 'opacity-0'
+                                  )}
+                                />
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        )}
                         {effectiveBackend === 'commandcode' && (
                           <CommandGroup
                             heading={<BackendLabel backend="commandcode" />}
@@ -1268,7 +1497,28 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                     </Command>
                   </PopoverContent>
                 </Popover>
-              </>
+              </div>
+            )}
+            {currentMode && (
+              <div
+                data-testid="magic-prompt-mode-control"
+                className="flex items-center gap-2 max-md:w-full md:contents"
+              >
+                <span className="text-xs text-muted-foreground">Mode</span>
+                <Select value={currentMode} onValueChange={handleModeChange}>
+                  <SelectTrigger
+                    aria-label="Default mode"
+                    size="sm"
+                    className="flex-1 text-xs md:w-[110px] md:flex-none"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="plan">Plan</SelectItem>
+                    <SelectItem value="yolo">Yolo</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             )}
             <Button
               variant="outline"

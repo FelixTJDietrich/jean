@@ -7,6 +7,8 @@ import {
   Settings,
   RefreshCw,
   BellDot,
+  Download,
+  Pencil,
 } from 'lucide-react'
 import type { AppCommand } from './types'
 import { useUIStore } from '@/store/ui-store'
@@ -95,6 +97,40 @@ export const projectCommands: AppCommand[] = [
   },
 
   {
+    id: 'help.install-ai-backends',
+    label: 'Install AI Backends',
+    description: 'Open onboarding to install or reconfigure AI backend CLIs',
+    icon: Download,
+    group: 'help',
+    keywords: [
+      'install',
+      'setup',
+      'boarding',
+      'onboarding',
+      'backend',
+      'backends',
+      'ai',
+      'cli',
+      'claude',
+      'codex',
+      'opencode',
+      'pi',
+      'command',
+      'grok',
+    ],
+
+    execute: () => {
+      useUIStore.setState({
+        featureTourOpen: false,
+        onboardingOpen: true,
+        onboardingManuallyTriggered: true,
+        onboardingDismissed: false,
+        onboardingStartStep: null,
+      })
+    },
+  },
+
+  {
     id: 'open-archive',
     label: 'Open Archive',
     description: 'View archived worktrees and sessions',
@@ -137,6 +173,21 @@ export const projectCommands: AppCommand[] = [
 
     execute: context => {
       context.openUnreadSessions()
+    },
+  },
+
+  {
+    id: 'rename-session',
+    label: 'Rename Session',
+    description: 'Rename the current session tab',
+    icon: Pencil,
+    group: 'sessions',
+    keywords: ['session', 'title', 'name', 'rename', 'tab'],
+
+    isAvailable: context => context.hasActiveSession(),
+
+    execute: context => {
+      context.renameSession()
     },
   },
 

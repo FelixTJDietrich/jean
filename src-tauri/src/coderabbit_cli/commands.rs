@@ -80,7 +80,10 @@ fn parse_version(raw: &str) -> Option<String> {
 }
 
 fn get_version(binary: &std::path::Path) -> Option<String> {
-    let output = silent_command(binary).arg("--version").output().ok()?;
+    let output = crate::platform::cli_command(&binary.to_string_lossy(), None)
+        .arg("--version")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -180,6 +183,41 @@ pub async fn get_available_coderabbit_versions(
 }
 
 #[tauri::command]
+pub async fn check_coderabbit_cli_version_exists(
+    _app: AppHandle,
+    version: String,
+) -> Result<bool, String> {
+    let version = version.trim().trim_start_matches('v');
+    if version.is_empty() {
+        return Ok(false);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Jean-App/1.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+    let response = client
+        .get(format!("{CODERABBIT_RELEASES_BASE_URL}/{version}/VERSION"))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to check CodeRabbit version: {e}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "CodeRabbit version endpoint returned status: {}",
+            response.status()
+        ));
+    }
+    let raw = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read CodeRabbit version: {e}"))?;
+    Ok(sanitize_latest_version(&raw).is_some_and(|found| found == version))
+}
+
+#[tauri::command]
 pub async fn check_coderabbit_cli_installed(app: AppHandle) -> Result<CodeRabbitCliStatus, String> {
     let binary_path = resolve_coderabbit_binary(&app);
     if !binary_path.exists() {
@@ -232,7 +270,7 @@ pub async fn check_coderabbit_cli_auth(app: AppHandle) -> Result<CodeRabbitAuthS
     let output = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::task::spawn_blocking(move || {
-            silent_command(&binary_path)
+            crate::platform::cli_command(&binary_path.to_string_lossy(), None)
                 .args(["auth", "status", "--agent"])
                 .output()
         }),
@@ -322,7 +360,7 @@ pub async fn install_coderabbit_cli(app: AppHandle, version: Option<String>) -> 
         ));
     }
 
-    let verify = silent_command(&binary_path)
+    let verify = crate::platform::cli_command(&binary_path.to_string_lossy(), None)
         .arg("--version")
         .output()
         .map_err(|e| format!("Failed to verify CodeRabbit CLI: {e}"))?;
@@ -350,7 +388,7 @@ pub async fn update_coderabbit_cli(app: AppHandle) -> Result<(), String> {
     if !binary_path.exists() {
         return Err("CodeRabbit CLI not installed".to_string());
     }
-    let output = silent_command(&binary_path)
+    let output = crate::platform::cli_command(&binary_path.to_string_lossy(), None)
         .arg("update")
         .output()
         .map_err(|e| format!("Failed to update CodeRabbit CLI: {e}"))?;

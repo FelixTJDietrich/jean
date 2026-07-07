@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+use super::coalesce::ChunkCoalescer;
 use super::types::{
     is_claude_compaction_summary_text, CompactMetadata, ContentBlock, EffortLevel,
     PermissionDenial, PermissionDeniedEvent, ThinkingLevel, ToolCall, UsageData,
@@ -25,7 +26,7 @@ const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
 - Write detailed specs upfront to reduce ambiguity\n\
 - Make the plan extremely concise. Sacrifice grammar for the sake of concision.\n\
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex update_plan/CodexPlan, Cursor/OpenCode equivalent), not plain text only.\n\
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question.\n\
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline as a short numbered list of options (1, 2, 3...) and tell the user to reply with a number.\n\
 - For Codex specifically, when the current execution mode is plan: after the user answers native `request_user_input`/open questions, immediately call `update_plan`/emit `CodexPlan` again with the revised plan before any implementation.\n\
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use `update_plan`/`CodexPlan`; do not provide plain-text-only plans.\n\
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.\n\
@@ -96,13 +97,16 @@ fn execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'static s
             "You are in BUILD MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. If a required decision is missing, use AskUserQuestion instead of \
-             ExitPlanMode.",
+             ExitPlanMode; if AskUserQuestion is not in your tool set, ask inline with a short \
+             numbered list of options and have the user reply with a number.",
         ),
         "yolo" => Some(
             "You are in YOLO EXECUTION MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. Do not ask for confirmation before routine implementation steps. \
-             If a required decision is missing, use AskUserQuestion instead of ExitPlanMode.",
+             If a required decision is missing, use AskUserQuestion instead of ExitPlanMode; \
+             if AskUserQuestion is not in your tool set, ask inline with a short numbered list \
+             of options and have the user reply with a number.",
         ),
         _ => None,
     }
@@ -246,6 +250,51 @@ fn compact_metadata_from_system_message(msg: &serde_json::Value) -> Option<Compa
         })
 }
 
+#[derive(Debug, Clone)]
+struct StreamToolUse {
+    index: usize,
+    id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+fn stream_event_tool_use(msg: &serde_json::Value) -> Option<StreamToolUse> {
+    let event = msg.get("event")?;
+    if event.get("type").and_then(|v| v.as_str()) != Some("content_block_start") {
+        return None;
+    }
+
+    let block = event.get("content_block")?;
+    if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+        return None;
+    }
+
+    Some(StreamToolUse {
+        index: event.get("index")?.as_u64()? as usize,
+        id: block.get("id")?.as_str()?.to_string(),
+        name: block.get("name")?.as_str()?.to_string(),
+        input: block
+            .get("input")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn stream_event_input_delta(msg: &serde_json::Value) -> Option<(usize, &str)> {
+    let event = msg.get("event")?;
+    if event.get("type").and_then(|v| v.as_str()) != Some("content_block_delta") {
+        return None;
+    }
+
+    let index = event.get("index")?.as_u64()? as usize;
+    let delta = event.get("delta")?;
+    if delta.get("type").and_then(|v| v.as_str()) != Some("input_json_delta") {
+        return None;
+    }
+
+    Some((index, delta.get("partial_json")?.as_str()?))
+}
+
 // =============================================================================
 // Detached Claude CLI execution
 // =============================================================================
@@ -267,6 +316,64 @@ pub fn apply_custom_profile_settings(cmd: &mut std::process::Command, profile_na
             }
         }
     }
+}
+
+fn custom_profile_env_vars_from_settings(settings: &str) -> Result<Vec<(String, String)>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(settings).map_err(|e| format!("Invalid CLI profile JSON: {e}"))?;
+
+    let Some(env) = value.get("env").and_then(|env| env.as_object()) else {
+        return Ok(Vec::new());
+    };
+
+    Ok(env
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (key.to_string(), value.to_string()))
+        })
+        .collect())
+}
+
+fn load_custom_profile_env_vars(profile_name: Option<&str>) -> Vec<(String, String)> {
+    let Some(name) = profile_name.filter(|name| !name.is_empty()) else {
+        return Vec::new();
+    };
+
+    let Ok(path) = crate::get_cli_profile_path(name) else {
+        return Vec::new();
+    };
+
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read CLI profile '{}': {e}", path.display()))
+        .and_then(|settings| custom_profile_env_vars_from_settings(&settings))
+    {
+        Ok(env_vars) => env_vars,
+        Err(error) => {
+            log::warn!("{error}");
+            Vec::new()
+        }
+    }
+}
+
+/// Apply custom CLI profile env vars to a Command.
+///
+/// Newer Claude CLI versions may check authentication before fully applying
+/// `--settings` env, so API-compatible providers need their ANTHROPIC_* vars
+/// present in the child process environment too.
+pub fn apply_custom_profile_env(cmd: &mut std::process::Command, profile_name: Option<&str>) {
+    for (key, value) in load_custom_profile_env_vars(profile_name) {
+        cmd.env(key, value);
+    }
+}
+
+fn should_mirror_custom_profile_env_for_detached() -> bool {
+    cfg!(windows) && !crate::platform::get_wsl_config().enabled
 }
 
 /// Strip a `-fast` suffix from the model string.
@@ -330,6 +437,8 @@ fn build_claude_args(
     args.push("--input-format".to_string());
     args.push("stream-json".to_string());
     args.push("--verbose".to_string());
+    args.push("--tools".to_string());
+    args.push("default".to_string());
     // Stream partial messages so long-running tools (Monitor, etc.) can push events
     // to the UI without waiting for message boundaries.
     args.push("--include-partial-messages".to_string());
@@ -432,6 +541,9 @@ fn build_claude_args(
                 }
             }
         }
+    }
+    if should_mirror_custom_profile_env_for_detached() {
+        env_vars.extend(load_custom_profile_env_vars(custom_profile_name));
     }
 
     // Thinking/effort settings: passed as separate --settings JSON (no secrets here)
@@ -621,7 +733,9 @@ fn build_claude_args(
     }
 
     // End-of-turn recap instruction (compact view surfaces this block)
-    system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
+    if super::should_add_recap_instruction(app) {
+        system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
+    }
 
     // Collect all context files (issues and PRs) and concatenate into a single file
     let mut all_context_paths: Vec<std::path::PathBuf> = Vec::new();
@@ -1046,7 +1160,7 @@ pub fn execute_claude_detached(
     // Get CLI path
     let cli_path = resolve_cli_binary(app);
 
-    if !cli_path.exists() {
+    if !crate::platform::resolved_cli_exists(&cli_path) {
         let error_msg = format!(
             "Claude CLI not found at {}. Please complete setup in Settings > Advanced.",
             cli_path.display()
@@ -1181,6 +1295,40 @@ pub fn execute_claude_detached(
 // File-based tailing for detached Claude CLI
 // =============================================================================
 
+/// Emit a (possibly coalesced) `chat:chunk` batch.
+fn emit_chunk_batch(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &Option<String>,
+    content: String,
+) {
+    let chunk = ChunkEvent {
+        session_id: session_id.to_string(),
+        worktree_id: worktree_id.to_string(),
+        content,
+        run_id: run_id.clone(),
+    };
+    if let Err(e) = app.emit_all("chat:chunk", &chunk) {
+        log::error!("Failed to emit chunk: {e}");
+    }
+}
+
+/// Flush buffered text deltas. Must run before any other event is emitted
+/// for this session and before terminal events (done/cancel/error) so event
+/// ordering and content integrity are preserved.
+fn flush_pending_chunks(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &Option<String>,
+    coalescer: &mut ChunkCoalescer,
+) {
+    if let Some(content) = coalescer.flush() {
+        emit_chunk_batch(app, session_id, worktree_id, run_id, content);
+    }
+}
+
 /// Tail an NDJSON output file and emit events as new lines appear.
 ///
 /// This is used for detached Claude CLI processes where the CLI writes
@@ -1198,7 +1346,7 @@ pub fn tail_claude_output(
     pid: u32,
 ) -> Result<ClaudeResponse, String> {
     use super::detached::is_process_alive;
-    use super::tail::{NdjsonTailer, POLL_INTERVAL, POLL_INTERVAL_FAST};
+    use super::tail::{next_poll_interval, NdjsonTailer};
     use std::time::{Duration, Instant};
 
     log::trace!("Starting to tail NDJSON output for session: {session_id}");
@@ -1211,10 +1359,19 @@ pub fn tail_claude_output(
     // Create tailer starting from beginning (we want all content)
     let mut tailer = NdjsonTailer::new_from_start(output_file)?;
 
+    // Coalesce consecutive text blocks into fewer, larger chat:chunk events.
+    // Flushed before any other event is emitted and after each drained batch.
+    let mut chunk_coalescer = ChunkCoalescer::new();
+
     let mut full_content = String::new();
     let mut claude_session_id = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut content_blocks: Vec<ContentBlock> = Vec::new();
+    let mut seen_tool_use_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pending_stream_tools: std::collections::HashMap<usize, StreamToolUse> =
+        std::collections::HashMap::new();
+    let mut pending_stream_tool_inputs: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
     let mut completed = false;
     let mut cancelled = false;
     let mut user_cancelled = false; // True only for explicit user cancel (not process death)
@@ -1332,6 +1489,114 @@ pub fn tail_claude_output(
 
             let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
+            // Non-assistant lines can emit non-chunk events or terminate the
+            // stream — flush buffered text first to preserve event ordering.
+            if msg_type != "assistant" {
+                flush_pending_chunks(app, session_id, worktree_id, &run_id, &mut chunk_coalescer);
+            }
+
+            if msg_type == "stream_event" {
+                if let Some(tool) = stream_event_tool_use(&msg) {
+                    pending_stream_tool_inputs.remove(&tool.index);
+                    pending_stream_tools.insert(tool.index, tool);
+                    continue;
+                }
+
+                if let Some((index, partial_json)) = stream_event_input_delta(&msg) {
+                    let Some(pending_tool) = pending_stream_tools.get(&index).cloned() else {
+                        continue;
+                    };
+
+                    if seen_tool_use_ids.contains(&pending_tool.id) {
+                        continue;
+                    }
+
+                    let input_buf = pending_stream_tool_inputs.entry(index).or_default();
+                    input_buf.push_str(partial_json);
+
+                    let input = if input_buf.trim().is_empty() {
+                        pending_tool.input.clone()
+                    } else {
+                        match serde_json::from_str::<serde_json::Value>(input_buf) {
+                            Ok(value) => value,
+                            Err(_) => continue,
+                        }
+                    };
+
+                    if pending_tool.name == "AskUserQuestion" || pending_tool.name == "ExitPlanMode"
+                    {
+                        let id = pending_tool.id.clone();
+                        let name = pending_tool.name.clone();
+                        seen_tool_use_ids.insert(id.clone());
+                        tool_calls.push(ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            output: None,
+                            parent_tool_use_id: current_parent_tool_use_id.clone(),
+                        });
+                        content_blocks.push(ContentBlock::ToolUse {
+                            tool_call_id: id.clone(),
+                        });
+
+                        let event = ToolUseEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            parent_tool_use_id: current_parent_tool_use_id.clone(),
+                        };
+                        if let Err(e) = app.emit_all("chat:tool_use", &event) {
+                            log::error!("Failed to emit tool_use: {e}");
+                        }
+
+                        let block_event = ToolBlockEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            tool_call_id: id,
+                        };
+                        if let Err(e) = app.emit_all("chat:tool_block", &block_event) {
+                            log::error!("Failed to emit tool_block: {e}");
+                        }
+
+                        log::trace!(
+                            "Detected blocking tool {name} from stream_event, killing detached process"
+                        );
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        #[cfg(windows)]
+                        {
+                            let _ = crate::platform::silent_command("taskkill")
+                                .args(["/F", "/PID", &pid.to_string()])
+                                .output();
+                        }
+
+                        let done_event = DoneEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            waiting_for_plan: false,
+                        };
+                        if let Err(e) = app.emit_all("chat:done", &done_event) {
+                            log::error!("Failed to emit done event: {e}");
+                        }
+
+                        return Ok(ClaudeResponse {
+                            content: full_content,
+                            session_id: claude_session_id,
+                            tool_calls,
+                            content_blocks,
+                            cancelled: false,
+                            usage: None,
+                        });
+                    }
+
+                    continue;
+                }
+            }
+
             match msg_type {
                 "assistant" => {
                     // Route assistant text to a Monitor's event log when this
@@ -1401,17 +1666,15 @@ pub fn tail_claude_output(
                                                         content_blocks.push(ContentBlock::Text {
                                                             text: chat_buf.clone(),
                                                         });
-                                                        let chunk = ChunkEvent {
-                                                            session_id: session_id.to_string(),
-                                                            worktree_id: worktree_id.to_string(),
-                                                            content: chat_buf.clone(),
-                                                            run_id: run_id.clone(),
-                                                        };
-                                                        if let Err(e) =
-                                                            app.emit_all("chat:chunk", &chunk)
+                                                        if let Some(content) =
+                                                            chunk_coalescer.push(&chat_buf)
                                                         {
-                                                            log::error!(
-                                                                "Failed to emit chunk: {e}"
+                                                            emit_chunk_batch(
+                                                                app,
+                                                                session_id,
+                                                                worktree_id,
+                                                                &run_id,
+                                                                content,
                                                             );
                                                         }
                                                         chat_buf.clear();
@@ -1419,6 +1682,15 @@ pub fn tail_claude_output(
                                                     if let Some(ref mon_id) = monitor_target {
                                                         let line = trimmed.trim();
                                                         if !line.is_empty() {
+                                                            // Monitor events must not overtake
+                                                            // buffered text.
+                                                            flush_pending_chunks(
+                                                                app,
+                                                                session_id,
+                                                                worktree_id,
+                                                                &run_id,
+                                                                &mut chunk_coalescer,
+                                                            );
                                                             let evt = ToolEventEvent {
                                                                 session_id: session_id.to_string(),
                                                                 worktree_id: worktree_id
@@ -1449,20 +1721,31 @@ pub fn tail_claude_output(
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: chat_buf.clone(),
                                                 });
-                                                let chunk = ChunkEvent {
-                                                    session_id: session_id.to_string(),
-                                                    worktree_id: worktree_id.to_string(),
-                                                    content: chat_buf,
-                                                    run_id: run_id.clone(),
-                                                };
-                                                if let Err(e) = app.emit_all("chat:chunk", &chunk) {
-                                                    log::error!("Failed to emit chunk: {e}");
+                                                if let Some(content) =
+                                                    chunk_coalescer.push(&chat_buf)
+                                                {
+                                                    emit_chunk_batch(
+                                                        app,
+                                                        session_id,
+                                                        worktree_id,
+                                                        &run_id,
+                                                        content,
+                                                    );
                                                 }
                                             }
                                             continue;
                                         }
                                     }
                                     "tool_use" => {
+                                        // Tool events must not overtake buffered text.
+                                        flush_pending_chunks(
+                                            app,
+                                            session_id,
+                                            worktree_id,
+                                            &run_id,
+                                            &mut chunk_coalescer,
+                                        );
+
                                         let id = block
                                             .get("id")
                                             .and_then(|v| v.as_str())
@@ -1477,6 +1760,11 @@ pub fn tail_claude_output(
                                             .get("input")
                                             .cloned()
                                             .unwrap_or(serde_json::Value::Null);
+
+                                        if seen_tool_use_ids.contains(&id) {
+                                            continue;
+                                        }
+                                        seen_tool_use_ids.insert(id.clone());
 
                                         tool_calls.push(ToolCall {
                                             id: id.clone(),
@@ -1611,6 +1899,14 @@ pub fn tail_claude_output(
                                         if let Some(thinking) =
                                             block.get("thinking").and_then(|v| v.as_str())
                                         {
+                                            // Thinking events must not overtake buffered text.
+                                            flush_pending_chunks(
+                                                app,
+                                                session_id,
+                                                worktree_id,
+                                                &run_id,
+                                                &mut chunk_coalescer,
+                                            );
                                             content_blocks.push(ContentBlock::Thinking {
                                                 thinking: thinking.to_string(),
                                             });
@@ -2023,6 +2319,10 @@ pub fn tail_claude_output(
             }
         }
 
+        // Batch drained — flush buffered text before the monitor sweep,
+        // completion checks, and sleep so text is not held while idle.
+        flush_pending_chunks(app, session_id, worktree_id, &run_id, &mut chunk_coalescer);
+
         // Disarm Monitors whose declared timeout (+5s grace) has elapsed.
         if !armed_monitors.is_empty() {
             let now = Instant::now();
@@ -2117,14 +2417,15 @@ pub fn tail_claude_output(
             }
         }
 
-        // Adaptive sleep: poll faster when actively receiving data (5ms)
-        // to reduce per-event latency, back off to 50ms when idle.
-        std::thread::sleep(if had_data {
-            POLL_INTERVAL_FAST
-        } else {
-            POLL_INTERVAL
-        });
+        // Adaptive sleep: poll fast (5ms) while data flows to reduce
+        // per-event latency, 50ms when briefly idle, and back off to 250ms
+        // after a sustained quiet period (e.g. long thinking phases).
+        std::thread::sleep(next_poll_interval(had_data, last_output_time.elapsed()));
     }
+
+    // Flush any text still buffered when the loop exited before the
+    // terminal events below (defensive: every break follows a batch flush).
+    flush_pending_chunks(app, session_id, worktree_id, &run_id, &mut chunk_coalescer);
 
     // Drain any still-armed Monitors (process died / user cancel / completed)
     // so the UI flips their status pill away from "armed".
@@ -2264,6 +2565,26 @@ mod tests {
     }
 
     #[test]
+    fn custom_profile_env_vars_reads_string_env_entries() {
+        let settings = r#"{
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.minimax.io/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "secret",
+                "IGNORED_NON_STRING": 123
+            }
+        }"#;
+
+        let env_vars = custom_profile_env_vars_from_settings(settings).unwrap();
+
+        assert!(env_vars.contains(&(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://api.minimax.io/anthropic".to_string()
+        )));
+        assert!(env_vars.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "secret".to_string())));
+        assert!(!env_vars.iter().any(|(key, _)| key == "IGNORED_NON_STRING"));
+    }
+
+    #[test]
     fn default_global_system_prompt_prefers_interactive_plan_questions() {
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("backend-native interactive question UI"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Claude AskUserQuestion"));
@@ -2280,6 +2601,51 @@ mod tests {
             .contains("Always implement the simplest maintainable solution"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Clickable References"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("include clickable links when available"));
+    }
+
+    #[test]
+    fn extracts_tool_use_from_stream_event_content_block_start() {
+        let msg = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_question",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": "[{\"question\":\"Pick one\",\"options\":[{\"label\":\"A\"}]}]"
+                    }
+                }
+            }
+        });
+
+        let tool = stream_event_tool_use(&msg).expect("tool_use should be extracted");
+
+        assert_eq!(tool.id, "toolu_question");
+        assert_eq!(tool.name, "AskUserQuestion");
+        assert_eq!(
+            tool.input.get("questions").and_then(|value| value.as_str()),
+            Some("[{\"question\":\"Pick one\",\"options\":[{\"label\":\"A\"}]}]")
+        );
+    }
+
+    #[test]
+    fn extracts_stream_event_input_json_delta() {
+        let msg = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 2,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": "{\"questions\":"
+                }
+            }
+        });
+
+        assert_eq!(stream_event_input_delta(&msg), Some((2, "{\"questions\":")));
     }
 
     #[test]

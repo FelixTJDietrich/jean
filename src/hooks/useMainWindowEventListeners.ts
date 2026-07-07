@@ -174,7 +174,6 @@ function executeKeybindingAction(
   // Canvas-only actions: blocked when the session chat modal is open
   const CANVAS_ONLY_ACTIONS = new Set<KeybindingAction>([
     'open_plan',
-    'open_recap',
     'restore_last_archived',
     'focus_canvas_search',
   ])
@@ -429,10 +428,6 @@ function executeKeybindingAction(
     case 'open_plan':
       logger.debug('Keybinding: open_plan')
       window.dispatchEvent(new CustomEvent('open-plan'))
-      break
-    case 'open_recap':
-      logger.debug('Keybinding: open_recap')
-      window.dispatchEvent(new CustomEvent('open-recap'))
       break
     case 'restore_last_archived':
       logger.debug('Keybinding: restore_last_archived')
@@ -939,10 +934,7 @@ export function useMainWindowEventListeners() {
             const currentQueue =
               useChatStore.getState().messageQueues[sessionId] ?? []
             // Skip if the queue already matches (this client caused the event)
-            if (
-              currentQueue.length === queue.length &&
-              currentQueue[0]?.id === queue[0]?.id
-            )
+            if (JSON.stringify(currentQueue) === JSON.stringify(queue))
               return
             useChatStore.setState(state => ({
               messageQueues: {

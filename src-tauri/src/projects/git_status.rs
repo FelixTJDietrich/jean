@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Information about a worktree for polling
 #[derive(Debug, Clone)]
 pub struct ActiveWorktreeInfo {
@@ -655,13 +657,18 @@ pub fn get_git_diff(
 ) -> Result<GitDiff, String> {
     let base = base_branch.unwrap_or("main");
     let range = format!("origin/{base}...HEAD");
+    let has_head = has_head_commit(repo_path);
 
     let (base_ref, target_ref, args): (String, String, Vec<&str>) = match diff_type {
-        "uncommitted" => (
-            "HEAD".to_string(),
-            "working directory".to_string(),
-            vec!["diff", "HEAD", "--unified=3"],
-        ),
+        "uncommitted" => {
+            let base_ref = if has_head { "HEAD" } else { "empty tree" };
+            let diff_base = if has_head { "HEAD" } else { EMPTY_TREE_HASH };
+            (
+                base_ref.to_string(),
+                "working directory".to_string(),
+                vec!["diff", diff_base, "--unified=3"],
+            )
+        }
         "branch" => {
             let origin_ref = format!("origin/{base}");
             (
@@ -714,6 +721,14 @@ pub fn get_git_diff(
         files,
         raw_patch,
     })
+}
+
+fn has_head_commit(repo_path: &str) -> bool {
+    wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -833,6 +848,20 @@ pub fn get_branch_status(info: &ActiveWorktreeInfo) -> Result<GitBranchStatus, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn run_test_git(repo: &Path, args: &[&str]) {
+        let output = wsl_aware_command("git", Some(repo))
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn test_git_branch_status_serialization() {
@@ -999,5 +1028,25 @@ mod tests {
         let json = serde_json::to_string(&hunk).unwrap();
         assert!(json.contains("\"old_start\":1"));
         assert!(json.contains("\"new_lines\":7"));
+    }
+
+    #[test]
+    fn uncommitted_diff_works_before_first_commit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run_test_git(repo, &["init"]);
+        std::fs::write(repo.join("hello.txt"), "hello\n").expect("write file");
+
+        let diff = get_git_diff(repo.to_str().unwrap(), "uncommitted", None)
+            .expect("fresh repo diff should work");
+
+        assert_eq!(diff.base_ref, "empty tree");
+        assert_eq!(diff.target_ref, "working directory");
+        assert_eq!(diff.total_additions, 1);
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "hello.txt");
+        assert!(diff
+            .raw_patch
+            .contains("diff --git a/hello.txt b/hello.txt"));
     }
 }

@@ -20,6 +20,7 @@ import {
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
 import { cn } from '@/lib/utils'
+import { isNativeApp } from '@/lib/environment'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import {
   Search,
@@ -173,6 +174,7 @@ import {
   type CanvasPredefinedFilterTab,
   type CanvasPredefinedFilterTabItem,
 } from './canvas-worktree-filters'
+import { getCanvasStatusRefreshMs } from './canvas-status-refresh'
 import { getWorktreeLabelContainerClassName } from './worktree-label-layout'
 const GitDiffModal = lazy(() =>
   import('@/components/chat/GitDiffModal').then(mod => ({
@@ -192,7 +194,7 @@ import {
   triggerImmediateGitPoll,
   performGitPull,
 } from '@/services/git-status'
-import { useRemotePicker } from '@/hooks/useRemotePicker'
+import { pushNeedsRemotePicker, useRemotePicker } from '@/hooks/useRemotePicker'
 import {
   DRAG_SCOPE_CANVAS_WORKTREE_LIST,
   isWorktreeDragData,
@@ -514,7 +516,8 @@ function WorktreeSectionHeader({
   const handlePush = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
-      pickRemoteOrRun(async remote => {
+
+      const runPush = async (remote?: string) => {
         const opToast = dismissibleToast.loading('Pushing changes...')
         try {
           const result = await gitPush(
@@ -534,9 +537,15 @@ function WorktreeSectionHeader({
         } catch (error) {
           opToast.error(`Push failed: ${error}`)
         }
-      })
+      }
+
+      if (pushNeedsRemotePicker(worktree.pr_number)) {
+        pickRemoteOrRun(runPush)
+      } else {
+        runPush()
+      }
     },
-    [worktree.path, worktree.pr_number, projectId, pickRemoteOrRun]
+    [pickRemoteOrRun, worktree.path, worktree.pr_number, projectId]
   )
 
   const handleDiffClick = useCallback(() => {
@@ -847,6 +856,7 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [activeFilterTab, setActiveFilterTab] = useState<CanvasFilterTab>('all')
   const isMobile = useIsMobile()
+  const isNative = isNativeApp()
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false)
   const showWorktreeLabelContextMenu = shouldShowWorktreeLabelContextMenu({
     isMobile,
@@ -2806,14 +2816,15 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
   useEffect(() => {
     if (!isTauri() || !projectId || readyWorktrees.length === 0) return
 
+    const refreshMs = getCanvasStatusRefreshMs(preferences?.git_poll_interval)
     const interval = setInterval(() => {
       if (document.hasFocus()) {
         fetchWorktreesStatus(projectId)
       }
-    }, 60_000) // 1 minute
+    }, refreshMs)
 
     return () => clearInterval(interval)
-  }, [projectId, readyWorktrees.length])
+  }, [projectId, readyWorktrees.length, preferences?.git_poll_interval])
 
   // Refresh git status when session modal closes (user returns to canvas)
   const prevModalRef = useRef(selectedWorktreeModal)
@@ -3011,12 +3022,14 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                       Open in {getEditorLabel(preferences?.editor)}
                     </DropdownMenuItem>
 
-                    <DropdownMenuItem
-                      onSelect={() => openInFinder.mutate(project.path)}
-                    >
-                      <FolderOpen className="h-4 w-4" />
-                      Open in Finder
-                    </DropdownMenuItem>
+                    {isNative && (
+                      <DropdownMenuItem
+                        onSelect={() => openInFinder.mutate(project.path)}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        Open in Finder
+                      </DropdownMenuItem>
+                    )}
 
                     <DropdownMenuItem
                       onSelect={() =>

@@ -303,6 +303,9 @@ export function useGhCliSetup() {
     })
   }
 
+  const checkManualVersion = (version: string) =>
+    invoke<boolean>('check_gh_cli_version_exists', { version })
+
   return {
     status: status.data,
     isStatusLoading: status.isLoading,
@@ -315,6 +318,7 @@ export function useGhCliSetup() {
     installError: installMutation.error,
     progress,
     install,
+    checkManualVersion,
     refetchStatus: status.refetch,
   }
 }

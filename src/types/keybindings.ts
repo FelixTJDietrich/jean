@@ -1,4 +1,6 @@
 // Keybinding action identifiers - extensible for future shortcuts
+import { isMacOS } from '@/lib/platform'
+
 export type KeybindingAction =
   | 'focus_chat_input'
   | 'toggle_left_sidebar'
@@ -22,7 +24,6 @@ export type KeybindingAction =
   | 'approve_plan_worktree_build'
   | 'approve_plan_worktree_yolo'
   | 'open_plan'
-  | 'open_recap'
   | 'restore_last_archived'
   | 'focus_canvas_search'
   | 'toggle_terminal'
@@ -84,7 +85,6 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   approve_plan_worktree_build: 'mod+alt+enter',
   approve_plan_worktree_yolo: 'mod+alt+y',
   open_plan: 'p',
-  open_recap: 'r',
   restore_last_archived: 'mod+alt+shift+t',
   focus_canvas_search: 'slash',
   toggle_terminal: 'mod+backquote',
@@ -257,13 +257,7 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     default_shortcut: 'p',
     category: 'chat',
   },
-  {
-    action: 'open_recap',
-    label: 'Open recap',
-    description: 'Open the session recap dialog for the selected session',
-    default_shortcut: 'r',
-    category: 'chat',
-  },
+
   {
     action: 'new_worktree',
     label: 'New worktree',
@@ -420,24 +414,22 @@ export function formatShortcutDisplay(
 ): string {
   if (!shortcut) return ''
 
-  const isMac =
-    typeof navigator !== 'undefined' && navigator.platform.includes('Mac')
   // On macOS web, Cmd shortcuts are intercepted by the browser.
   // Ctrl+key already works (both map to "mod"), so show ⌃ instead of ⌘.
   const isWeb =
     typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
-  const useMacCtrl = isMac && isWeb
+  const useMacCtrl = isMacOS && isWeb
 
   return shortcut
     .split('+')
     .map(part => {
       switch (part) {
         case 'mod':
-          return useMacCtrl ? '⌃' : isMac ? '⌘' : 'Ctrl'
+          return useMacCtrl ? '⌃' : isMacOS ? '⌘' : 'Ctrl'
         case 'shift':
-          return isMac ? '⇧' : 'Shift'
+          return isMacOS ? '⇧' : 'Shift'
         case 'alt':
-          return isMac ? '⌥' : 'Alt'
+          return isMacOS ? '⌥' : 'Alt'
         case 'comma':
           return ','
         case 'period':
@@ -453,9 +445,9 @@ export function formatShortcutDisplay(
         case 'slash':
           return '/'
         case 'backspace':
-          return isMac ? '⌫' : 'Backspace'
+          return isMacOS ? '⌫' : 'Backspace'
         case 'enter':
-          return isMac ? '↩' : 'Enter'
+          return isMacOS ? '↩' : 'Enter'
         case 'tab':
           return 'Tab'
         case 'escape':

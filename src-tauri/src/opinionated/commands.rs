@@ -1,18 +1,33 @@
 use crate::platform::silent_command;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Serialize)]
 pub struct PluginStatus {
     pub installed: bool,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backends: Option<Vec<BackendPluginStatus>>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct BackendPluginStatus {
+    pub id: String,
+    pub label: String,
+    pub installed: bool,
 }
 
 const SUPERPOWERS_GIT_WORKTREE_SKILL: &str = "using-git-worktrees";
 const SUPERPOWERS_REPO_URL: &str = "https://github.com/obra/superpowers";
 const SUPERPOWERS_ARCHIVE_URL: &str =
     "https://github.com/obra/superpowers/archive/refs/heads/main.zip";
+const RTK_RELEASE_LATEST_API: &str = "https://api.github.com/repos/rtk-ai/rtk/releases/latest";
+const RTK_CLI_DIR_NAME: &str = "rtk-cli";
+const RTK_BINARY_NAME: &str = if cfg!(windows) { "rtk.exe" } else { "rtk" };
 
 fn superpowers_claude_plugin_target() -> &'static str {
     "superpowers@claude-plugins-official"
@@ -29,7 +44,7 @@ pub async fn check_opinionated_plugin_status(
     plugin_name: String,
 ) -> Result<PluginStatus, String> {
     match plugin_name.as_str() {
-        "rtk" => check_rtk_status().await,
+        "rtk" => check_rtk_status(&app).await,
         "caveman" => check_caveman_status(&app).await,
         "superpowers" => check_superpowers_status(&app).await,
         _ => Err(format!("Unknown plugin: {plugin_name}")),
@@ -42,7 +57,7 @@ pub async fn install_opinionated_plugin(
     plugin_name: String,
 ) -> Result<String, String> {
     match plugin_name.as_str() {
-        "rtk" => install_rtk().await,
+        "rtk" => install_rtk(&app).await,
         "caveman" => install_caveman(&app).await,
         "superpowers" => install_superpowers(&app).await,
         _ => Err(format!("Unknown plugin: {plugin_name}")),
@@ -64,10 +79,24 @@ pub async fn uninstall_opinionated_plugin(
     }
 }
 
-async fn check_rtk_status() -> Result<PluginStatus, String> {
-    let result = tokio::task::spawn_blocking(|| silent_command("rtk").arg("--version").output())
-        .await
-        .map_err(|e| e.to_string())?;
+async fn check_rtk_status(app: &AppHandle) -> Result<PluginStatus, String> {
+    let managed_binary = rtk_binary_path(app).ok();
+    let result = tokio::task::spawn_blocking(move || {
+        let path_result = silent_command("rtk").arg("--version").output();
+        if matches!(&path_result, Ok(output) if output.status.success()) {
+            return path_result;
+        }
+
+        if let Some(binary) = managed_binary {
+            if binary.exists() {
+                return silent_command(binary).arg("--version").output();
+            }
+        }
+
+        path_result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -76,28 +105,25 @@ async fn check_rtk_status() -> Result<PluginStatus, String> {
             Ok(PluginStatus {
                 installed: true,
                 version,
+                backends: None,
             })
         }
         _ => Ok(PluginStatus {
             installed: false,
             version: None,
+            backends: None,
         }),
     }
 }
 
 async fn check_caveman_status(app: &AppHandle) -> Result<PluginStatus, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    let installed_backends = detected_jean_backends(app);
-
-    let home_for_check = home.clone();
-    let covered_backends = tokio::task::spawn_blocking(move || {
-        installed_backends
-            .into_iter()
-            .filter(|backend| caveman_installed_for_backend(&home_for_check, backend))
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let statuses = opinionated_backend_statuses(&home, "caveman");
+    let covered_backends = statuses
+        .iter()
+        .filter(|backend| backend.installed)
+        .map(|backend| backend.id.as_str())
+        .collect::<Vec<_>>();
 
     let installed = caveman_status_installed(&covered_backends, &detected_jean_backends(app));
 
@@ -107,122 +133,469 @@ async fn check_caveman_status(app: &AppHandle) -> Result<PluginStatus, String> {
         Some(covered_backends.join(", "))
     };
 
-    Ok(PluginStatus { installed, version })
+    Ok(PluginStatus {
+        installed,
+        version,
+        backends: Some(statuses),
+    })
 }
 
-async fn install_rtk() -> Result<String, String> {
-    // Try brew first on macOS
-    let brew_result = tokio::task::spawn_blocking(|| {
-        silent_command("brew")
-            .args(["install", "rtk-ai/tap/rtk"])
-            .output()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+async fn install_rtk(app: &AppHandle) -> Result<String, String> {
+    let asset = current_rtk_asset()?;
+    let binary_path = rtk_binary_path(app)?;
 
-    let install_ok = match brew_result {
-        Ok(output) if output.status.success() => true,
-        _ => {
-            // Fallback to curl installer
-            let curl_result = tokio::task::spawn_blocking(|| {
-                silent_command("sh")
-                    .args([
-                        "-c",
-                        "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh",
-                    ])
-                    .output()
-            })
-            .await
-            .map_err(|e| e.to_string())?;
+    let (archive, checksums) = download_rtk_release(&asset).await?;
+    verify_rtk_checksum(&archive, &checksums, asset.name)?;
 
-            match curl_result {
-                Ok(output) if output.status.success() => true,
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!("RTK installation failed: {stderr}"));
-                }
-                Err(e) => return Err(format!("Failed to run installer: {e}")),
-            }
-        }
+    let binary = match asset.format {
+        RtkArchiveFormat::Zip => extract_rtk_zip_binary(&archive, asset.binary_name)?,
+        RtkArchiveFormat::TarGz => extract_rtk_tar_gz_binary(&archive, asset.binary_name)?,
     };
 
-    if install_ok {
-        // Run post-install setup
-        let init_result =
-            tokio::task::spawn_blocking(|| silent_command("rtk").args(["init", "-g"]).output())
-                .await
-                .map_err(|e| e.to_string())?;
-
-        match init_result {
-            Ok(output) if output.status.success() => {
-                Ok("RTK installed and initialized successfully".to_string())
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Ok(format!("RTK installed but init had warnings: {stderr}"))
-            }
-            Err(e) => Ok(format!("RTK installed but init failed: {e}")),
-        }
-    } else {
-        Err("RTK installation failed".to_string())
+    if let Some(parent) = binary_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create RTK install directory: {e}"))?;
     }
+    crate::platform::write_binary_file(&binary_path, &binary)
+        .map_err(|e| format!("Failed to install RTK binary: {e}"))?;
+    if let Some(parent) = binary_path.parent() {
+        add_dir_to_process_path(parent)?;
+        persist_rtk_dir_to_user_path(parent);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&binary_path)
+            .map_err(|e| format!("Failed to get RTK binary metadata: {e}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&binary_path, perms)
+            .map_err(|e| format!("Failed to set RTK binary permissions: {e}"))?;
+    }
+
+    let verify_output = silent_command(&binary_path)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("Failed to verify RTK installation: {e}"))?;
+    if !verify_output.status.success() {
+        return Err(command_failure_message(
+            "RTK verification failed",
+            &verify_output,
+        ));
+    }
+
+    let init_result = silent_command(&binary_path).args(["init", "-g"]).output();
+    match init_result {
+        Ok(output) if output.status.success() => Ok(format!(
+            "RTK installed and initialized successfully at {}",
+            binary_path.display()
+        )),
+        Ok(output) => Ok(format!(
+            "RTK installed to {} but init had warnings: {}",
+            binary_path.display(),
+            command_output_detail(&output)
+        )),
+        Err(e) => Ok(format!(
+            "RTK installed to {} but init failed: {e}",
+            binary_path.display()
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RtkArchiveFormat {
+    Zip,
+    TarGz,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RtkAsset {
+    name: &'static str,
+    binary_name: &'static str,
+    format: RtkArchiveFormat,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RtkGitHubRelease {
+    assets: Vec<RtkGitHubAsset>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RtkGitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+fn rtk_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {e}"))?;
+    Ok(app_data_dir.join(RTK_CLI_DIR_NAME).join(RTK_BINARY_NAME))
+}
+
+fn add_dir_to_process_path(dir: &Path) -> Result<(), String> {
+    let current = std::env::var_os("PATH");
+    let updated = path_with_prepended_dir(current.as_deref(), dir)?;
+    std::env::set_var("PATH", updated);
+    Ok(())
+}
+
+fn path_with_prepended_dir(current: Option<&OsStr>, dir: &Path) -> Result<OsString, String> {
+    let existing: Vec<PathBuf> = current
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if existing.iter().any(|path| path == dir) {
+        return current
+            .map(OsStr::to_os_string)
+            .ok_or_else(|| "PATH is empty".to_string());
+    }
+
+    let mut updated = Vec::with_capacity(existing.len() + 1);
+    updated.push(dir.to_path_buf());
+    updated.extend(existing);
+    std::env::join_paths(updated).map_err(|e| format!("Failed to update PATH for RTK: {e}"))
+}
+
+#[cfg(windows)]
+fn persist_rtk_dir_to_user_path(dir: &Path) {
+    let dir = dir.to_string_lossy().to_string();
+    let script = r#"
+$dir = $args[0]
+$old = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ([string]::IsNullOrWhiteSpace($old)) {
+  [Environment]::SetEnvironmentVariable('Path', $dir, 'User')
+  exit 0
+}
+$parts = $old -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+if ($parts -notcontains $dir) {
+  [Environment]::SetEnvironmentVariable('Path', ($old.TrimEnd(';') + ';' + $dir), 'User')
+}
+"#;
+    match silent_command("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            &dir,
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => log::warn!(
+            "Failed to persist RTK install dir to user PATH: {}",
+            command_output_detail(&output)
+        ),
+        Err(e) => log::warn!("Failed to run PowerShell while persisting RTK PATH: {e}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn persist_rtk_dir_to_user_path(_dir: &Path) {}
+
+fn current_rtk_asset() -> Result<RtkAsset, String> {
+    rtk_asset_for_platform(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn rtk_asset_for_platform(os: &str, arch: &str) -> Result<RtkAsset, String> {
+    let asset = match (os, arch) {
+        ("windows", "x86_64") => RtkAsset {
+            name: "rtk-x86_64-pc-windows-msvc.zip",
+            binary_name: "rtk.exe",
+            format: RtkArchiveFormat::Zip,
+        },
+        ("macos", "aarch64") => RtkAsset {
+            name: "rtk-aarch64-apple-darwin.tar.gz",
+            binary_name: "rtk",
+            format: RtkArchiveFormat::TarGz,
+        },
+        ("macos", "x86_64") => RtkAsset {
+            name: "rtk-x86_64-apple-darwin.tar.gz",
+            binary_name: "rtk",
+            format: RtkArchiveFormat::TarGz,
+        },
+        ("linux", "x86_64") => RtkAsset {
+            name: "rtk-x86_64-unknown-linux-musl.tar.gz",
+            binary_name: "rtk",
+            format: RtkArchiveFormat::TarGz,
+        },
+        ("linux", "aarch64") => RtkAsset {
+            name: "rtk-aarch64-unknown-linux-gnu.tar.gz",
+            binary_name: "rtk",
+            format: RtkArchiveFormat::TarGz,
+        },
+        _ => {
+            return Err(format!(
+                "Unsupported RTK platform: {os}/{arch}. Install manually from https://github.com/rtk-ai/rtk/releases"
+            ))
+        }
+    };
+    Ok(asset)
+}
+
+async fn download_rtk_release(asset: &RtkAsset) -> Result<(Vec<u8>, String), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("Jean-App/1.0")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+    let release: RtkGitHubRelease = client
+        .get(RTK_RELEASE_LATEST_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch RTK release info: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Failed to fetch RTK release info: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse RTK release info: {e}"))?;
+
+    let archive_url = release_asset_url(&release, asset.name)?;
+    let checksums_url = release_asset_url(&release, "checksums.txt")?;
+
+    let archive = client
+        .get(archive_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download RTK archive: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Failed to download RTK archive: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read RTK archive: {e}"))?
+        .to_vec();
+
+    let checksums = client
+        .get(checksums_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download RTK checksums: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Failed to download RTK checksums: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read RTK checksums: {e}"))?;
+
+    Ok((archive, checksums))
+}
+
+fn release_asset_url(release: &RtkGitHubRelease, name: &str) -> Result<String, String> {
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .map(|asset| asset.browser_download_url.clone())
+        .ok_or_else(|| format!("RTK release asset not found: {name}"))
+}
+
+fn rtk_expected_checksum<'a>(checksums: &'a str, asset_name: &str) -> Option<&'a str> {
+    checksums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let checksum = parts.next()?;
+        let name = parts.next()?;
+        (name == asset_name).then_some(checksum)
+    })
+}
+
+fn verify_rtk_checksum(archive: &[u8], checksums: &str, asset_name: &str) -> Result<(), String> {
+    let expected = rtk_expected_checksum(checksums, asset_name)
+        .ok_or_else(|| format!("Checksum for {asset_name} not found"))?;
+    let actual = format!("{:x}", Sha256::digest(archive));
+    if expected != actual {
+        return Err(format!(
+            "RTK checksum mismatch for {asset_name}: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn extract_rtk_zip_binary(archive: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    let cursor = std::io::Cursor::new(archive);
+    let mut zip =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open RTK zip: {e}"))?;
+
+    for i in 0..zip.len() {
+        let mut file = zip
+            .by_index(i)
+            .map_err(|e| format!("Failed to read RTK zip entry: {e}"))?;
+        let Some(name) = file.enclosed_name().and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        }) else {
+            continue;
+        };
+
+        if name == binary_name {
+            let mut binary = Vec::new();
+            file.read_to_end(&mut binary)
+                .map_err(|e| format!("Failed to read RTK binary from zip: {e}"))?;
+            return Ok(binary);
+        }
+    }
+
+    Err(format!("RTK binary {binary_name} not found in zip"))
+}
+
+fn extract_rtk_tar_gz_binary(archive: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    let cursor = std::io::Cursor::new(archive);
+    let decoder = flate2::read::GzDecoder::new(cursor);
+    let mut tar = tar::Archive::new(decoder);
+
+    for entry in tar
+        .entries()
+        .map_err(|e| format!("Failed to read RTK tar entries: {e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("Failed to read RTK tar entry: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("Failed to read RTK tar path: {e}"))?;
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if name == binary_name {
+            let mut binary = Vec::new();
+            entry
+                .read_to_end(&mut binary)
+                .map_err(|e| format!("Failed to read RTK binary from tar: {e}"))?;
+            return Ok(binary);
+        }
+    }
+
+    Err(format!("RTK binary {binary_name} not found in tar.gz"))
+}
+
+fn command_failure_message(prefix: &str, output: &std::process::Output) -> String {
+    format!("{prefix}: {}", command_output_detail(output))
+}
+
+fn command_output_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("exit code {}", output.status)
 }
 
 async fn install_caveman(app: &AppHandle) -> Result<String, String> {
-    let backends = detected_jean_backends(app);
-    if backends.is_empty() {
-        return Err("Install at least one Jean AI backend before installing Caveman".to_string());
-    }
+    let detected_backends = detected_jean_backends(app);
+    let backends = installable_jean_backends()
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    let native_backends = detected_backends
+        .iter()
+        .copied()
+        .filter(|backend| matches!(*backend, "claude" | "codex" | "opencode" | "cursor"))
+        .collect::<Vec<_>>();
 
-    let mut args = vec![
-        "-y".to_string(),
-        "github:JuliusBrussee/caveman".to_string(),
-        "--".to_string(),
-        "--non-interactive".to_string(),
-        "--with-init".to_string(),
-    ];
+    let install_result = if native_backends.is_empty() {
+        None
+    } else {
+        let mut args = vec![
+            "-y".to_string(),
+            "github:JuliusBrussee/caveman".to_string(),
+            "--".to_string(),
+            "--non-interactive".to_string(),
+            "--with-init".to_string(),
+        ];
 
-    for backend in &backends {
-        args.push("--only".to_string());
-        args.push((*backend).to_string());
-    }
+        for backend in &native_backends {
+            args.push("--only".to_string());
+            args.push((*backend).to_string());
+        }
 
-    let install_result = tokio::task::spawn_blocking(move || {
-        let mut command = silent_command("npx");
-        command.args(args);
-        command.output()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let mut command = silent_command("npx");
+                command.args(args);
+                command.output()
+            })
+            .await
+            .map_err(|e| e.to_string())?,
+        )
+    };
 
     match install_result {
-        Ok(output) if output.status.success() => Ok(format!(
-            "Caveman installed for Jean backends: {}",
-            backends.join(", ")
-        )),
-        Ok(output) => {
+        Some(Ok(output)) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let detail = if stderr.is_empty() { stdout } else { stderr };
             Err(format!("Failed to install Caveman: {detail}"))
         }
-        Err(e) => Err(format!("Failed to run Caveman installer with npx: {e}")),
+        Some(Err(e)) => Err(format!("Failed to run Caveman installer with npx: {e}")),
+        _ => {
+            let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+            let backends_for_global = backends.clone();
+            let global_result = tokio::task::spawn_blocking(move || {
+                mirror_caveman_to_jean_global_backends(&home, &backends_for_global)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+            let mut warnings = Vec::new();
+            if let Err(e) = global_result {
+                warnings.push(e);
+            }
+
+            let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+            let statuses = opinionated_backend_statuses(&home, "caveman");
+            let missing = statuses
+                .iter()
+                .filter(|status| backends.contains(&status.id.as_str()) && !status.installed)
+                .map(|status| status.label.clone())
+                .collect::<Vec<_>>();
+            let installed = statuses
+                .iter()
+                .filter(|status| backends.contains(&status.id.as_str()) && status.installed)
+                .map(|status| status.label.clone())
+                .collect::<Vec<_>>();
+
+            if missing.is_empty() {
+                Ok(format!(
+                    "Caveman installed for Jean backends: {}",
+                    installed.join(", ")
+                ))
+            } else {
+                let mut message = format!(
+                    "Caveman partially installed. Installed: {}. Missing: {}",
+                    if installed.is_empty() {
+                        "none".to_string()
+                    } else {
+                        installed.join(", ")
+                    },
+                    missing.join(", ")
+                );
+                if !warnings.is_empty() {
+                    message.push_str(&format!(". Warnings: {}", warnings.join("; ")));
+                }
+                Ok(message)
+            }
+        }
     }
 }
 
 async fn check_superpowers_status(app: &AppHandle) -> Result<PluginStatus, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    let installed_backends = detected_jean_backends(app);
-
-    let home_for_check = home.clone();
-    let covered_backends = tokio::task::spawn_blocking(move || {
-        installed_backends
-            .into_iter()
-            .filter(|backend| superpowers_installed_for_backend(&home_for_check, backend))
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let statuses = opinionated_backend_statuses(&home, "superpowers");
+    let covered_backends = statuses
+        .iter()
+        .filter(|backend| backend.installed)
+        .map(|backend| backend.id.as_str())
+        .collect::<Vec<_>>();
 
     let version = if covered_backends.is_empty() {
         None
@@ -233,6 +606,7 @@ async fn check_superpowers_status(app: &AppHandle) -> Result<PluginStatus, Strin
     Ok(PluginStatus {
         installed: superpowers_status_installed(&covered_backends, &detected_jean_backends(app)),
         version,
+        backends: Some(statuses),
     })
 }
 
@@ -542,6 +916,21 @@ fn uninstall_caveman_from_home(home: &Path) -> Result<Vec<String>, String> {
         &home.join(".cursor").join("rules").join("caveman.mdc"),
         &mut removed,
     )?;
+    for backend in [
+        "claude",
+        "codex",
+        "opencode",
+        "cursor",
+        "pi",
+        "commandcode",
+        "grok",
+    ] {
+        remove_matching_skill_dirs(
+            &jean_global_backend_skills_dir(home, backend),
+            "caveman",
+            &mut removed,
+        )?;
+    }
 
     Ok(removed)
 }
@@ -568,6 +957,21 @@ fn uninstall_superpowers_from_home(home: &Path) -> Result<Vec<String>, String> {
         "superpowers",
         &mut removed,
     )?;
+    for backend in [
+        "claude",
+        "codex",
+        "opencode",
+        "cursor",
+        "pi",
+        "commandcode",
+        "grok",
+    ] {
+        remove_matching_skill_dirs(
+            &jean_global_backend_skills_dir(home, backend),
+            "superpowers",
+            &mut removed,
+        )?;
+    }
 
     Ok(removed)
 }
@@ -615,6 +1019,12 @@ fn detected_jean_backends(app: &AppHandle) -> Vec<&'static str> {
             Some(crate::opencode_cli::resolve_cli_binary(app)),
         ),
         ("cursor", Some(crate::cursor_cli::resolve_cli_binary(app))),
+        ("pi", Some(crate::pi_cli::resolve_cli_binary(app))),
+        (
+            "commandcode",
+            Some(crate::commandcode_cli::resolve_cli_binary(app)),
+        ),
+        ("grok", Some(crate::grok_cli::resolve_cli_binary(app))),
     ];
 
     candidates
@@ -623,18 +1033,61 @@ fn detected_jean_backends(app: &AppHandle) -> Vec<&'static str> {
         .collect()
 }
 
-fn caveman_status_installed(covered_backends: &[&str], _detected_backends: &[&str]) -> bool {
-    !covered_backends.is_empty()
+fn installable_jean_backends() -> [(&'static str, &'static str); 7] {
+    [
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("opencode", "OpenCode"),
+        ("cursor", "Cursor"),
+        ("pi", "Pi"),
+        ("commandcode", "Command Code"),
+        ("grok", "Grok"),
+    ]
 }
 
-fn superpowers_status_installed(covered_backends: &[&str], _detected_backends: &[&str]) -> bool {
-    !covered_backends.is_empty()
+fn status_installed(covered_backends: &[&str], detected_backends: &[&str]) -> bool {
+    !detected_backends.is_empty()
+        && detected_backends
+            .iter()
+            .all(|backend| covered_backends.contains(backend))
+}
+
+fn caveman_status_installed(covered_backends: &[&str], detected_backends: &[&str]) -> bool {
+    status_installed(covered_backends, detected_backends)
+}
+
+fn superpowers_status_installed(covered_backends: &[&str], detected_backends: &[&str]) -> bool {
+    status_installed(covered_backends, detected_backends)
+}
+
+fn opinionated_backend_statuses(home: &Path, plugin_id: &str) -> Vec<BackendPluginStatus> {
+    installable_jean_backends()
+        .into_iter()
+        .map(|(id, label)| {
+            let installed = match plugin_id {
+                "caveman" => caveman_installed_for_backend(home, id),
+                "superpowers" => superpowers_installed_for_backend(home, id),
+                _ => false,
+            };
+
+            BackendPluginStatus {
+                id: id.to_string(),
+                label: label.to_string(),
+                installed,
+            }
+        })
+        .collect()
 }
 
 fn caveman_installed_for_backend(home: &Path, backend: &str) -> bool {
+    let global_installed =
+        skill_installed_marker(&jean_global_backend_skills_dir(home, backend), "caveman");
     match backend {
-        "claude" => plugin_installed_marker(home, "caveman"),
-        "codex" => skill_installed_marker(&home.join(".codex").join("skills"), "caveman"),
+        "claude" => plugin_installed_marker(home, "caveman") || global_installed,
+        "codex" => {
+            skill_installed_marker(&home.join(".codex").join("skills"), "caveman")
+                || global_installed
+        }
         "opencode" => {
             let config_dir = opencode_config_dir(home);
             config_dir
@@ -644,6 +1097,7 @@ fn caveman_installed_for_backend(home: &Path, backend: &str) -> bool {
                 .exists()
                 || skill_installed_marker(&config_dir.join("skills"), "caveman")
                 || config_dir.join("commands").join("caveman.md").exists()
+                || global_installed
         }
         "cursor" => {
             skill_installed_marker(&home.join(".cursor").join("skills-cursor"), "caveman")
@@ -652,14 +1106,20 @@ fn caveman_installed_for_backend(home: &Path, backend: &str) -> bool {
                     .join("rules")
                     .join("caveman.mdc")
                     .exists()
+                || global_installed
         }
+        "pi" | "commandcode" | "grok" => global_installed,
         _ => false,
     }
 }
 
 fn superpowers_installed_for_backend(home: &Path, backend: &str) -> bool {
+    let global_installed = skill_installed_marker(
+        &jean_global_backend_skills_dir(home, backend),
+        "superpowers",
+    );
     match backend {
-        "claude" => plugin_installed_marker(home, "superpowers"),
+        "claude" => plugin_installed_marker(home, "superpowers") || global_installed,
         "codex" => {
             skill_installed_marker(&home.join(".codex").join("skills"), "superpowers")
                 || codex_plugin_registered(home, "superpowers")
@@ -670,15 +1130,23 @@ fn superpowers_installed_for_backend(home: &Path, backend: &str) -> bool {
                     .join("openai-curated")
                     .join("superpowers")
                     .exists()
+                || global_installed
         }
         "opencode" => {
             skill_installed_marker(&opencode_config_dir(home).join("skills"), "superpowers")
+                || global_installed
         }
         "cursor" => {
             skill_installed_marker(&home.join(".cursor").join("skills-cursor"), "superpowers")
+                || global_installed
         }
+        "pi" | "commandcode" | "grok" => global_installed,
         _ => false,
     }
+}
+
+fn jean_global_backend_skills_dir(home: &Path, backend: &str) -> PathBuf {
+    home.join(".jean").join("skills").join(backend)
 }
 
 fn backend_skills_dir(home: &Path, backend: &str) -> Option<PathBuf> {
@@ -686,6 +1154,7 @@ fn backend_skills_dir(home: &Path, backend: &str) -> Option<PathBuf> {
         "codex" => Some(home.join(".codex").join("skills")),
         "opencode" => Some(opencode_config_dir(home).join("skills")),
         "cursor" => Some(home.join(".cursor").join("skills-cursor")),
+        "pi" | "commandcode" | "grok" => Some(jean_global_backend_skills_dir(home, backend)),
         _ => None,
     }
 }
@@ -797,6 +1266,49 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn find_caveman_skill_dir(home: &Path) -> Option<PathBuf> {
+    for skills_dir in [
+        home.join(".claude").join("skills"),
+        home.join(".codex").join("skills"),
+        opencode_config_dir(home).join("skills"),
+        home.join(".cursor").join("skills-cursor"),
+        jean_global_backend_skills_dir(home, "pi"),
+        jean_global_backend_skills_dir(home, "commandcode"),
+        jean_global_backend_skills_dir(home, "grok"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(skills_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if path.is_dir() && path.join("SKILL.md").exists() && name.contains("caveman") {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+fn mirror_caveman_to_jean_global_backends(
+    home: &Path,
+    backends: &[&'static str],
+) -> Result<usize, String> {
+    let Some(source) = find_caveman_skill_dir(home) else {
+        return Err("No installed Caveman skill directory found to mirror globally".to_string());
+    };
+
+    let mut copied = 0;
+    for backend in backends {
+        let target = jean_global_backend_skills_dir(home, backend).join("caveman");
+        copy_dir_replace(&source, &target)?;
+        copied += 1;
+    }
+
+    Ok(copied)
 }
 
 fn clone_superpowers_skills_dir() -> Result<PathBuf, String> {
@@ -972,6 +1484,13 @@ fn remove_superpowers_git_worktree_skill(
         home.join(".codex").join("skills"),
         opencode_config_dir(home).join("skills"),
         home.join(".cursor").join("skills-cursor"),
+        jean_global_backend_skills_dir(home, "claude"),
+        jean_global_backend_skills_dir(home, "codex"),
+        jean_global_backend_skills_dir(home, "opencode"),
+        jean_global_backend_skills_dir(home, "cursor"),
+        jean_global_backend_skills_dir(home, "pi"),
+        jean_global_backend_skills_dir(home, "commandcode"),
+        jean_global_backend_skills_dir(home, "grok"),
     ] {
         for name in &blocked_names {
             remove_path_if_exists(&skills_dir.join(name), removed)?;
@@ -1039,18 +1558,17 @@ fn remove_named_skill_dirs_under(
 }
 
 async fn install_superpowers(app: &AppHandle) -> Result<String, String> {
-    let backends = detected_jean_backends(app);
-    if backends.is_empty() {
-        return Err(
-            "Install at least one Jean AI backend before installing Superpowers".to_string(),
-        );
-    }
+    let detected_backends = detected_jean_backends(app);
+    let backends = installable_jean_backends()
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
 
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
     let mut installed = Vec::new();
     let mut warnings = Vec::new();
 
-    if backends.contains(&"claude") {
+    if detected_backends.contains(&"claude") {
         let binary_path = crate::claude_cli::resolve_cli_binary(app);
         let bin = binary_path.clone();
         let add_result = tokio::task::spawn_blocking(move || {
@@ -1130,6 +1648,26 @@ async fn install_superpowers(app: &AppHandle) -> Result<String, String> {
                 "No Superpowers skills found to install for {backend}"
             )),
             Err(e) => warnings.push(format!("Failed to install Superpowers for {backend}: {e}")),
+        }
+    }
+
+    for backend in &backends {
+        let target_dir = jean_global_backend_skills_dir(&home, backend);
+        let source = source_skills_dir.clone();
+        let backend_name = *backend;
+        let result =
+            tokio::task::spawn_blocking(move || copy_superpowers_skills(&source, &target_dir))
+                .await
+                .map_err(|e| e.to_string())?;
+
+        match result {
+            Ok(count) if count > 0 && !installed.contains(&backend_name) => {
+                installed.push(backend_name)
+            }
+            Ok(_) => {}
+            Err(e) => warnings.push(format!(
+                "Failed to install global Superpowers skills for {backend_name}: {e}"
+            )),
         }
     }
 
@@ -1220,15 +1758,23 @@ mod tests {
     }
 
     #[test]
-    fn caveman_status_is_installed_when_any_backend_is_covered() {
-        assert!(caveman_status_installed(&["claude"], &["claude", "codex"]));
+    fn caveman_status_requires_every_detected_backend_covered() {
+        assert!(!caveman_status_installed(&["claude"], &["claude", "codex"]));
+        assert!(caveman_status_installed(
+            &["claude", "codex"],
+            &["claude", "codex"]
+        ));
         assert!(!caveman_status_installed(&[], &["claude"]));
     }
 
     #[test]
-    fn superpowers_status_is_installed_when_any_backend_is_covered() {
-        assert!(superpowers_status_installed(
+    fn superpowers_status_requires_every_detected_backend_covered() {
+        assert!(!superpowers_status_installed(
             &["codex"],
+            &["claude", "codex"]
+        ));
+        assert!(superpowers_status_installed(
+            &["claude", "codex"],
             &["claude", "codex"]
         ));
         assert!(!superpowers_status_installed(&[], &["claude"]));
@@ -1248,6 +1794,66 @@ mod tests {
         assert_eq!(
             superpowers_claude_plugin_target(),
             "superpowers@claude-plugins-official"
+        );
+    }
+
+    #[test]
+    fn selects_windows_rtk_release_asset() {
+        let asset = rtk_asset_for_platform("windows", "x86_64").expect("asset");
+
+        assert_eq!(asset.name, "rtk-x86_64-pc-windows-msvc.zip");
+        assert_eq!(asset.binary_name, "rtk.exe");
+        assert_eq!(asset.format, RtkArchiveFormat::Zip);
+    }
+
+    #[test]
+    fn parses_rtk_checksum_for_asset() {
+        let checksums = "\
+abc123  rtk-aarch64-apple-darwin.tar.gz\n\
+def456  rtk-x86_64-pc-windows-msvc.zip\n";
+
+        assert_eq!(
+            rtk_expected_checksum(checksums, "rtk-x86_64-pc-windows-msvc.zip"),
+            Some("def456")
+        );
+    }
+
+    #[test]
+    fn extracts_rtk_exe_from_zip_archive() {
+        use std::io::{Cursor, Write};
+
+        let mut archive_bytes = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut archive_bytes);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("rtk.exe", options)
+                .expect("start rtk.exe");
+            writer.write_all(b"binary").expect("write rtk.exe");
+            writer.finish().expect("finish zip");
+        }
+
+        let binary = extract_rtk_zip_binary(archive_bytes.get_ref(), "rtk.exe").expect("extract");
+
+        assert_eq!(binary, b"binary");
+    }
+
+    #[test]
+    fn prepends_rtk_install_dir_to_path_once() {
+        let existing = std::env::join_paths([PathBuf::from("/usr/bin")]).expect("join");
+        let install_dir = PathBuf::from("/tmp/rtk-cli");
+
+        let updated = path_with_prepended_dir(Some(&existing), &install_dir).expect("path");
+        let updated_again = path_with_prepended_dir(Some(&updated), &install_dir).expect("path");
+        let parts: Vec<_> = std::env::split_paths(&updated_again).collect();
+
+        assert_eq!(parts[0], install_dir);
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|part| **part == PathBuf::from("/tmp/rtk-cli"))
+                .count(),
+            1
         );
     }
 
@@ -1315,5 +1921,38 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), "# Caveman").expect("write skill");
 
         assert!(caveman_installed_for_backend(temp.path(), "cursor"));
+    }
+
+    #[test]
+    fn opinionated_status_lists_each_installable_backend() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join(".codex").join("skills").join("caveman");
+        std::fs::create_dir_all(&skill_dir).expect("create codex skill dir");
+        std::fs::write(skill_dir.join("SKILL.md"), "# Caveman").expect("write skill");
+
+        let statuses = opinionated_backend_statuses(temp.path(), "caveman");
+
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "pi",
+                "commandcode",
+                "grok"
+            ]
+        );
+        assert!(!statuses[0].installed);
+        assert!(statuses[1].installed);
+        assert!(!statuses[2].installed);
+        assert!(!statuses[3].installed);
+        assert!(!statuses[4].installed);
+        assert!(!statuses[5].installed);
+        assert!(!statuses[6].installed);
     }
 }

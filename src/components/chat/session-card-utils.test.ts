@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   computeSessionCardData,
   getEffectiveSessionWaiting,
+  shouldShowCodeReviewLoadingPanel,
   type ChatStoreState,
 } from './session-card-utils'
-import type { Session } from '@/types/chat'
+import type { ContentBlock, Session } from '@/types/chat'
 
 describe('computeSessionCardData', () => {
   function createBaseSession(overrides: Partial<Session> = {}): Session {
@@ -20,6 +21,16 @@ describe('computeSessionCardData', () => {
     }
   }
 
+  function streamingTextGetter(
+    contents: Record<string, string> = {},
+    blocks: Record<string, ContentBlock[]> = {}
+  ): ChatStoreState['getStreamingText'] {
+    return sessionId => ({
+      content: contents[sessionId] ?? '',
+      blocks: blocks[sessionId] ?? [],
+    })
+  }
+
   function createBaseStoreState(
     overrides: Partial<ChatStoreState> = {}
   ): ChatStoreState {
@@ -28,8 +39,7 @@ describe('computeSessionCardData', () => {
       executingModes: {},
       executionModes: {},
       activeToolCalls: {},
-      streamingContents: {},
-      streamingContentBlocks: {},
+      getStreamingText: streamingTextGetter(),
       answeredQuestions: {},
       waitingForInputSessionIds: {},
       reviewingSessions: {},
@@ -58,19 +68,21 @@ describe('computeSessionCardData', () => {
           },
         ],
       },
-      streamingContents: {
-        'session-1':
-          'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
-      },
-      streamingContentBlocks: {
-        'session-1': [
-          { type: 'tool_use', tool_call_id: 'plan-1' },
-          {
-            type: 'text',
-            text: 'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
-          },
-        ],
-      },
+      getStreamingText: streamingTextGetter(
+        {
+          'session-1':
+            'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
+        },
+        {
+          'session-1': [
+            { type: 'tool_use', tool_call_id: 'plan-1' },
+            {
+              type: 'text',
+              text: 'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
+            },
+          ],
+        }
+      ),
     })
 
     const card = computeSessionCardData(session, storeState)
@@ -102,19 +114,21 @@ describe('computeSessionCardData', () => {
           },
         ],
       },
-      streamingContents: {
-        'session-1':
-          'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
-      },
-      streamingContentBlocks: {
-        'session-1': [
-          { type: 'tool_use', tool_call_id: 'plan-1' },
-          {
-            type: 'text',
-            text: 'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
-          },
-        ],
-      },
+      getStreamingText: streamingTextGetter(
+        {
+          'session-1':
+            'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
+        },
+        {
+          'session-1': [
+            { type: 'tool_use', tool_call_id: 'plan-1' },
+            {
+              type: 'text',
+              text: 'Repo inspected.\n\nPlan:\n- Implement changes\n- Add tests',
+            },
+          ],
+        }
+      ),
     }
 
     const card = computeSessionCardData(session, storeState)
@@ -161,6 +175,39 @@ describe('computeSessionCardData', () => {
     expect(getEffectiveSessionWaiting(session, storeState)).toBe(false)
     expect(card.isWaiting).toBe(false)
     expect(card.status).toBe('completed')
+  })
+
+  it('does not treat a normal reviewed session as a code review loading panel', () => {
+    const session: Session = {
+      ...createBaseSession(),
+      is_reviewing: true,
+      last_run_status: 'completed',
+    }
+
+    expect(
+      shouldShowCodeReviewLoadingPanel({
+        session,
+        isSessionReviewing: true,
+        hasReviewResults: false,
+      })
+    ).toBe(false)
+  })
+
+  it('shows the code review loading panel for an empty backend-created review session', () => {
+    const session: Session = {
+      ...createBaseSession({
+        name: 'Code Review',
+        is_reviewing: true,
+      }),
+    }
+
+    expect(
+      shouldShowCodeReviewLoadingPanel({
+        session,
+        isSessionReviewing: true,
+        hasReviewResults: false,
+      })
+    ).toBe(true)
   })
 
   it('ignores stale persisted waiting_for_input on completed non-plan run', () => {

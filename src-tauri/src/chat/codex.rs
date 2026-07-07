@@ -8,6 +8,7 @@
 //! directly since they don't need streaming.
 
 use super::claude::CancelledEvent;
+use super::coalesce::ChunkCoalescer;
 use super::types::{
     CodexCommandAction, CodexCommandApprovalRequest, CodexCommandApprovalRequestEvent,
     CodexDynamicToolCallRequest, CodexDynamicToolCallRequestEvent, CodexNetworkApprovalContext,
@@ -589,14 +590,26 @@ pub fn build_turn_start_params(
 /// The request fails server-side when `expectedTurnId` no longer matches the
 /// active turn (turn ended), which callers treat as a fallback signal.
 pub fn build_turn_steer_params(thread_id: &str, turn_id: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "threadId": thread_id,
-        "expectedTurnId": turn_id,
-        "input": [{
+    build_turn_steer_params_with_input(
+        thread_id,
+        turn_id,
+        vec![serde_json::json!({
             "type": "text",
             "text": text,
             "text_elements": [],
-        }],
+        })],
+    )
+}
+
+pub fn build_turn_steer_params_with_input(
+    thread_id: &str,
+    turn_id: &str,
+    input: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "threadId": thread_id,
+        "expectedTurnId": turn_id,
+        "input": input,
     })
 }
 
@@ -1060,7 +1073,7 @@ fn persist_codex_recovered_completion_state(
     } else {
         metadata.waiting_for_input = false;
         metadata.waiting_for_input_type = None;
-        metadata.is_reviewing = true;
+        metadata.is_reviewing = false;
     }
 
     super::storage::save_metadata(app, &metadata)
@@ -1392,6 +1405,61 @@ fn start_new_thread(
     Ok(thread_id)
 }
 
+/// Emit a (possibly coalesced) `chat:chunk` batch.
+fn emit_chunk_batch(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &str,
+    content: String,
+) {
+    let _ = app.emit_all(
+        "chat:chunk",
+        &ChunkEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            content,
+            run_id: Some(run_id.to_string()),
+        },
+    );
+}
+
+/// Emit a (possibly coalesced) `chat:thinking` batch.
+fn emit_thinking_batch(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    content: String,
+) {
+    let _ = app.emit_all(
+        "chat:thinking",
+        &ThinkingEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            content,
+        },
+    );
+}
+
+/// Flush buffered text/thinking deltas. Must run before any other event is
+/// emitted for this session and before terminal events (done/cancel/error)
+/// so event ordering and content integrity are preserved.
+fn flush_stream_coalescers(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &str,
+    chunk_coalescer: &mut ChunkCoalescer,
+    thinking_coalescer: &mut ChunkCoalescer,
+) {
+    if let Some(content) = chunk_coalescer.flush() {
+        emit_chunk_batch(app, session_id, worktree_id, run_id, content);
+    }
+    if let Some(content) = thinking_coalescer.flush() {
+        emit_thinking_batch(app, session_id, worktree_id, content);
+    }
+}
+
 /// Process turn events from the app-server, emitting Tauri events.
 #[allow(clippy::too_many_arguments)]
 fn process_turn_events(
@@ -1421,6 +1489,12 @@ fn process_turn_events(
     let mut usage: Option<UsageData> = None;
     let mut received_completed_agent_message = false;
 
+    // Coalesce token-rate text/thinking deltas into fewer, larger
+    // chat:chunk / chat:thinking events. Flushed before any other event is
+    // emitted and whenever the event stream idles past the window.
+    let mut chunk_coalescer = ChunkCoalescer::new();
+    let mut thinking_coalescer = ChunkCoalescer::new();
+
     // Open output file for history
     let mut output_writer = std::fs::OpenOptions::new()
         .create(true)
@@ -1429,87 +1503,122 @@ fn process_turn_events(
         .ok();
 
     'outer: loop {
-        let event = match status_poll_interval {
-            Some(interval) => match event_rx.recv_timeout(interval) {
+        // While deltas are buffered, only wait until the coalescing window
+        // deadline so text is not held back while the stream idles. At most
+        // one coalescer is non-empty at a time (they flush each other), but
+        // take the earliest deadline defensively.
+        let coalesce_deadline = match (chunk_coalescer.deadline(), thinking_coalescer.deadline()) {
+            (Some(chunk), Some(thinking)) => Some(chunk.min(thinking)),
+            (chunk, thinking) => chunk.or(thinking),
+        };
+        let event = if let Some(deadline) = coalesce_deadline {
+            let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            match event_rx.recv_timeout(timeout) {
                 Ok(e) => e,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let snapshot = super::codex_server::send_request(
-                        "thread/read",
-                        serde_json::json!({
-                            "threadId": thread_id,
-                            "includeTurns": true,
-                        }),
+                    flush_stream_coalescers(
+                        app,
+                        session_id,
+                        worktree_id,
+                        run_id,
+                        &mut chunk_coalescer,
+                        &mut thinking_coalescer,
                     );
-                    match snapshot {
-                        Ok(snapshot) => {
-                            let disposition =
-                                classify_codex_resume(&snapshot, recovery_turn_id, true);
-                            if disposition == CodexResumeDisposition::Active {
-                                continue;
-                            }
-
-                            if let Some(ref mut writer) = output_writer {
-                                let _ = writer.flush();
-                            }
-                            if let Err(e) = append_codex_thread_snapshot_to_history_file(
-                                output_file,
-                                &snapshot,
-                                recovery_turn_id,
-                                false,
-                            ) {
-                                log::warn!("Failed to append Codex snapshot after idle poll: {e}");
-                            }
-
-                            match disposition {
-                                CodexResumeDisposition::Failed => {
-                                    if let Some(turn) =
-                                        select_codex_recovery_turn(&snapshot, recovery_turn_id)
-                                    {
-                                        let raw_error = codex_turn_error_message(turn)
-                                            .unwrap_or_else(|| "Unknown Codex error".to_string());
-                                        let _ = app.emit_all(
-                                            "chat:error",
-                                            &ErrorEvent {
-                                                session_id: session_id.to_string(),
-                                                worktree_id: worktree_id.to_string(),
-                                                error: format_codex_user_error(&raw_error),
-                                            },
-                                        );
-                                    }
-                                    error_emitted = true;
-                                    break 'outer;
-                                }
-                                CodexResumeDisposition::Interrupted => {
-                                    cancelled = true;
-                                    server_interrupted = true;
-                                    break 'outer;
-                                }
-                                CodexResumeDisposition::Idle => {
-                                    break 'outer;
-                                }
-                                CodexResumeDisposition::Active => unreachable!(),
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Codex recovery status poll failed: {e}");
-                            continue;
-                        }
-                    }
+                    continue;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     log::warn!("Event channel disconnected for session {session_id}");
                     cancelled = true;
                     break 'outer;
                 }
-            },
-            None => match event_rx.recv() {
-                Ok(e) => e,
-                Err(_) => {
-                    log::warn!("Event channel disconnected for session {session_id}");
-                    cancelled = true;
-                    break 'outer;
-                }
-            },
+            }
+        } else {
+            match status_poll_interval {
+                Some(interval) => match event_rx.recv_timeout(interval) {
+                    Ok(e) => e,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let snapshot = super::codex_server::send_request(
+                            "thread/read",
+                            serde_json::json!({
+                                "threadId": thread_id,
+                                "includeTurns": true,
+                            }),
+                        );
+                        match snapshot {
+                            Ok(snapshot) => {
+                                let disposition =
+                                    classify_codex_resume(&snapshot, recovery_turn_id, true);
+                                if disposition == CodexResumeDisposition::Active {
+                                    continue;
+                                }
+
+                                if let Some(ref mut writer) = output_writer {
+                                    let _ = writer.flush();
+                                }
+                                if let Err(e) = append_codex_thread_snapshot_to_history_file(
+                                    output_file,
+                                    &snapshot,
+                                    recovery_turn_id,
+                                    false,
+                                ) {
+                                    log::warn!(
+                                        "Failed to append Codex snapshot after idle poll: {e}"
+                                    );
+                                }
+
+                                match disposition {
+                                    CodexResumeDisposition::Failed => {
+                                        if let Some(turn) =
+                                            select_codex_recovery_turn(&snapshot, recovery_turn_id)
+                                        {
+                                            let raw_error = codex_turn_error_message(turn)
+                                                .unwrap_or_else(|| {
+                                                    "Unknown Codex error".to_string()
+                                                });
+                                            let _ = app.emit_all(
+                                                "chat:error",
+                                                &ErrorEvent {
+                                                    session_id: session_id.to_string(),
+                                                    worktree_id: worktree_id.to_string(),
+                                                    error: format_codex_user_error(&raw_error),
+                                                },
+                                            );
+                                        }
+                                        error_emitted = true;
+                                        break 'outer;
+                                    }
+                                    CodexResumeDisposition::Interrupted => {
+                                        cancelled = true;
+                                        server_interrupted = true;
+                                        break 'outer;
+                                    }
+                                    CodexResumeDisposition::Idle => {
+                                        break 'outer;
+                                    }
+                                    CodexResumeDisposition::Active => unreachable!(),
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Codex recovery status poll failed: {e}");
+                                continue;
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::warn!("Event channel disconnected for session {session_id}");
+                        cancelled = true;
+                        break 'outer;
+                    }
+                },
+                None => match event_rx.recv() {
+                    Ok(e) => e,
+                    Err(_) => {
+                        log::warn!("Event channel disconnected for session {session_id}");
+                        cancelled = true;
+                        break 'outer;
+                    }
+                },
+            }
         };
 
         match event {
@@ -1541,6 +1650,8 @@ fn process_turn_events(
                     &mut error_emitted,
                     &mut received_completed_agent_message,
                     is_plan_mode,
+                    &mut chunk_coalescer,
+                    &mut thinking_coalescer,
                 );
 
                 // Update turn_id for cancellation + crash recovery
@@ -1588,6 +1699,16 @@ fn process_turn_events(
                     );
                 }
 
+                // Approval requests emit their own events — flush buffered
+                // deltas first to preserve event ordering.
+                flush_stream_coalescers(
+                    app,
+                    session_id,
+                    worktree_id,
+                    run_id,
+                    &mut chunk_coalescer,
+                    &mut thinking_coalescer,
+                );
                 handle_approval_request(
                     app,
                     session_id,
@@ -1601,6 +1722,14 @@ fn process_turn_events(
             }
             ServerEvent::ServerDied => {
                 log::error!("Codex app-server died during turn for session {session_id}");
+                flush_stream_coalescers(
+                    app,
+                    session_id,
+                    worktree_id,
+                    run_id,
+                    &mut chunk_coalescer,
+                    &mut thinking_coalescer,
+                );
                 if !error_emitted {
                     let _ = app.emit_all(
                         "chat:error",
@@ -1622,6 +1751,17 @@ fn process_turn_events(
             break 'outer;
         }
     }
+
+    // Flush any deltas still buffered when the loop exited (completion,
+    // cancellation, disconnect) before the terminal events below.
+    flush_stream_coalescers(
+        app,
+        session_id,
+        worktree_id,
+        run_id,
+        &mut chunk_coalescer,
+        &mut thinking_coalescer,
+    );
 
     // Write accumulated text to JSONL for cancelled/interrupted runs only when
     // Codex never emitted a completed agent_message item. If one was already
@@ -1795,6 +1935,14 @@ fn notification_to_history_line(method: &str, params: &serde_json::Value) -> Opt
             let line = serde_json::json!({ "type": "item.completed", "item": normalized });
             return Some(serde_json::to_string(&line).ok()?);
         }
+        "item/fileChange/patchUpdated" => {
+            let line = serde_json::json!({
+                "type": "item.file_change.patch_updated",
+                "item_id": params.get("itemId").cloned().unwrap_or(serde_json::Value::Null),
+                "changes": params.get("changes").cloned().unwrap_or(serde_json::json!([])),
+            });
+            return Some(serde_json::to_string(&line).ok()?);
+        }
         "item/agentMessage/delta" => {
             // Delta events don't have a direct old-format equivalent; skip for history
             return None;
@@ -1839,8 +1987,37 @@ fn process_server_notification(
     error_emitted: &mut bool,
     received_completed_agent_message: &mut bool,
     is_plan_mode: bool,
+    chunk_coalescer: &mut ChunkCoalescer,
+    thinking_coalescer: &mut ChunkCoalescer,
 ) {
     log::trace!("[codex-server] Notification: {method} for session {session_id}");
+
+    // Ordering invariant: buffered deltas must be flushed before any other
+    // event for this session is emitted. Text deltas only flush the thinking
+    // buffer (and vice versa) so consecutive same-type deltas keep
+    // coalescing; every other notification flushes both.
+    match method {
+        "item/agentMessage/delta" => {
+            if let Some(content) = thinking_coalescer.flush() {
+                emit_thinking_batch(app, session_id, worktree_id, content);
+            }
+        }
+        "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+            if let Some(content) = chunk_coalescer.flush() {
+                emit_chunk_batch(app, session_id, worktree_id, run_id, content);
+            }
+        }
+        _ => {
+            flush_stream_coalescers(
+                app,
+                session_id,
+                worktree_id,
+                run_id,
+                chunk_coalescer,
+                thinking_coalescer,
+            );
+        }
+    }
 
     match method {
         "thread/started" => {
@@ -1854,19 +2031,13 @@ fn process_server_notification(
             }
         }
         "item/agentMessage/delta" => {
-            // Streaming text delta — emit immediately
+            // Streaming text delta — coalesced into batched chat:chunk events
             if let Some(delta) = params.get("delta").and_then(|v| v.as_str()) {
                 if !delta.is_empty() {
                     full_content.push_str(delta);
-                    let _ = app.emit_all(
-                        "chat:chunk",
-                        &ChunkEvent {
-                            session_id: session_id.to_string(),
-                            worktree_id: worktree_id.to_string(),
-                            content: delta.to_string(),
-                            run_id: Some(run_id.to_string()),
-                        },
-                    );
+                    if let Some(content) = chunk_coalescer.push(delta) {
+                        emit_chunk_batch(app, session_id, worktree_id, run_id, content);
+                    }
                 }
             }
         }
@@ -2059,6 +2230,31 @@ fn process_server_notification(
                 error_emitted,
             );
         }
+        "item/fileChange/patchUpdated" => {
+            let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("");
+            let changes = params
+                .get("changes")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            let tool_id = upsert_file_change_tool_call(
+                tool_calls,
+                content_blocks,
+                pending_tool_ids,
+                item_id,
+                changes.clone(),
+            );
+            let _ = app.emit_all(
+                "chat:tool_use",
+                &ToolUseEvent {
+                    session_id: session_id.to_string(),
+                    worktree_id: worktree_id.to_string(),
+                    id: tool_id,
+                    name: "FileChange".to_string(),
+                    input: changes,
+                    parent_tool_use_id: None,
+                },
+            );
+        }
         "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" => {
             // Streaming tool output — we could stream this but for now
             // we let item/completed handle it with the final aggregated output
@@ -2142,17 +2338,12 @@ fn process_server_notification(
             }
         }
         "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
-            // Streaming reasoning/thinking text
+            // Streaming reasoning/thinking text — coalesced like text deltas
             if let Some(delta) = params.get("delta").and_then(|v| v.as_str()) {
                 if !delta.is_empty() {
-                    let _ = app.emit_all(
-                        "chat:thinking",
-                        &ThinkingEvent {
-                            session_id: session_id.to_string(),
-                            worktree_id: worktree_id.to_string(),
-                            content: delta.to_string(),
-                        },
-                    );
+                    if let Some(content) = thinking_coalescer.push(delta) {
+                        emit_thinking_batch(app, session_id, worktree_id, content);
+                    }
                 }
             }
         }
@@ -2617,6 +2808,41 @@ fn format_codex_user_error(error_msg: &str) -> String {
     }
 }
 
+fn upsert_file_change_tool_call(
+    tool_calls: &mut Vec<ToolCall>,
+    content_blocks: &mut Vec<ContentBlock>,
+    pending_tool_ids: &mut HashMap<String, String>,
+    item_id: &str,
+    changes: serde_json::Value,
+) -> String {
+    let tool_id = if item_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        item_id.to_string()
+    };
+
+    if let Some(tool) = tool_calls.iter_mut().find(|tool| tool.id == tool_id) {
+        tool.input = changes;
+    } else {
+        tool_calls.push(ToolCall {
+            id: tool_id.clone(),
+            name: "FileChange".to_string(),
+            input: changes,
+            output: None,
+            parent_tool_use_id: None,
+        });
+        content_blocks.push(ContentBlock::ToolUse {
+            tool_call_id: tool_id.clone(),
+        });
+    }
+
+    if !item_id.is_empty() {
+        pending_tool_ids.insert(item_id.to_string(), tool_id.clone());
+    }
+
+    tool_id
+}
+
 /// Process a single Codex JSONL event. Shared between attached and detached tailers.
 #[allow(clippy::too_many_arguments)]
 fn process_codex_event(
@@ -2690,28 +2916,17 @@ fn process_codex_event(
                     );
                 }
                 "file_change" => {
-                    let tool_id = if item_id.is_empty() {
-                        uuid::Uuid::new_v4().to_string()
-                    } else {
-                        item_id.to_string()
-                    };
                     let changes = item
                         .get("changes")
                         .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    tool_calls.push(ToolCall {
-                        id: tool_id.clone(),
-                        name: "FileChange".to_string(),
-                        input: changes.clone(),
-                        output: None,
-                        parent_tool_use_id: None,
-                    });
-                    content_blocks.push(ContentBlock::ToolUse {
-                        tool_call_id: tool_id.clone(),
-                    });
-                    if !item_id.is_empty() {
-                        pending_tool_ids.insert(item_id.to_string(), tool_id.clone());
-                    }
+                        .unwrap_or_else(|| serde_json::json!([]));
+                    let tool_id = upsert_file_change_tool_call(
+                        tool_calls,
+                        content_blocks,
+                        pending_tool_ids,
+                        item_id,
+                        changes.clone(),
+                    );
                     let _ = app.emit_all(
                         "chat:tool_use",
                         &ToolUseEvent {
@@ -3345,6 +3560,74 @@ fn process_codex_event(
 // JSONL history parser (for loading saved sessions)
 // =============================================================================
 
+/// Return true when a persisted Codex run log contains anything that should
+/// render as assistant-side output, even if the run was cancelled before
+/// metadata received a final assistant_message_id.
+pub(crate) fn codex_run_log_has_visible_assistant_artifacts(
+    lines: &[String],
+    is_plan_mode: bool,
+) -> bool {
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        if msg
+            .get("_run_meta")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        match msg
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+        {
+            "turn.plan_updated" | "item.plan.delta" if is_plan_mode => return true,
+            "turn.completed" => {
+                if msg
+                    .get("output")
+                    .and_then(extract_text_from_turn_output)
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    return true;
+                }
+            }
+            "item.started" | "item.completed" => {
+                let item = msg.get("item").unwrap_or(&serde_json::Value::Null);
+                let item_type = item
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                match item_type {
+                    "agent_message" => {
+                        if extract_agent_message_text(item)
+                            .is_some_and(|text| !text.trim().is_empty())
+                        {
+                            return true;
+                        }
+                    }
+                    "plan" if is_plan_mode => return true,
+                    "command_execution" | "file_change" | "mcp_tool_call" | "collab_tool_call"
+                    | "todo_list" | "web_search" | "image_generation" | "image_view"
+                    | "context_compaction" | "dynamic_tool_call" => return true,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Parse stored Codex JSONL into a ChatMessage (for loading history).
 ///
 /// Maps Codex events to the same ChatMessage format used by Claude sessions.
@@ -3511,26 +3794,14 @@ pub fn parse_codex_run_to_message(
                         let changes = item
                             .get("changes")
                             .cloned()
-                            .unwrap_or(serde_json::Value::Null);
-                        let tool_id = if item_id.is_empty() {
-                            Uuid::new_v4().to_string()
-                        } else {
-                            item_id.to_string()
-                        };
-
-                        tool_calls.push(ToolCall {
-                            id: tool_id.clone(),
-                            name: "FileChange".to_string(),
-                            input: changes,
-                            output: None,
-                            parent_tool_use_id: None,
-                        });
-                        content_blocks.push(ContentBlock::ToolUse {
-                            tool_call_id: tool_id.clone(),
-                        });
-                        if !item_id.is_empty() {
-                            pending_tool_ids.insert(item_id.to_string(), tool_id);
-                        }
+                            .unwrap_or_else(|| serde_json::json!([]));
+                        upsert_file_change_tool_call(
+                            &mut tool_calls,
+                            &mut content_blocks,
+                            &mut pending_tool_ids,
+                            item_id,
+                            changes,
+                        );
                     }
                     "mcp_tool_call" => {
                         let server = item
@@ -3614,6 +3885,20 @@ pub fn parse_codex_run_to_message(
                     }
                     _ => {}
                 }
+            }
+            "item.file_change.patch_updated" => {
+                let item_id = msg.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                let changes = msg
+                    .get("changes")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                upsert_file_change_tool_call(
+                    &mut tool_calls,
+                    &mut content_blocks,
+                    &mut pending_tool_ids,
+                    item_id,
+                    changes,
+                );
             }
             "item.completed" => {
                 let item = msg.get("item").unwrap_or(&serde_json::Value::Null);
@@ -3894,7 +4179,7 @@ pub fn execute_one_shot_codex(
 ) -> Result<String, String> {
     let cli_path = crate::codex_cli::resolve_cli_binary(app)?;
 
-    if !cli_path.exists() {
+    if !crate::platform::resolved_cli_exists(&cli_path) {
         return Err("Codex CLI not installed".to_string());
     }
 
@@ -3913,19 +4198,46 @@ pub fn execute_one_shot_codex(
     std::fs::write(&schema_file, output_schema)
         .map_err(|e| format!("Failed to write schema file: {e}"))?;
 
-    let mut cmd = crate::platform::silent_command(&cli_path);
+    let wsl = crate::platform::get_wsl_config();
+    let schema_arg = if cfg!(windows) && wsl.enabled {
+        std::path::PathBuf::from(crate::platform::win_to_wsl_path(
+            &schema_file.to_string_lossy(),
+        ))
+    } else {
+        schema_file.clone()
+    };
+    let working_dir_arg = working_dir.map(|dir| {
+        if cfg!(windows) && wsl.enabled {
+            std::path::PathBuf::from(crate::platform::win_to_wsl_path(&dir.to_string_lossy()))
+        } else {
+            dir.to_path_buf()
+        }
+    });
+
+    let mut cmd = crate::platform::resolved_cli_command(&cli_path, working_dir);
     cmd.args(build_one_shot_codex_args(
         actual_model,
         is_fast,
-        &schema_file,
-        working_dir,
+        &schema_arg,
+        working_dir_arg.as_deref(),
     ));
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
+    // Run in a new process group so a timeout kill can take down the whole tree.
+    // Codex spawns MCP server children (e.g. chrome-devtools-mcp) that survive a
+    // plain child.kill() and linger as orphans.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    if !wsl.enabled {
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
     }
 
     let mut child = cmd
@@ -3955,7 +4267,12 @@ pub fn execute_one_shot_codex(
             Ok(None) => {
                 // Still running
                 if start.elapsed() > timeout {
+                    // Kill the whole process group, not just the direct child —
+                    // otherwise codex's MCP children leak as orphaned processes.
+                    let _ = crate::platform::kill_process_tree(child.id());
                     let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&schema_file);
                     return Err(
                         "Codex CLI timed out after 120s. This often happens when an MCP server \
                          is stuck connecting. Check your Codex MCP server configuration."
@@ -4141,6 +4458,28 @@ mod tests {
             classify_codex_resume(&interrupted, Some("turn-1"), true),
             CodexResumeDisposition::Interrupted
         );
+    }
+
+    #[test]
+    fn parse_codex_run_updates_file_change_from_patch_updated() {
+        let run = test_run_entry();
+        let lines = vec![
+            r#"{"type":"item.started","item":{"id":"fc-1","type":"file_change","changes":[]}}"#.to_string(),
+            r#"{"type":"item.file_change.patch_updated","item_id":"fc-1","changes":[{"path":"src/lib.rs","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]}"#.to_string(),
+        ];
+
+        let msg = parse_codex_run_to_message(&lines, &run).expect("parse");
+        let file_change = msg
+            .tool_calls
+            .iter()
+            .find(|tool| tool.name == "FileChange")
+            .expect("file change tool");
+
+        assert_eq!(file_change.input[0]["path"], "src/lib.rs");
+        assert!(file_change.input[0]["diff"]
+            .as_str()
+            .expect("diff")
+            .contains("+new"));
     }
 
     #[test]
@@ -4563,6 +4902,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Cancelled,
@@ -4575,6 +4915,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4617,6 +4958,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4629,6 +4971,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4668,6 +5011,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4680,6 +5024,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4722,6 +5067,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4734,6 +5080,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4764,6 +5111,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_run_log_visible_artifacts_detects_cancelled_tool_output_without_agent_id() {
+        let lines = vec![
+            r#"{"_run_meta":true}"#.to_string(),
+            r#"{"type":"turn.started"}"#.to_string(),
+            r#"{"item":{"aggregated_output":null,"command":"rtk test","id":"call-1","status":"inProgress","type":"command_execution"},"type":"item.started"}"#.to_string(),
+        ];
+
+        assert!(codex_run_log_has_visible_assistant_artifacts(&lines, false));
+    }
+
+    #[test]
+    fn codex_run_log_visible_artifacts_ignores_user_only_cancelled_run() {
+        let lines = vec![
+            r#"{"_run_meta":true}"#.to_string(),
+            r#"{"type":"turn.started"}"#.to_string(),
+            r#"{"item":{"content":[{"text":"continue","type":"text"}],"id":"user-1","type":"user_message"},"type":"item.completed"}"#.to_string(),
+        ];
+
+        assert!(!codex_run_log_has_visible_assistant_artifacts(
+            &lines, false
+        ));
+    }
+
+    #[test]
     fn extract_plain_text_plan_sections_splits_intro_from_plan() {
         assert_eq!(
             extract_plain_text_plan_sections(
@@ -4791,6 +5162,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4803,6 +5175,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4845,6 +5218,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4857,6 +5231,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4904,6 +5279,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4916,6 +5292,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -4944,6 +5321,7 @@ mod tests {
             thinking_level: None,
             effort_level: None,
             backend: None,
+            custom_profile_name: None,
             started_at: 1,
             ended_at: Some(2),
             status: RunStatus::Completed,
@@ -4956,6 +5334,7 @@ mod tests {
             codex_thread_id: None,
             codex_turn_id: None,
             cursor_chat_id: None,
+            grok_session_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");

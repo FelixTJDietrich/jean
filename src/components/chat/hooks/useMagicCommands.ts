@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useChatStore } from '@/store/chat-store'
 import type { ExecutionMode } from '@/types/chat'
+import type { CliBackend } from '@/types/preferences'
 
 export interface WorkflowRunDetail {
   workflowName: string
@@ -12,7 +13,7 @@ export interface WorkflowRunDetail {
 }
 
 export interface InvestigateOverride {
-  backend: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'commandcode'
+  backend: CliBackend
   model: string
 }
 
@@ -20,6 +21,7 @@ interface MagicCommandHandlers {
   handleSaveContext: () => void
   handleLoadContext: () => void
   handleLinkedProjects: () => void
+  handleForkSession: () => void
   handleCommit: () => void
   handleCommitAndPush: () => void
   handlePull: () => void
@@ -61,6 +63,7 @@ export function useMagicCommands({
   handleSaveContext,
   handleLoadContext,
   handleLinkedProjects,
+  handleForkSession,
   handleCommit,
   handleCommitAndPush,
   handlePull,
@@ -82,6 +85,7 @@ export function useMagicCommands({
     handleSaveContext,
     handleLoadContext,
     handleLinkedProjects,
+    handleForkSession,
     handleCommit,
     handleCommitAndPush,
     handlePull,
@@ -104,6 +108,7 @@ export function useMagicCommands({
       handleSaveContext,
       handleLoadContext,
       handleLinkedProjects,
+      handleForkSession,
       handleCommit,
       handleCommitAndPush,
       handlePull,
@@ -149,6 +154,9 @@ export function useMagicCommands({
           break
         case 'linked-projects':
           handlers.handleLinkedProjects()
+          break
+        case 'fork-session':
+          handlers.handleForkSession()
           break
         case 'commit':
           handlers.handleCommit()
