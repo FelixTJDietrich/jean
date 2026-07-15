@@ -2,12 +2,12 @@ import { isNativeApp } from '@/lib/environment'
 
 const MOBILE_WEB_MAX_WIDTH = 768
 
-function userAgentMatchesMobileWeb(): boolean {
+function userAgentMatchesMobile(): boolean {
   if (typeof navigator === 'undefined') return false
   return /iP(ad|hone|od)|Android/i.test(navigator.userAgent)
 }
 
-function viewportMatchesMobileWeb(): boolean {
+function viewportMatchesMobile(): boolean {
   if (typeof window === 'undefined') return false
   if (window.innerWidth > 0 && window.innerWidth < MOBILE_WEB_MAX_WIDTH) {
     return true
@@ -16,8 +16,8 @@ function viewportMatchesMobileWeb(): boolean {
     .matches
 }
 
-export function isMobileWebSafeMode(): boolean {
+export function isMobileWebAccess(): boolean {
   if (isNativeApp()) return false
   if (typeof window === 'undefined') return false
-  return userAgentMatchesMobileWeb() || viewportMatchesMobileWeb()
+  return userAgentMatchesMobile() || viewportMatchesMobile()
 }

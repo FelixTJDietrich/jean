@@ -185,7 +185,10 @@ let initialDataResolved = false
  * Build the /api/init URL with the given query params.
  * Centralizes token and selected_project encoding.
  */
-function buildInitUrl(opts: { selectedProjectId?: string | null }): string {
+function buildInitUrl(opts: {
+  selectedProjectId?: string | null
+  skipActiveSessions?: boolean
+}): string {
   const urlToken = new URLSearchParams(window.location.search).get('token')
   const token = urlToken || localStorage.getItem('jean-http-token') || ''
 
@@ -193,6 +196,9 @@ function buildInitUrl(opts: { selectedProjectId?: string | null }): string {
   if (token) params.set('token', token)
   if (opts.selectedProjectId) {
     params.set('selected_project', opts.selectedProjectId)
+  }
+  if (opts.skipActiveSessions) {
+    params.set('skip_active_sessions', 'true')
   }
   const qs = params.toString()
   return qs ? `/api/init?${qs}` : '/api/init'
@@ -210,7 +216,8 @@ function buildInitUrl(opts: { selectedProjectId?: string | null }): string {
  *   worktrees/sessions. Falls back to `ui_state.json` on disk when absent.
  */
 export async function preloadInitialData(
-  selectedProjectId?: string | null
+  selectedProjectId?: string | null,
+  options?: { skipActiveSessions?: boolean }
 ): Promise<InitialData | null> {
   if (isNativeApp()) return null
   setWebAccessEnabled(true)
@@ -221,7 +228,10 @@ export async function preloadInitialData(
 
   initialDataPromise = (async () => {
     try {
-      const url = buildInitUrl({ selectedProjectId })
+      const url = buildInitUrl({
+        selectedProjectId,
+        skipActiveSessions: options?.skipActiveSessions,
+      })
       const response = await fetch(url)
       if (!response.ok) {
         return null

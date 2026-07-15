@@ -29,7 +29,6 @@ import type {
 import type { Project, StartReviewJobResponse } from '@/types/projects'
 import { useQueryClient } from '@tanstack/react-query'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
-import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
 import { chatQueryKeys } from '@/services/chat'
 import { projectsQueryKeys } from '@/services/projects'
 import { triggerImmediateGitPoll, performGitPull } from '@/services/git-status'
@@ -50,9 +49,7 @@ export function useCommandContext(
 
   const queryClient = useQueryClient()
   const themeContext = useContext(ThemeProviderContext)
-  const { installedBackends } = useInstalledBackends({
-    enabled: !isMobileWebSafeMode(),
-  })
+  const { installedBackends } = useInstalledBackends()
 
   // Preferences
   const openPreferences = useCallback(() => {

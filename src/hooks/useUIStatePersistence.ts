@@ -12,7 +12,6 @@ import {
 import { useBrowserStore } from '@/store/browser-store'
 import { browserBackend } from '@/hooks/useBrowserPane'
 import { isNativeApp } from '@/lib/environment'
-import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
 import { invoke } from '@/lib/transport'
 import { logger } from '@/lib/logger'
 import type { BrowserTab } from '@/types/browser'
@@ -60,7 +59,6 @@ function debounce<T extends (...args: Parameters<T>) => void>(
  * 3. Validates worktree still exists before restoring
  */
 export function useUIStatePersistence() {
-  const mobileWebSafeMode = isMobileWebSafeMode()
   const { data: uiState, isSuccess: uiStateLoaded } = useUIState()
   const { data: projects = [], isSuccess: projectsLoaded } = useProjects()
   const { mutate: saveUIState } = useSaveUIState()
@@ -122,7 +120,7 @@ export function useUIStatePersistence() {
       modalTerminalWidth,
       modalTerminalHeight,
     } = useTerminalStore.getState()
-    const shouldPersistTerminalRuntime = !isNativeApp() && !mobileWebSafeMode
+    const shouldPersistTerminalRuntime = !isNativeApp()
     const terminalInstancesForPersist = shouldPersistTerminalRuntime
       ? Object.fromEntries(
           Object.entries(terminals)
@@ -148,21 +146,15 @@ export function useUIStatePersistence() {
     )
 
     return {
-      active_worktree_id: mobileWebSafeMode ? null : activeWorktreeId,
-      active_worktree_path: mobileWebSafeMode ? null : activeWorktreePath,
-      last_active_worktree_id: mobileWebSafeMode ? null : lastActiveWorktreeId,
-      active_project_id: mobileWebSafeMode ? null : selectedProjectId,
-      expanded_project_ids: mobileWebSafeMode
-        ? []
-        : Array.from(expandedProjectIds),
-      expanded_folder_ids: mobileWebSafeMode
-        ? []
-        : Array.from(expandedFolderIds),
+      active_worktree_id: activeWorktreeId,
+      active_worktree_path: activeWorktreePath,
+      last_active_worktree_id: lastActiveWorktreeId,
+      active_project_id: selectedProjectId,
+      expanded_project_ids: Array.from(expandedProjectIds),
+      expanded_folder_ids: Array.from(expandedFolderIds),
       left_sidebar_size: leftSidebarSize,
-      left_sidebar_visible: mobileWebSafeMode ? false : leftSidebarVisible,
-      active_session_ids: mobileWebSafeMode
-        ? {}
-        : limitActiveSessionIds(activeSessionIds),
+      left_sidebar_visible: leftSidebarVisible,
+      active_session_ids: limitActiveSessionIds(activeSessionIds),
       input_drafts: inputDrafts,
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
@@ -188,21 +180,15 @@ export function useUIStatePersistence() {
         ? sessionPrimarySurface
         : {},
       // Browser pane state (per-worktree tabs + 3-surface visibility)
-      browser_tabs: mobileWebSafeMode ? {} : browserTabsForPersist,
-      browser_active_tab_ids: mobileWebSafeMode
-        ? {}
-        : browserState.activeTabIds,
-      browser_side_pane_open: mobileWebSafeMode
-        ? {}
-        : browserState.sidePaneOpen,
+      browser_tabs: browserTabsForPersist,
+      browser_active_tab_ids: browserState.activeTabIds,
+      browser_side_pane_open: browserState.sidePaneOpen,
       browser_side_pane_width: browserState.sidePaneWidth,
-      browser_modal_open: mobileWebSafeMode ? {} : browserState.modalOpen,
+      browser_modal_open: browserState.modalOpen,
       browser_modal_dock_mode: browserState.modalDockMode,
       browser_modal_width: browserState.modalWidth,
       browser_modal_height: browserState.modalHeight,
-      browser_bottom_panel_open: mobileWebSafeMode
-        ? {}
-        : browserState.bottomPanelOpen,
+      browser_bottom_panel_open: browserState.bottomPanelOpen,
       browser_bottom_panel_height: browserState.bottomPanelHeight,
       // Project access timestamps for recency sorting
       project_access_timestamps: projectAccessTimestamps,
@@ -229,7 +215,7 @@ export function useUIStatePersistence() {
       ),
       version: 1, // Reset for first release
     }
-  }, [mobileWebSafeMode])
+  }, [])
 
   // Step 1: Initialize stores from persisted state (once, when projects are loaded)
   useEffect(() => {
@@ -247,26 +233,10 @@ export function useUIStatePersistence() {
 
     logger.info('Initializing UI state from persisted state', { uiState })
 
-    if (mobileWebSafeMode) {
-      logger.info('Using mobile web safe mode for UI state restore')
-      useProjectsStore.setState({
-        expandedProjectIds: new Set(),
-        expandedFolderIds: new Set(),
-        selectedProjectId: null,
-        selectedWorktreeId: null,
-      })
-      useChatStore.getState().clearActiveWorktree()
-      useChatStore.setState({
-        activeSessionIds: {},
-        lastActiveWorktreeId: null,
-      })
-      useUIStore.getState().setLeftSidebarVisible(false)
-    }
-
     // Restore expanded projects (filter to only projects that still exist)
     // Defensive: ensure expanded_project_ids is an array (might be null/undefined from backend)
     const expandedProjectIds = uiState.expanded_project_ids ?? []
-    if (!mobileWebSafeMode && expandedProjectIds.length > 0) {
+    if (expandedProjectIds.length > 0) {
       const validProjectIds = expandedProjectIds.filter(id =>
         projects.some(p => p.id === id)
       )
@@ -288,7 +258,7 @@ export function useUIStatePersistence() {
 
     // Restore expanded folders (filter to only folders that still exist)
     const expandedFolderIds = uiState.expanded_folder_ids ?? []
-    if (!mobileWebSafeMode && expandedFolderIds.length > 0) {
+    if (expandedFolderIds.length > 0) {
       const validFolderIds = expandedFolderIds.filter(id =>
         projects.some(p => p.id === id && p.is_folder)
       )
@@ -310,7 +280,7 @@ export function useUIStatePersistence() {
     }
 
     // Restore left sidebar visibility
-    if (!mobileWebSafeMode && uiState.left_sidebar_visible !== undefined) {
+    if (uiState.left_sidebar_visible !== undefined) {
       logger.debug('Restoring left sidebar visibility', {
         visible: uiState.left_sidebar_visible,
       })
@@ -319,7 +289,7 @@ export function useUIStatePersistence() {
 
     // Restore active project first (selectProject clears selectedWorktreeId)
     // This must happen BEFORE restoring the active worktree
-    if (!mobileWebSafeMode && uiState.active_project_id) {
+    if (uiState.active_project_id) {
       const projectExists = projects.some(
         p => p.id === uiState.active_project_id
       )
@@ -337,11 +307,7 @@ export function useUIStatePersistence() {
     }
 
     // Restore active worktree (must happen AFTER selectProject which clears selectedWorktreeId)
-    if (
-      !mobileWebSafeMode &&
-      uiState.active_worktree_id &&
-      uiState.active_worktree_path
-    ) {
+    if (uiState.active_worktree_id && uiState.active_worktree_path) {
       logger.debug('Restoring active worktree', {
         id: uiState.active_worktree_id,
         path: uiState.active_worktree_path,
@@ -366,7 +332,7 @@ export function useUIStatePersistence() {
     // Restore last active worktree ID (for dashboard session selection)
     // This must happen AFTER setActiveWorktree which also sets it,
     // but covers the case where the user was on the dashboard (no active worktree)
-    if (!mobileWebSafeMode && uiState.last_active_worktree_id) {
+    if (uiState.last_active_worktree_id) {
       useChatStore
         .getState()
         .setLastActiveWorktreeId(uiState.last_active_worktree_id)
@@ -374,9 +340,9 @@ export function useUIStatePersistence() {
 
     // Restore active sessions per worktree
     // Defensive: ensure active_session_ids is an object (might be null/undefined from backend)
-    const activeSessionIds = mobileWebSafeMode
-      ? {}
-      : limitActiveSessionIds(uiState.active_session_ids ?? {})
+    const activeSessionIds = limitActiveSessionIds(
+      uiState.active_session_ids ?? {}
+    )
     if (Object.keys(activeSessionIds).length > 0) {
       logger.debug('Restoring active sessions', { activeSessionIds })
       const { setActiveSession } = useChatStore.getState()
@@ -404,9 +370,7 @@ export function useUIStatePersistence() {
     }
 
     // Restore modal terminal drawer state
-    const modalTerminalOpen = mobileWebSafeMode
-      ? {}
-      : (uiState.modal_terminal_open ?? {})
+    const modalTerminalOpen = uiState.modal_terminal_open ?? {}
     if (Object.keys(modalTerminalOpen).length > 0) {
       logger.debug('Restoring modal terminal open state', {
         count: Object.keys(modalTerminalOpen).length,
@@ -442,7 +406,7 @@ export function useUIStatePersistence() {
     }
 
     const restoreTerminalRuntimeState = async (shouldCancel: () => boolean) => {
-      if (isNativeApp() || mobileWebSafeMode || shouldCancel()) return
+      if (isNativeApp() || shouldCancel()) return
 
       // PHASE 1: Always restore the *user-intent* UI flags for terminal
       // surfaces. These are independent of whether any PTYs survived the
@@ -738,12 +702,8 @@ export function useUIStatePersistence() {
     }
 
     // Restore browser pane state (per-worktree tabs + 3-surface visibility)
-    const persistedBrowserTabs = mobileWebSafeMode
-      ? {}
-      : (uiState.browser_tabs ?? {})
-    const browserActiveTabIds = mobileWebSafeMode
-      ? {}
-      : (uiState.browser_active_tab_ids ?? {})
+    const persistedBrowserTabs = uiState.browser_tabs ?? {}
+    const browserActiveTabIds = uiState.browser_active_tab_ids ?? {}
     if (Object.keys(persistedBrowserTabs).length > 0) {
       const hydratedTabs: Record<string, BrowserTab[]> = {}
       for (const [wid, list] of Object.entries(persistedBrowserTabs)) {
@@ -763,15 +723,9 @@ export function useUIStatePersistence() {
     // Browser surfaces are mutually exclusive per worktree (one webview, one
     // position). If persisted state has multiple flags true (legacy bug or
     // hand-edited file), keep only one with priority: modal > sidePane > bottom.
-    const persistedSidePaneOpen = mobileWebSafeMode
-      ? {}
-      : (uiState.browser_side_pane_open ?? {})
-    const persistedModalOpen = mobileWebSafeMode
-      ? {}
-      : (uiState.browser_modal_open ?? {})
-    const persistedBottomOpen = mobileWebSafeMode
-      ? {}
-      : (uiState.browser_bottom_panel_open ?? {})
+    const persistedSidePaneOpen = uiState.browser_side_pane_open ?? {}
+    const persistedModalOpen = uiState.browser_modal_open ?? {}
+    const persistedBottomOpen = uiState.browser_bottom_panel_open ?? {}
     const sanitizedSidePane: Record<string, boolean> = {}
     const sanitizedModal: Record<string, boolean> = {}
     const sanitizedBottom: Record<string, boolean> = {}
@@ -886,14 +840,7 @@ export function useUIStatePersistence() {
     return () => {
       cancelled = true
     }
-  }, [
-    uiStateLoaded,
-    uiState,
-    projects,
-    projectsLoaded,
-    isInitialized,
-    mobileWebSafeMode,
-  ])
+  }, [uiStateLoaded, uiState, projects, projectsLoaded, isInitialized])
 
   // Step 2: Subscribe to store changes and save (debounced)
   useEffect(() => {

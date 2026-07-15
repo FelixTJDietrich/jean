@@ -314,67 +314,6 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
     )
   })
 
-  it('uses a lightweight restore path on mobile web', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      writable: true,
-      value: 390,
-    })
-    mockUseProjects.mockReturnValue({
-      data: [
-        { id: 'project-1', name: 'Project', is_folder: false },
-        { id: 'folder-1', name: 'Folder', is_folder: true },
-      ],
-      isSuccess: true,
-    })
-    mockUseUIState.mockReturnValue({
-      data: buildUiState({
-        active_project_id: 'project-1',
-        expanded_project_ids: ['project-1'],
-        expanded_folder_ids: ['folder-1'],
-        active_worktree_id: 'worktree-1',
-        active_worktree_path: '/tmp/worktree-1',
-        active_session_ids: { 'worktree-1': 'session-1' },
-        left_sidebar_visible: true,
-        terminal_instances: {
-          'worktree-1': [
-            {
-              id: 'term-1',
-              command: null,
-              command_args: null,
-              label: 'Shell',
-              kind: 'panel',
-            },
-          ],
-        },
-      }),
-      isSuccess: true,
-    })
-
-    const queryClient = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false },
-        mutations: { retry: false },
-      },
-    })
-    renderHook(() => useUIStatePersistence(), {
-      wrapper: createWrapper(queryClient),
-    })
-
-    await waitFor(() => {
-      expect(useUIStore.getState().uiStateInitialized).toBe(true)
-    })
-
-    expect(useProjectsStore.getState().selectedProjectId).toBeNull()
-    expect(useProjectsStore.getState().expandedProjectIds.size).toBe(0)
-    expect(useProjectsStore.getState().expandedFolderIds.size).toBe(0)
-    expect(useChatStore.getState().activeWorktreeId).toBeNull()
-    expect(useChatStore.getState().activeSessionIds).toEqual({})
-    expect(useUIStore.getState().leftSidebarVisible).toBe(false)
-    expect(useTerminalStore.getState().terminals).toEqual({})
-    expect(mockInvoke).not.toHaveBeenCalledWith('get_active_terminals')
-  })
-
   it('restores only persisted terminals whose IDs are still live on the backend', async () => {
     mockInvoke.mockImplementation(async (command: string) => {
       if (command === 'get_active_terminals') return ['live-1']

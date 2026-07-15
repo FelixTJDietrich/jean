@@ -14,7 +14,7 @@ import {
   type InitialData,
 } from '@/lib/transport'
 import { isNativeApp } from '@/lib/environment'
-import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
+import { isMobileWebAccess } from '@/lib/mobile-web'
 import { setServerPlatform } from '@/lib/platform'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
@@ -116,7 +116,7 @@ function WsAuthErrorOverlay() {
 }
 
 function App() {
-  const mobileWebSafeMode = isMobileWebSafeMode()
+  const mobileWebAccess = isMobileWebAccess()
   // Track preloading state for web view
   const [isPreloading, setIsPreloading] = useState(!isNativeApp())
   const [platformVersion, setPlatformVersion] = useState(0)
@@ -570,7 +570,9 @@ function App() {
     const initialSelectedProjectId =
       peekWebReloadState()?.projectId ??
       useProjectsStore.getState().selectedProjectId
-    preloadInitialData(initialSelectedProjectId)
+    preloadInitialData(initialSelectedProjectId, {
+      skipActiveSessions: mobileWebAccess,
+    })
       .then(data => {
         if (data) {
           logger.info('Preloaded initial data via HTTP', {
@@ -666,7 +668,7 @@ function App() {
   useImmediateSessionStateSave()
 
   // Check for CLI updates on startup (shows toast notification if updates available)
-  useCliVersionCheck({ enabled: !mobileWebSafeMode })
+  useCliVersionCheck()
 
   // Global streaming event listeners - must be at App level so they stay active
   // even when ChatWindow is unmounted (e.g., when viewing a different worktree)
@@ -705,7 +707,7 @@ function App() {
   useAutoArchiveOnMerge()
 
   // One-time: detect installed backends and set magic prompt defaults accordingly
-  useMagicPromptAutoDefaults({ enabled: !mobileWebSafeMode })
+  useMagicPromptAutoDefaults()
 
   // A fresh page bootstrap is faster and more reliable than repairing stale
   // in-memory state. The backend keeps long-running jobs and

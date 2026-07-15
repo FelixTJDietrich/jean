@@ -13,7 +13,6 @@ import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { scheduleIdleWork } from '@/lib/idle'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useSwipeBack } from '@/hooks/useSwipeBack'
-import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
 
 const ChatWindow = lazy(() =>
   import('@/components/chat/ChatWindow').then(mod => ({
@@ -46,7 +45,6 @@ export function MainWindowContent({
     enabled: isMobile && !!activeWorktreePath,
   })
   const selectedProjectId = useProjectsStore(state => state.selectedProjectId)
-  const mobileWebSafeMode = isMobileWebSafeMode()
   const setAddProjectDialogOpen = useProjectsStore(
     state => state.setAddProjectDialogOpen
   )
@@ -57,8 +55,7 @@ export function MainWindowContent({
   const realProjects = projects.filter(p => !isFolder(p))
 
   const showWelcome = !activeWorktreePath && !selectedProjectId && !children
-  const shouldCheckBackends =
-    backendCheckReady && showWelcome && !mobileWebSafeMode
+  const shouldCheckBackends = backendCheckReady && showWelcome
   const { installedBackends, isLoading: backendsLoading } =
     useInstalledBackends({
       enabled: shouldCheckBackends,

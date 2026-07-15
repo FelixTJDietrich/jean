@@ -62,6 +62,9 @@ struct WsAuth {
     /// when the disk copy is stale. Used to scope the init payload to only the
     /// worktrees/sessions the user is currently viewing.
     selected_project: Option<String>,
+    /// Omit full active-session histories from the bootstrap payload.
+    /// Mobile web clients load chat messages on demand when a session opens.
+    skip_active_sessions: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -670,51 +673,58 @@ async fn init_handler(
     // Fetch windowed chat history for active sessions that belong to the
     // selected project. Other active sessions load on-demand when the user
     // switches projects/worktrees.
+    let skip_active_sessions = params.skip_active_sessions.unwrap_or(false);
     let active_sessions: std::collections::HashMap<String, crate::chat::types::Session> =
-        if let Some(ref ui) = ui_state {
-            let worktree_map: std::collections::HashMap<&str, &crate::projects::types::Worktree> =
-                worktrees_by_project
+        if !skip_active_sessions {
+            if let Some(ref ui) = ui_state {
+                let worktree_map: std::collections::HashMap<
+                    &str,
+                    &crate::projects::types::Worktree,
+                > = worktrees_by_project
                     .values()
                     .flat_map(|wts| wts.iter())
                     .map(|wt| (wt.id.as_str(), wt))
                     .collect();
 
-            let session_futures: Vec<_> = ui
-                .active_session_ids
-                .iter()
-                .filter_map(|(worktree_id, session_id)| {
-                    worktree_map.get(worktree_id.as_str()).map(|wt| {
-                        let app = state.app.clone();
-                        let wt_id = worktree_id.clone();
-                        let wt_path = wt.path.clone();
-                        let sess_id = session_id.clone();
-                        async move {
-                            match crate::chat::get_session(
-                                app,
-                                wt_id,
-                                wt_path,
-                                sess_id.clone(),
-                                Some(INIT_MESSAGE_WINDOW),
-                            )
-                            .await
-                            {
-                                Ok(session) => Some((sess_id, session)),
-                                Err(e) => {
-                                    log::warn!("Failed to load active session {sess_id}: {e}");
-                                    None
+                let session_futures: Vec<_> = ui
+                    .active_session_ids
+                    .iter()
+                    .filter_map(|(worktree_id, session_id)| {
+                        worktree_map.get(worktree_id.as_str()).map(|wt| {
+                            let app = state.app.clone();
+                            let wt_id = worktree_id.clone();
+                            let wt_path = wt.path.clone();
+                            let sess_id = session_id.clone();
+                            async move {
+                                match crate::chat::get_session(
+                                    app,
+                                    wt_id,
+                                    wt_path,
+                                    sess_id.clone(),
+                                    Some(INIT_MESSAGE_WINDOW),
+                                )
+                                .await
+                                {
+                                    Ok(session) => Some((sess_id, session)),
+                                    Err(e) => {
+                                        log::warn!("Failed to load active session {sess_id}: {e}");
+                                        None
+                                    }
                                 }
                             }
-                        }
+                        })
                     })
-                })
-                .take(MAX_INIT_ACTIVE_SESSIONS)
-                .collect();
+                    .take(MAX_INIT_ACTIVE_SESSIONS)
+                    .collect();
 
-            futures_util::future::join_all(session_futures)
-                .await
-                .into_iter()
-                .flatten()
-                .collect()
+                futures_util::future::join_all(session_futures)
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            }
         } else {
             std::collections::HashMap::new()
         };

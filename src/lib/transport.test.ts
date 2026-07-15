@@ -88,6 +88,18 @@ describe('transport bootstrap', () => {
     expect(setWsConnectedMock).toHaveBeenCalledWith(true)
   })
 
+  it('can skip active session histories during initial preload', async () => {
+    const transport = await loadTransportModule()
+
+    await transport.preloadInitialData('project-1', {
+      skipActiveSessions: true,
+    })
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/init?selected_project=project-1&skip_active_sessions=true'
+    )
+  })
+
   it('retries while establishing the initial connection', async () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock
