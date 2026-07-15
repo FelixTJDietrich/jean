@@ -12,6 +12,19 @@
     <meta name="theme-color" content="#101010" />
     <script>
       ;(() => {
+        const ua = navigator.userAgent
+        const isMobileSafari =
+          /iP(ad|hone|od)/.test(ua) &&
+          /Safari/.test(ua) &&
+          !/CriOS|FxiOS|EdgiOS/.test(ua)
+        if (isMobileSafari) {
+          try {
+            sessionStorage.removeItem('jean:web-reload-state')
+          } catch {
+            // Storage can be unavailable in restricted Safari contexts.
+          }
+        }
+
         let savedTheme = 'system'
         try {
           savedTheme = localStorage.getItem('ui-theme') || 'system'
