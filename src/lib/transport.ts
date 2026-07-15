@@ -182,6 +182,7 @@ export interface InitialData {
 let initialDataPromise: Promise<InitialData | null> | null = null
 let initialDataResolved = false
 let reconnectInitialDataPromise: Promise<InitialData | null> | null = null
+const MAX_RECONNECT_ACTIVE_SESSIONS = 8
 
 /**
  * Build the /api/init URL with the given query params.
@@ -202,9 +203,12 @@ function buildInitUrl(opts: {
     params.set('selected_project', opts.selectedProjectId)
   }
   if (opts.activeSessionIds && Object.keys(opts.activeSessionIds).length > 0) {
-    const pairs = Object.entries(opts.activeSessionIds)
-      .map(([wId, sId]) => `${wId}:${sId}`)
-      .join(',')
+    const activeSessionEntries = Object.entries(opts.activeSessionIds)
+    const entries =
+      opts.mode === 'reconnect'
+        ? activeSessionEntries.slice(0, MAX_RECONNECT_ACTIVE_SESSIONS)
+        : activeSessionEntries
+    const pairs = entries.map(([wId, sId]) => `${wId}:${sId}`).join(',')
     params.set('active_sessions', pairs)
   }
   const qs = params.toString()

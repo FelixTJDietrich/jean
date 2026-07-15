@@ -74,15 +74,38 @@ describe('transport bootstrap', () => {
     vi.doUnmock('./environment')
   })
 
-
   it('uses reconnect mode when refetching initial data after reconnect', async () => {
     const transport = await loadTransportModule()
 
-    await transport.refetchInitialData({ 'worktree-1': 'session-1' }, 'project-1')
+    await transport.refetchInitialData(
+      { 'worktree-1': 'session-1' },
+      'project-1'
+    )
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/init?mode=reconnect&selected_project=project-1&active_sessions=worktree-1%3Asession-1'
     )
+  })
+
+  it('caps reconnect active sessions so mobile reconnect URLs stay small', async () => {
+    const transport = await loadTransportModule()
+    const activeSessionIds = Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [
+        `worktree-${index}`,
+        `session-${index}`,
+      ])
+    )
+
+    await transport.refetchInitialData(activeSessionIds, 'project-1')
+
+    const firstFetchCall = vi.mocked(fetch).mock.calls[0]
+    expect(firstFetchCall).toBeDefined()
+    const url = firstFetchCall![0] as string
+    const params = new URLSearchParams(url.split('?')[1])
+    const activeSessions = params.get('active_sessions')?.split(',') ?? []
+    expect(activeSessions).toHaveLength(8)
+    expect(activeSessions[0]).toBe('worktree-0:session-0')
+    expect(activeSessions.at(-1)).toBe('worktree-7:session-7')
   })
 
   it('starts reconnect init fetch before websocket comes back and reuses it', async () => {

@@ -8566,7 +8566,7 @@ fn build_codex_review_args(
     ];
     if is_fast {
         args.push("-c".into());
-        args.push("service_tier=\"fast\"".into());
+        args.push("service_tier=\"priority\"".into());
     }
     if let Some(dir) = working_dir {
         args.push("--cd".into());
@@ -9604,7 +9604,7 @@ mod codex_review_args_tests {
             window
                 == [
                     OsString::from("-c"),
-                    OsString::from("service_tier=\"fast\""),
+                    OsString::from("service_tier=\"priority\""),
                 ]
         }));
         assert!(args.windows(2).any(|window| {

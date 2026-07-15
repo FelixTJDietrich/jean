@@ -410,6 +410,7 @@ async fn version_handler(
 /// Older messages are fetched on-demand via `load_older_session_messages`
 /// when the user scrolls up in the chat window.
 const INIT_MESSAGE_WINDOW: usize = 50;
+const MAX_RECONNECT_ACTIVE_SESSIONS: usize = 8;
 
 /// Maximum number of buffered WebSocket events replayed per focused running
 /// session at init. Plenty to reconstruct an in-flight turn; full stream
@@ -462,6 +463,7 @@ fn parse_active_sessions_param(value: Option<&str>) -> std::collections::HashMap
     value
         .unwrap_or("")
         .split(',')
+        .take(MAX_RECONNECT_ACTIVE_SESSIONS)
         .filter_map(|pair| {
             let pair = pair.trim();
             let (wt, sess) = pair.split_once(':')?;
@@ -1741,6 +1743,21 @@ mod tests {
         let options = super::list_bind_host_options();
         assert!(options.iter().any(|option| option.host == "127.0.0.1"));
         assert!(options.iter().any(|option| option.host == "0.0.0.0"));
+    }
+
+    #[test]
+    fn parse_active_sessions_param_caps_reconnect_payload() {
+        let value = (0..12)
+            .map(|index| format!("worktree-{index}:session-{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let parsed = super::parse_active_sessions_param(Some(&value));
+
+        assert_eq!(parsed.len(), super::MAX_RECONNECT_ACTIVE_SESSIONS);
+        assert_eq!(parsed.get("worktree-0"), Some(&"session-0".to_string()));
+        assert_eq!(parsed.get("worktree-7"), Some(&"session-7".to_string()));
+        assert!(!parsed.contains_key("worktree-8"));
     }
 
     #[test]

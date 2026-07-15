@@ -121,9 +121,14 @@ describe('model option helpers', () => {
 
   it('offers Codex fast modes for default selectors', () => {
     const values = codexDefaultModelOptions.map(option => option.value)
+    expect(values).toContain('gpt-5.6-sol-fast')
+    expect(values).toContain('gpt-5.6-terra-fast')
+    expect(values).toContain('gpt-5.6-luna-fast')
     expect(values).toContain('gpt-5.5-fast')
     expect(values).toContain('gpt-5.4-fast')
     expect(values).toContain('gpt-5.4-mini-fast')
+    expect(normalizeCodexModel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
+    expect(normalizeCodexModel('gpt-5.6-sol-fast')).toBe('gpt-5.6-sol-fast')
     expect(normalizeCodexModel('gpt-5.5-fast')).toBe('gpt-5.5-fast')
   })
 

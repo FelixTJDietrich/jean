@@ -104,6 +104,7 @@ struct ErrorEvent {
 }
 
 const CODEX_PLAN_TOOL_NAME: &str = "CodexPlan";
+const CODEX_FAST_SERVICE_TIER: &str = "priority";
 
 fn normalize_plan_status(status: &str) -> &str {
     match status {
@@ -405,11 +406,18 @@ fn emit_codex_plan_tool_call(
 // App-server param builders
 // =============================================================================
 
-/// Split "gpt-5.5-fast" → ("gpt-5.5", true). Fast tier supported on
-/// gpt-5.5 and gpt-5.4 family; older models that happened to end in
-/// `-fast` are left unchanged.
+/// Split "gpt-5.6-sol-fast" → ("gpt-5.6-sol", true). Fast tier supported on
+/// the current Codex model families listed here; older models that happened
+/// to end in `-fast` are left unchanged.
 pub(crate) fn split_fast_model(model: &str) -> (&str, bool) {
     match model {
+        "gpt-5.6" | "gpt-5-6-sol" => ("gpt-5.6-sol", false),
+        "gpt-5-6-terra" => ("gpt-5.6-terra", false),
+        "gpt-5-6-luna" => ("gpt-5.6-luna", false),
+        "gpt-5.6-fast" | "gpt-5-6-sol-fast" => ("gpt-5.6-sol", true),
+        "gpt-5.6-sol-fast" => ("gpt-5.6-sol", true),
+        "gpt-5-6-terra-fast" | "gpt-5.6-terra-fast" => ("gpt-5.6-terra", true),
+        "gpt-5-6-luna-fast" | "gpt-5.6-luna-fast" => ("gpt-5.6-luna", true),
         "gpt-5.5-fast" => ("gpt-5.5", true),
         "gpt-5.4-fast" => ("gpt-5.4", true),
         "gpt-5.4-mini-fast" => ("gpt-5.4-mini", true),
@@ -434,7 +442,7 @@ pub fn build_thread_start_params(
         "persistExtendedHistory": true,
     });
 
-    // Model (gpt-5.4-fast → model=gpt-5.4 + serviceTier=fast)
+    // Model (gpt-5.6-sol-fast → model=gpt-5.6-sol + serviceTier=priority)
     if let Some(m) = model {
         let (actual_model, is_fast) = split_fast_model(m);
         log::info!(
@@ -443,7 +451,7 @@ pub fn build_thread_start_params(
         );
         params["model"] = serde_json::json!(actual_model);
         if is_fast {
-            params["serviceTier"] = serde_json::json!("fast");
+            params["serviceTier"] = serde_json::json!(CODEX_FAST_SERVICE_TIER);
         }
     }
 
@@ -4183,7 +4191,8 @@ pub fn execute_one_shot_codex(
         return Err("Codex CLI not installed".to_string());
     }
 
-    // Split fast suffix: "gpt-5.4-fast" → model="gpt-5.4" + service_tier="fast"
+    // Split fast suffix:
+    // "gpt-5.6-sol-fast" → model="gpt-5.6-sol" + service_tier="priority"
     let (actual_model, is_fast) = split_fast_model(model);
 
     log::info!(
@@ -4360,7 +4369,7 @@ fn build_one_shot_codex_args(
     ];
     if is_fast {
         args.push("-c".into());
-        args.push("service_tier=\"fast\"".into());
+        args.push(format!("service_tier=\"{CODEX_FAST_SERVICE_TIER}\"").into());
     }
     if let Some(dir) = working_dir {
         args.push("--cd".into());
@@ -4678,7 +4687,7 @@ mod tests {
             None,
         );
         assert_eq!(params["model"], "gpt-5.4");
-        assert_eq!(params["serviceTier"], "fast");
+        assert_eq!(params["serviceTier"], "priority");
     }
 
     #[test]
@@ -4693,7 +4702,39 @@ mod tests {
             None,
         );
         assert_eq!(params["model"], "gpt-5.5");
-        assert_eq!(params["serviceTier"], "fast");
+        assert_eq!(params["serviceTier"], "priority");
+    }
+
+    #[test]
+    fn gpt_5_6_fast_enables_priority_service_tier() {
+        let params = build_thread_start_params(
+            std::path::Path::new("/tmp"),
+            Some("gpt-5.6-sol-fast"),
+            Some("plan"),
+            false,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(params["model"], "gpt-5.6-sol");
+        assert_eq!(params["serviceTier"], "priority");
+    }
+
+    #[test]
+    fn split_fast_model_recognises_gpt_5_6_fast_models() {
+        assert_eq!(split_fast_model("gpt-5.6-sol-fast"), ("gpt-5.6-sol", true));
+        assert_eq!(
+            split_fast_model("gpt-5.6-terra-fast"),
+            ("gpt-5.6-terra", true)
+        );
+        assert_eq!(
+            split_fast_model("gpt-5.6-luna-fast"),
+            ("gpt-5.6-luna", true)
+        );
+        assert_eq!(split_fast_model("gpt-5.6-fast"), ("gpt-5.6-sol", true));
+        assert_eq!(split_fast_model("gpt-5.6"), ("gpt-5.6-sol", false));
+        assert_eq!(split_fast_model("gpt-5-6-sol"), ("gpt-5.6-sol", false));
+        assert_eq!(split_fast_model("gpt-5-6-sol-fast"), ("gpt-5.6-sol", true));
     }
 
     #[test]
