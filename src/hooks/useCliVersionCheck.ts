@@ -133,8 +133,8 @@ function resolveCliInfo(
  * Surfaces pending manual updates in the titlebar badge.
  * Should be called once in App.tsx.
  */
-export function useCliVersionCheck() {
-  const shouldCheck = hasBackend()
+export function useCliVersionCheck(options?: { enabled?: boolean }) {
+  const shouldCheck = hasBackend() && (options?.enabled ?? true)
   const queryClient = useQueryClient()
   const { data: preferences, isLoading: preferencesLoading } = usePreferences()
   const { data: claudePathInfo } = useClaudePathDetection({

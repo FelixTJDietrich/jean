@@ -14,6 +14,7 @@ import {
   type InitialData,
 } from '@/lib/transport'
 import { isNativeApp } from '@/lib/environment'
+import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
 import { setServerPlatform } from '@/lib/platform'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
@@ -115,6 +116,7 @@ function WsAuthErrorOverlay() {
 }
 
 function App() {
+  const mobileWebSafeMode = isMobileWebSafeMode()
   // Track preloading state for web view
   const [isPreloading, setIsPreloading] = useState(!isNativeApp())
   const [platformVersion, setPlatformVersion] = useState(0)
@@ -664,7 +666,7 @@ function App() {
   useImmediateSessionStateSave()
 
   // Check for CLI updates on startup (shows toast notification if updates available)
-  useCliVersionCheck()
+  useCliVersionCheck({ enabled: !mobileWebSafeMode })
 
   // Global streaming event listeners - must be at App level so they stay active
   // even when ChatWindow is unmounted (e.g., when viewing a different worktree)
