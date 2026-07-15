@@ -19,14 +19,15 @@ import {
  * detect installed backends and apply the appropriate defaults.
  * Runs once per app lifetime (guarded by magic_models_auto_initialized flag).
  */
-export function useMagicPromptAutoDefaults() {
+export function useMagicPromptAutoDefaults(options?: { enabled?: boolean }) {
+  const enabled = options?.enabled ?? true
   const { data: preferences } = usePreferences()
-  const { installedBackends, isLoading } = useInstalledBackends()
+  const { installedBackends, isLoading } = useInstalledBackends({ enabled })
   const patchPreferences = usePatchPreferences()
   const didRun = useRef(false)
 
   useEffect(() => {
-    if (!preferences || isLoading || didRun.current) return
+    if (!enabled || !preferences || isLoading || didRun.current) return
     if (preferences.magic_models_auto_initialized) return
     didRun.current = true
 
@@ -75,5 +76,5 @@ export function useMagicPromptAutoDefaults() {
         magic_models_auto_initialized: true,
       })
     }
-  }, [preferences, installedBackends, isLoading, patchPreferences])
+  }, [enabled, preferences, installedBackends, isLoading, patchPreferences])
 }

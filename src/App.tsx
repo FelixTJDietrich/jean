@@ -705,7 +705,7 @@ function App() {
   useAutoArchiveOnMerge()
 
   // One-time: detect installed backends and set magic prompt defaults accordingly
-  useMagicPromptAutoDefaults()
+  useMagicPromptAutoDefaults({ enabled: !mobileWebSafeMode })
 
   // A fresh page bootstrap is faster and more reliable than repairing stale
   // in-memory state. The backend keeps long-running jobs and
