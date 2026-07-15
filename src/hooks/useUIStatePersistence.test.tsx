@@ -199,6 +199,45 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
     })
   })
 
+  it('caps restored active sessions from stale persisted UI state', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({
+        active_session_ids: Object.fromEntries(
+          Array.from({ length: 12 }, (_, index) => [
+            `worktree-${index}`,
+            `session-${index}`,
+          ])
+        ),
+      }),
+      isSuccess: true,
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(
+        Object.keys(useChatStore.getState().activeSessionIds)
+      ).toHaveLength(8)
+    })
+
+    expect(useChatStore.getState().activeSessionIds).toEqual(
+      Object.fromEntries(
+        Array.from({ length: 8 }, (_, index) => [
+          `worktree-${index}`,
+          `session-${index}`,
+        ])
+      )
+    )
+  })
+
   it('restores only persisted terminals whose IDs are still live on the backend', async () => {
     mockInvoke.mockImplementation(async (command: string) => {
       if (command === 'get_active_terminals') return ['live-1']
@@ -367,9 +406,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       'fallback-panel',
       'fallback-session',
     ])
-    expect(terminalState.activeTerminalIds['worktree-1']).toBe(
-      'fallback-panel'
-    )
+    expect(terminalState.activeTerminalIds['worktree-1']).toBe('fallback-panel')
     expect(terminalState.runningTerminals.has('fallback-panel')).toBe(true)
     expect(terminalState.runningTerminals.has('fallback-session')).toBe(true)
     expect(terminalState.terminalPanelOpen['worktree-1']).toBe(true)

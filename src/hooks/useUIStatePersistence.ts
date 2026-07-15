@@ -17,6 +17,16 @@ import { logger } from '@/lib/logger'
 import type { BrowserTab } from '@/types/browser'
 import type { UIState } from '@/types/ui-state'
 
+const MAX_PERSISTED_ACTIVE_SESSIONS = 8
+
+function limitActiveSessionIds(
+  activeSessionIds: Record<string, string>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(activeSessionIds).slice(0, MAX_PERSISTED_ACTIVE_SESSIONS)
+  )
+}
+
 // Simple debounce implementation
 function debounce<T extends (...args: Parameters<T>) => void>(
   fn: T,
@@ -144,7 +154,7 @@ export function useUIStatePersistence() {
       expanded_folder_ids: Array.from(expandedFolderIds),
       left_sidebar_size: leftSidebarSize,
       left_sidebar_visible: leftSidebarVisible,
-      active_session_ids: activeSessionIds,
+      active_session_ids: limitActiveSessionIds(activeSessionIds),
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
       // Modal terminal drawer state
@@ -329,7 +339,9 @@ export function useUIStatePersistence() {
 
     // Restore active sessions per worktree
     // Defensive: ensure active_session_ids is an object (might be null/undefined from backend)
-    const activeSessionIds = uiState.active_session_ids ?? {}
+    const activeSessionIds = limitActiveSessionIds(
+      uiState.active_session_ids ?? {}
+    )
     if (Object.keys(activeSessionIds).length > 0) {
       logger.debug('Restoring active sessions', { activeSessionIds })
       const { setActiveSession } = useChatStore.getState()
