@@ -7,11 +7,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
@@ -24,9 +25,9 @@ use super::github_issues::{
     format_advisory_context_markdown, format_issue_context_markdown, format_pr_context_markdown,
     format_security_context_markdown, generate_branch_name_from_advisory,
     generate_branch_name_from_issue, generate_branch_name_from_security_alert,
-    get_github_contexts_dir, get_github_pr, get_pr_diff, get_session_context_content,
-    get_session_context_numbers, AdvisoryContext, IssueContext, PullRequestContext,
-    SecurityAlertContext,
+    get_github_contexts_dir, get_github_pr, get_github_pr_by_number, get_pr_diff,
+    get_session_context_content, get_session_context_numbers, AdvisoryContext, IssueContext,
+    PullRequestContext, SecurityAlertContext,
 };
 use super::linear_issues::{
     add_linear_reference, format_linear_issue_context_markdown,
@@ -73,6 +74,8 @@ static OBJ_REL_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\brel\s*:\s*["']([^"']+)["']"#).expect("valid object rel regex"));
 static OBJ_HREF_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"\bhref\s*:\s*["']([^"'?]+)"#).expect("valid object href regex"));
+static PR_CREATION_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const MAX_ICON_SOURCE_BYTES: u64 = 1024 * 1024;
 
@@ -322,6 +325,8 @@ pub struct ReviewJob {
     pub worktree_path: String,
     pub session_id: Option<String>,
     pub source: String,
+    pub backend: Option<String>,
+    pub model: Option<String>,
     pub status: ReviewJobStatus,
     pub finding_count: Option<usize>,
     pub error: Option<String>,
@@ -337,6 +342,8 @@ pub struct ReviewJobStart {
     pub worktree_path: String,
     pub session_id: Option<String>,
     pub source: String,
+    pub backend: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Default)]
@@ -358,9 +365,13 @@ impl ReviewJobRegistry {
     pub fn try_insert_running(&self, start: ReviewJobStart) -> Result<ReviewJob, String> {
         let mut jobs = self.jobs.lock().unwrap();
         if jobs.values().any(|job| {
-            job.worktree_id == start.worktree_id && job.status == ReviewJobStatus::Running
+            job.worktree_id == start.worktree_id
+                && job.status == ReviewJobStatus::Running
+                && job.source == start.source
+                && job.backend == start.backend
+                && job.model == start.model
         }) {
-            return Err("A review is already running for this worktree".to_string());
+            return Err("This backend and model are already reviewing the worktree".to_string());
         }
 
         let job = Self::build_running_job(start, now());
@@ -376,6 +387,8 @@ impl ReviewJobRegistry {
             worktree_path: start.worktree_path,
             session_id: start.session_id,
             source: start.source,
+            backend: start.backend,
+            model: start.model,
             status: ReviewJobStatus::Running,
             finding_count: None,
             error: None,
@@ -394,6 +407,12 @@ impl ReviewJobRegistry {
             .unwrap()
             .values()
             .any(|job| job.worktree_id == worktree_id && job.status == ReviewJobStatus::Running)
+    }
+
+    pub fn has_running_for_session(&self, session_id: &str) -> bool {
+        self.jobs.lock().unwrap().values().any(|job| {
+            job.session_id.as_deref() == Some(session_id) && job.status == ReviewJobStatus::Running
+        })
     }
 
     pub fn list(&self) -> Vec<ReviewJob> {
@@ -450,6 +469,71 @@ impl ReviewJobRegistry {
 }
 
 static REVIEW_JOB_REGISTRY: Lazy<ReviewJobRegistry> = Lazy::new(ReviewJobRegistry::default);
+
+fn review_session_name(source: &str, _backend: Option<&str>, _model: Option<&str>) -> String {
+    if source == "coderabbit-cli" {
+        return "Code Review · CodeRabbit CLI".to_string();
+    }
+
+    "Code Review".to_string()
+}
+
+fn merge_review_result(
+    existing: Option<serde_json::Value>,
+    backend: &str,
+    model: &str,
+    response: &ReviewResponse,
+) -> Result<serde_json::Value, String> {
+    merge_review_entry(
+        existing,
+        backend,
+        model,
+        ReviewJobStatus::Completed,
+        Some(response),
+        None,
+    )
+}
+
+fn merge_review_entry(
+    existing: Option<serde_json::Value>,
+    backend: &str,
+    model: &str,
+    status: ReviewJobStatus,
+    response: Option<&ReviewResponse>,
+    error: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut reviews = existing
+        .and_then(|value| {
+            value
+                .get("reviews")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+    let mut entry = serde_json::json!({
+        "backend": backend,
+        "model": model,
+        "status": status,
+    });
+    if let Some(response) = response {
+        entry["result"] = serde_json::to_value(response).map_err(|error| error.to_string())?;
+    }
+    if let Some(error) = error {
+        entry["error"] = serde_json::Value::String(error.to_string());
+    }
+    if let Some(existing_entry) = reviews.iter_mut().find(|existing_entry| {
+        existing_entry
+            .get("backend")
+            .and_then(|value| value.as_str())
+            == Some(backend)
+            && existing_entry.get("model").and_then(|value| value.as_str()) == Some(model)
+    }) {
+        *existing_entry = entry;
+    } else {
+        reviews.push(entry);
+    }
+    Ok(serde_json::json!({ "reviews": reviews }))
+}
 
 /// List all projects
 /// Check if git global user identity is configured
@@ -6579,6 +6663,64 @@ pub struct CreatePrResponse {
     pub existing: bool,
 }
 
+struct PrCreationGuard {
+    worktree_path: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for PrCreationGuard {
+    fn drop(&mut self) {
+        finish_pr_creation(&self.worktree_path);
+    }
+}
+
+fn begin_pr_creation(worktree_path: &str) -> Result<PrCreationGuard, String> {
+    let mut cancellations = PR_CREATION_CANCELLATIONS
+        .lock()
+        .map_err(|_| "Failed to lock PR creation cancellation registry".to_string())?;
+    if cancellations.contains_key(worktree_path) {
+        return Err("PR creation is already running for this worktree".to_string());
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    cancellations.insert(worktree_path.to_string(), flag.clone());
+    Ok(PrCreationGuard {
+        worktree_path: worktree_path.to_string(),
+        cancelled: flag,
+    })
+}
+
+fn finish_pr_creation(worktree_path: &str) {
+    match PR_CREATION_CANCELLATIONS.lock() {
+        Ok(mut cancellations) => {
+            cancellations.remove(worktree_path);
+        }
+        Err(_) => log::warn!("Failed to lock PR creation cancellation registry for cleanup"),
+    }
+}
+
+fn check_pr_creation_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::SeqCst) {
+        Err("PR creation cancelled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Cancel a running PR creation request for a worktree.
+///
+/// The long-running PR command checks this flag between git, AI, and gh steps.
+#[tauri::command]
+pub async fn cancel_create_pr_with_ai_content(worktree_path: String) -> Result<bool, String> {
+    let cancellations = PR_CREATION_CANCELLATIONS
+        .lock()
+        .map_err(|_| "Failed to lock PR creation cancellation registry".to_string())?;
+    let Some(flag) = cancellations.get(&worktree_path) else {
+        return Ok(false);
+    };
+    flag.store(true, Ordering::SeqCst);
+    Ok(true)
+}
+
 /// Extract structured output from Claude CLI stream-json response
 /// Handles the StructuredOutput tool call pattern used with --json-schema
 fn extract_structured_output(output: &str) -> Result<String, String> {
@@ -6763,6 +6905,7 @@ fn extract_json_object_from_text(text: &str) -> Result<String, String> {
 }
 
 fn build_claude_structured_output_args(model: &str, tools: &str, schema: &str) -> Vec<String> {
+    let tools = if tools == "none" { "" } else { tools };
     vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -6775,8 +6918,6 @@ fn build_claude_structured_output_args(model: &str, tools: &str, schema: &str) -
         "--no-session-persistence".to_string(),
         "--tools".to_string(),
         tools.to_string(),
-        "--tools".to_string(),
-        "default".to_string(),
         "--max-turns".to_string(),
         "3".to_string(),
         "--json-schema".to_string(),
@@ -6973,6 +7114,8 @@ pub async fn create_pr_with_ai_content(
     reasoning_effort: Option<String>,
 ) -> Result<CreatePrResponse, String> {
     log::trace!("Creating PR for: {worktree_path}");
+    let pr_creation = begin_pr_creation(&worktree_path)?;
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Load project data to get target branch
     let data = load_projects_data(&app)?;
@@ -6988,6 +7131,7 @@ pub async fn create_pr_with_ai_content(
 
     let target_branch = &project.default_branch;
     let current_branch = git::get_current_branch(&worktree_path)?;
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Check if we're on the target branch (can't create PR to same branch)
     if current_branch == *target_branch {
@@ -7061,6 +7205,7 @@ pub async fn create_pr_with_ai_content(
                 return Err(format!("Failed to commit: {stderr}"));
             }
         }
+        check_pr_creation_cancelled(&pr_creation.cancelled)?;
     }
 
     // Push the branch
@@ -7076,6 +7221,7 @@ pub async fn create_pr_with_ai_content(
             log::warn!("Push warning: {stderr}");
         }
     }
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Check if a PR already exists for this branch before spending time/tokens on AI generation
     let gh = resolve_gh_binary(&app);
@@ -7171,6 +7317,7 @@ pub async fn create_pr_with_ai_content(
         reasoning_effort.as_deref(),
         "HEAD",
     )?;
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Gather Linear identifiers
     let project_name = &project.name;
@@ -7210,6 +7357,7 @@ pub async fn create_pr_with_ai_content(
     }
 
     log::trace!("Generated PR title: {}", pr_content.title);
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Create the PR using gh CLI
     log::trace!("Creating PR with gh CLI");
@@ -7226,6 +7374,7 @@ pub async fn create_pr_with_ai_content(
         ])
         .output()
         .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
+    check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -7820,6 +7969,104 @@ pub struct CreateCommitResponse {
     pub push_permission_denied: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitJobStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitJob {
+    pub id: String,
+    pub worktree_path: String,
+    pub status: CommitJobStatus,
+    pub response: Option<CreateCommitResponse>,
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Default)]
+pub struct CommitJobRegistry {
+    jobs: Mutex<HashMap<String, CommitJob>>,
+}
+
+impl CommitJobRegistry {
+    pub fn try_insert_running(
+        &self,
+        id: String,
+        worktree_path: String,
+    ) -> Result<(CommitJob, bool), String> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.get(&id) {
+            if job.worktree_path == worktree_path {
+                return Ok((job.clone(), false));
+            }
+            return Err("Commit job id is already used by another worktree".to_string());
+        }
+        if let Some(job) = jobs.values().find(|job| {
+            job.worktree_path == worktree_path && job.status == CommitJobStatus::Running
+        }) {
+            return Ok((job.clone(), false));
+        }
+
+        let timestamp = now();
+        let job = CommitJob {
+            id,
+            worktree_path,
+            status: CommitJobStatus::Running,
+            response: None,
+            error: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        jobs.insert(job.id.clone(), job.clone());
+        Ok((job, true))
+    }
+
+    pub fn get(&self, job_id: &str) -> Option<CommitJob> {
+        self.jobs.lock().unwrap().get(job_id).cloned()
+    }
+
+    pub fn mark_completed(
+        &self,
+        job_id: &str,
+        response: CreateCommitResponse,
+    ) -> Option<CommitJob> {
+        self.update(job_id, |job| {
+            job.status = CommitJobStatus::Completed;
+            job.response = Some(response);
+            job.error = None;
+        })
+    }
+
+    pub fn mark_failed(&self, job_id: &str, error: String) -> Option<CommitJob> {
+        self.update(job_id, |job| {
+            job.status = CommitJobStatus::Failed;
+            job.error = Some(error);
+        })
+    }
+
+    fn update(&self, job_id: &str, update: impl FnOnce(&mut CommitJob)) -> Option<CommitJob> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let job = jobs.get_mut(job_id)?;
+        update(job);
+        job.updated_at = now();
+        Some(job.clone())
+    }
+}
+
+static COMMIT_JOB_REGISTRY: Lazy<CommitJobRegistry> = Lazy::new(CommitJobRegistry::default);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartCommitJobResponse {
+    pub job: CommitJob,
+}
+
 /// Check if there are unpushed commits (commits ahead of upstream).
 /// Returns true if there are unpushed commits OR if there's no upstream (safe fallback).
 fn has_unpushed_commits(repo_path: &str) -> Result<bool, String> {
@@ -8400,6 +8647,83 @@ pub async fn create_commit_with_ai(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn start_commit_job(
+    app: AppHandle,
+    worktree_path: String,
+    custom_prompt: Option<String>,
+    push: bool,
+    remote: Option<String>,
+    pr_number: Option<u32>,
+    model: Option<String>,
+    custom_profile_name: Option<String>,
+    reasoning_effort: Option<String>,
+    specific_files: Option<Vec<String>>,
+    job_id: Option<String>,
+) -> Result<StartCommitJobResponse, String> {
+    let job_id = job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (job, is_new) =
+        COMMIT_JOB_REGISTRY.try_insert_running(job_id.clone(), worktree_path.clone())?;
+    if !is_new {
+        log::info!(
+            "Commit job {} is already running for {}",
+            job.id,
+            job.worktree_path
+        );
+        return Ok(StartCommitJobResponse { job });
+    }
+    log::info!("Commit job {job_id} started for {worktree_path}");
+    emit_commit_job_update(&app, &job);
+
+    let task_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let commit_app = task_app.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            tauri::async_runtime::block_on(create_commit_with_ai(
+                commit_app,
+                worktree_path,
+                custom_prompt,
+                push,
+                remote,
+                pr_number,
+                model,
+                custom_profile_name,
+                reasoning_effort,
+                specific_files,
+            ))
+        })
+        .await
+        .map_err(|error| format!("Commit task failed: {error}"))
+        .and_then(|result| result);
+
+        let updated = match result {
+            Ok(response) => {
+                log::info!("Commit job {job_id} completed");
+                COMMIT_JOB_REGISTRY.mark_completed(&job_id, response)
+            }
+            Err(error) => {
+                log::warn!("Commit job {job_id} failed: {error}");
+                COMMIT_JOB_REGISTRY.mark_failed(&job_id, error)
+            }
+        };
+        if let Some(job) = updated {
+            emit_commit_job_update(&task_app, &job);
+        }
+    });
+
+    Ok(StartCommitJobResponse { job })
+}
+
+#[tauri::command]
+pub async fn get_commit_job(job_id: String) -> Result<Option<CommitJob>, String> {
+    Ok(COMMIT_JOB_REGISTRY.get(&job_id))
+}
+
+fn emit_commit_job_update(app: &AppHandle, job: &CommitJob) {
+    let _ = app.emit_all("commit-job:updated", job);
+}
+
 // =============================================================================
 // AI-Powered Code Review
 // =============================================================================
@@ -8821,6 +9145,18 @@ fn generate_review(
         .map_err(|e| format!("Failed to parse review response: {e}"))
 }
 
+fn select_review_target_branch(
+    linked_pr_base: Option<&str>,
+    worktree_base: Option<&str>,
+    project_default: &str,
+) -> String {
+    linked_pr_base
+        .filter(|branch| !branch.trim().is_empty())
+        .or_else(|| worktree_base.filter(|branch| !branch.trim().is_empty()))
+        .unwrap_or(project_default)
+        .to_string()
+}
+
 /// Run AI code review on the current branch
 #[tauri::command]
 pub async fn run_review_with_ai(
@@ -8831,32 +9167,56 @@ pub async fn run_review_with_ai(
     custom_profile_name: Option<String>,
     review_run_id: Option<String>,
     reasoning_effort: Option<String>,
+    magic_backend: Option<String>,
 ) -> Result<ReviewResponse, String> {
     log::trace!("Running AI code review for: {worktree_path}");
 
     // Load projects data to find the target branch
     let data = load_projects_data(&app)?;
 
-    // Find the worktree by path
-    let worktree = data
-        .worktrees
-        .iter()
-        .find(|w| w.path == worktree_path)
-        .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
+    let (worktree_id, pr_number, worktree_base, project_default) = {
+        let worktree = data
+            .worktrees
+            .iter()
+            .find(|w| w.path == worktree_path)
+            .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
+        let project = data
+            .find_project(&worktree.project_id)
+            .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    // Find the project to get default_branch
-    let project = data
-        .find_project(&worktree.project_id)
-        .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
+        (
+            worktree.id.clone(),
+            worktree.pr_number,
+            worktree.base_branch.clone(),
+            project.default_branch.clone(),
+        )
+    };
 
-    let target_branch = &project.default_branch;
     let current_branch = git::get_current_branch(&worktree_path)?;
+    let linked_pr_base = if let Some(pr_number) = pr_number {
+        match get_github_pr_by_number(app.clone(), worktree_path.clone(), pr_number).await {
+            Ok(pr) => Some(pr.base_ref_name),
+            Err(error) => {
+                log::warn!(
+                    "Failed to load linked PR #{pr_number} for review target selection: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let target_branch = select_review_target_branch(
+        linked_pr_base.as_deref(),
+        worktree_base.as_deref(),
+        &project_default,
+    );
 
     // Get branch diff (non-fatal — may fail if origin ref doesn't exist)
-    let diff = get_branch_diff(&worktree_path, target_branch, "HEAD").unwrap_or_default();
+    let diff = get_branch_diff(&worktree_path, &target_branch, "HEAD").unwrap_or_default();
 
     // Get commit history (non-fatal — same reason)
-    let commits = get_branch_commits(&worktree_path, target_branch, "HEAD").unwrap_or_default();
+    let commits = get_branch_commits(&worktree_path, &target_branch, "HEAD").unwrap_or_default();
 
     // Get uncommitted changes (staged + unstaged for tracked files)
     let uncommitted_output = wsl_aware_command("git", Some(Path::new(&worktree_path)))
@@ -8962,11 +9322,13 @@ pub async fn run_review_with_ai(
         .replace("{uncommitted_section}", &uncommitted_section);
 
     // Run review with Claude CLI
-    let review_magic_backend = crate::get_preferences_path(&app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<crate::AppPreferences>(&c).ok())
-        .and_then(|p| p.magic_prompt_backends.code_review_backend);
+    let review_magic_backend = magic_backend.or_else(|| {
+        crate::get_preferences_path(&app)
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|c| serde_json::from_str::<crate::AppPreferences>(&c).ok())
+            .and_then(|p| p.magic_prompt_backends.code_review_backend)
+    });
     let response = generate_review(
         &app,
         &prompt,
@@ -8974,7 +9336,7 @@ pub async fn run_review_with_ai(
         custom_profile_name.as_deref(),
         Some(std::path::Path::new(&worktree_path)),
         review_run_id.as_deref(),
-        None,
+        Some(&worktree_id),
         review_magic_backend.as_deref(),
         reasoning_effort.as_deref(),
     )?;
@@ -9001,12 +9363,14 @@ pub async fn start_review_job(
     worktree_id: String,
     worktree_path: String,
     source: String,
+    backend: Option<String>,
     custom_prompt: Option<String>,
     model: Option<String>,
     custom_profile_name: Option<String>,
     review_run_id: Option<String>,
     reasoning_effort: Option<String>,
     review_type: Option<String>,
+    session_id: Option<String>,
 ) -> Result<StartReviewJobResponse, String> {
     let review_run_id = review_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let job_id = Uuid::new_v4().to_string();
@@ -9015,44 +9379,64 @@ pub async fn start_review_job(
         review_run_id: review_run_id.clone(),
         worktree_id: worktree_id.clone(),
         worktree_path: worktree_path.clone(),
-        session_id: None,
+        session_id: session_id.clone(),
         source: source.clone(),
+        backend: backend.clone(),
+        model: model.clone(),
     })?;
 
-    let session = crate::chat::create_session(
-        app.clone(),
-        worktree_id.clone(),
-        worktree_path.clone(),
-        Some("Code Review".to_string()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .inspect_err(|_| {
-        REVIEW_JOB_REGISTRY.remove(&job_id);
-    })?;
+    let session_id = if let Some(session_id) = session_id {
+        session_id
+    } else {
+        let session_name = review_session_name(&source, backend.as_deref(), model.as_deref());
+        crate::chat::create_session(
+            app.clone(),
+            worktree_id.clone(),
+            worktree_path.clone(),
+            Some(session_name),
+            backend.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .inspect_err(|_| {
+            REVIEW_JOB_REGISTRY.remove(&job_id);
+        })?
+        .id
+    };
 
-    if let Err(error) = update_review_session_state(
-        app.clone(),
-        worktree_id.clone(),
-        worktree_path.clone(),
-        session.id.clone(),
-        Some(true),
+    let entry_backend = if source == "coderabbit-cli" {
+        "coderabbit-cli"
+    } else {
+        backend.as_deref().unwrap_or("claude")
+    };
+    let entry_model = if source == "coderabbit-cli" {
+        "all"
+    } else {
+        model.as_deref().unwrap_or("default")
+    };
+    let job = REVIEW_JOB_REGISTRY
+        .attach_session(&job_id, session_id.clone())
+        .ok_or_else(|| "Review job reservation disappeared".to_string())?;
+
+    if let Err(error) = update_review_session_entry(
+        &app,
+        &worktree_id,
+        &worktree_path,
+        &session_id,
+        entry_backend,
+        entry_model,
+        ReviewJobStatus::Running,
         None,
-    )
-    .await
-    {
+        None,
+    ) {
         REVIEW_JOB_REGISTRY.remove(&job_id);
         return Err(error);
     }
 
-    let job = REVIEW_JOB_REGISTRY
-        .attach_session(&job_id, session.id.clone())
-        .ok_or_else(|| "Review job reservation disappeared".to_string())?;
     emit_review_job_update(&app, &job);
 
     let task_app = app.clone();
@@ -9061,6 +9445,16 @@ pub async fn start_review_job(
         let review_worktree_path = worktree_path.clone();
         let review_source = source.clone();
         let review_run_id_for_task = review_run_id.clone();
+        let result_backend = if source == "coderabbit-cli" {
+            "coderabbit-cli".to_string()
+        } else {
+            backend.clone().unwrap_or_else(|| "claude".to_string())
+        };
+        let result_model = if source == "coderabbit-cli" {
+            "all".to_string()
+        } else {
+            model.clone().unwrap_or_else(|| "default".to_string())
+        };
 
         let result = tokio::task::spawn_blocking(move || {
             tauri::async_runtime::block_on(async move {
@@ -9081,6 +9475,7 @@ pub async fn start_review_job(
                         custom_profile_name,
                         Some(review_run_id_for_task),
                         reasoning_effort,
+                        backend,
                     )
                     .await
                 }
@@ -9092,39 +9487,48 @@ pub async fn start_review_job(
 
         match result {
             Ok(response) => {
-                let review_results = serde_json::to_value(&response).ok();
-                let _ = update_review_session_state(
-                    task_app.clone(),
-                    worktree_id.clone(),
-                    worktree_path.clone(),
-                    session.id.clone(),
-                    Some(false),
-                    review_results.map(Some),
-                )
-                .await;
                 if let Some(job) =
-                    REVIEW_JOB_REGISTRY.mark_completed(&job_id, session.id, &response)
+                    REVIEW_JOB_REGISTRY.mark_completed(&job_id, session_id.clone(), &response)
                 {
+                    let _ = update_review_session_entry(
+                        &task_app,
+                        &worktree_id,
+                        &worktree_path,
+                        &session_id,
+                        &result_backend,
+                        &result_model,
+                        ReviewJobStatus::Completed,
+                        Some(&response),
+                        None,
+                    );
                     emit_review_job_update(&task_app, &job);
                 }
             }
             Err(error) => {
                 let cancelled = error.to_lowercase().contains("cancelled")
                     || error.to_lowercase().contains("canceled");
-                let _ = update_review_session_state(
-                    task_app.clone(),
-                    worktree_id.clone(),
-                    worktree_path.clone(),
-                    session.id.clone(),
-                    Some(false),
-                    None,
-                )
-                .await;
-                let updated = if cancelled {
-                    REVIEW_JOB_REGISTRY.mark_cancelled(&job_id)
+                let (status, updated) = if cancelled {
+                    (
+                        ReviewJobStatus::Cancelled,
+                        REVIEW_JOB_REGISTRY.mark_cancelled(&job_id),
+                    )
                 } else {
-                    REVIEW_JOB_REGISTRY.mark_failed(&job_id, error)
+                    (
+                        ReviewJobStatus::Failed,
+                        REVIEW_JOB_REGISTRY.mark_failed(&job_id, error.clone()),
+                    )
                 };
+                let _ = update_review_session_entry(
+                    &task_app,
+                    &worktree_id,
+                    &worktree_path,
+                    &session_id,
+                    &result_backend,
+                    &result_model,
+                    status,
+                    None,
+                    Some(&error),
+                );
                 if let Some(job) = updated {
                     emit_review_job_update(&task_app, &job);
                 }
@@ -9133,6 +9537,34 @@ pub async fn start_review_job(
     });
 
     Ok(StartReviewJobResponse { job })
+}
+
+fn update_review_session_entry(
+    app: &AppHandle,
+    worktree_id: &str,
+    worktree_path: &str,
+    session_id: &str,
+    backend: &str,
+    model: &str,
+    status: ReviewJobStatus,
+    response: Option<&ReviewResponse>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    crate::chat::with_sessions_mut(app, worktree_path, worktree_id, |sessions| {
+        let session = sessions
+            .find_session_mut(session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        session.review_results = Some(merge_review_entry(
+            session.review_results.take(),
+            backend,
+            model,
+            status,
+            response,
+            error,
+        )?);
+        session.is_reviewing = REVIEW_JOB_REGISTRY.has_running_for_session(session_id);
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -9168,7 +9600,7 @@ pub async fn cancel_review_job(job_id: String) -> Result<bool, String> {
 }
 
 fn emit_review_job_update(app: &AppHandle, job: &ReviewJob) {
-    let _ = app.emit("review-job:updated", job);
+    let _ = app.emit_all("review-job:updated", job);
 }
 
 async fn update_review_session_state(
@@ -12390,11 +12822,48 @@ mod tests {
     }
 
     #[test]
+    fn pr_creation_cancellation_flag_is_registered_and_cleaned_up() {
+        let path = format!("/tmp/jean-pr-cancel-test-{}", Uuid::new_v4());
+        {
+            let guard = begin_pr_creation(&path).expect("begin PR creation");
+            assert!(begin_pr_creation(&path).is_err());
+            guard.cancelled.store(true, Ordering::SeqCst);
+            assert_eq!(
+                check_pr_creation_cancelled(&guard.cancelled),
+                Err("PR creation cancelled".to_string())
+            );
+        }
+        assert!(begin_pr_creation(&path).is_ok());
+        finish_pr_creation(&path);
+    }
+
+    #[test]
     fn extract_json_object_malformed_errors() {
         assert!(extract_json_object_from_text("no json here").is_err());
         assert!(extract_json_object_from_text("").is_err());
         // Unbalanced — never closes the top-level object.
         assert!(extract_json_object_from_text(r#"{"a":1"#).is_err());
+    }
+
+    #[test]
+    fn review_target_branch_prefers_linked_pr_base() {
+        assert_eq!(
+            select_review_target_branch(Some("v4.x"), Some("develop"), "next"),
+            "v4.x"
+        );
+    }
+
+    #[test]
+    fn review_target_branch_falls_back_to_worktree_base() {
+        assert_eq!(
+            select_review_target_branch(None, Some("develop"), "next"),
+            "develop"
+        );
+    }
+
+    #[test]
+    fn review_target_branch_falls_back_to_project_default() {
+        assert_eq!(select_review_target_branch(None, None, "next"), "next");
     }
 
     #[test]
@@ -12407,6 +12876,8 @@ mod tests {
             worktree_path: "/tmp/wt".to_string(),
             session_id: Some("session-1".to_string()),
             source: "ai".to_string(),
+            backend: Some("claude".to_string()),
+            model: Some("opus".to_string()),
         });
 
         assert_eq!(job.status, ReviewJobStatus::Running);
@@ -12431,6 +12902,81 @@ mod tests {
     }
 
     #[test]
+    fn review_results_merge_distinct_backend_model_pairs() {
+        let codex = ReviewResponse {
+            summary: "codex".to_string(),
+            findings: vec![],
+            approval_status: "approved".to_string(),
+        };
+        let claude = ReviewResponse {
+            summary: "claude".to_string(),
+            findings: vec![],
+            approval_status: "changes_requested".to_string(),
+        };
+
+        let grouped = merge_review_result(None, "codex", "gpt-5.6-sol", &codex).unwrap();
+        let grouped =
+            merge_review_result(Some(grouped), "claude", "claude-fable-5", &claude).unwrap();
+
+        let reviews = grouped["reviews"].as_array().unwrap();
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0]["backend"], "codex");
+        assert_eq!(reviews[1]["model"], "claude-fable-5");
+    }
+
+    #[test]
+    fn grouped_review_tracks_running_status_before_results_arrive() {
+        let grouped = merge_review_entry(
+            None,
+            "codex",
+            "gpt-5.6-sol",
+            ReviewJobStatus::Running,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(grouped["reviews"][0]["status"], "running");
+        assert!(grouped["reviews"][0].get("result").is_none());
+    }
+
+    #[test]
+    fn grouped_review_update_preserves_entry_order() {
+        let running = merge_review_entry(
+            None,
+            "codex",
+            "gpt-5.6-sol",
+            ReviewJobStatus::Running,
+            None,
+            None,
+        )
+        .unwrap();
+        let running = merge_review_entry(
+            Some(running),
+            "claude",
+            "claude-fable-5",
+            ReviewJobStatus::Running,
+            None,
+            None,
+        )
+        .unwrap();
+        let response = ReviewResponse {
+            summary: "codex complete".to_string(),
+            findings: vec![],
+            approval_status: "approved".to_string(),
+        };
+
+        let completed =
+            merge_review_result(Some(running), "codex", "gpt-5.6-sol", &response).unwrap();
+
+        let reviews = completed["reviews"].as_array().unwrap();
+        assert_eq!(reviews[0]["backend"], "codex");
+        assert_eq!(reviews[0]["status"], "completed");
+        assert_eq!(reviews[1]["backend"], "claude");
+        assert_eq!(reviews[1]["status"], "running");
+    }
+
+    #[test]
     fn review_job_registry_records_cancelled_state() {
         let registry = ReviewJobRegistry::default();
         registry.insert_running(ReviewJobStart {
@@ -12440,6 +12986,8 @@ mod tests {
             worktree_path: "/tmp/wt".to_string(),
             session_id: Some("session-1".to_string()),
             source: "coderabbit-cli".to_string(),
+            backend: None,
+            model: None,
         });
 
         let cancelled = registry.mark_cancelled("job-2").unwrap();
@@ -12458,6 +13006,8 @@ mod tests {
             worktree_path: "/tmp/wt".to_string(),
             session_id: Some("session-1".to_string()),
             source: "ai".to_string(),
+            backend: Some("claude".to_string()),
+            model: Some("opus".to_string()),
         });
 
         assert!(registry.has_running_for_worktree("wt-1"));
@@ -12475,6 +13025,8 @@ mod tests {
                 worktree_path: "/tmp/wt".to_string(),
                 session_id: None,
                 source: "ai".to_string(),
+                backend: Some("claude".to_string()),
+                model: Some("opus".to_string()),
             })
             .unwrap();
 
@@ -12488,8 +13040,46 @@ mod tests {
                 worktree_path: "/tmp/wt".to_string(),
                 session_id: None,
                 source: "ai".to_string(),
+                backend: Some("claude".to_string()),
+                model: Some("opus".to_string()),
             })
             .is_err());
+    }
+
+    #[test]
+    fn review_job_registry_allows_distinct_backend_model_pairs() {
+        let registry = ReviewJobRegistry::default();
+        for (id, backend, model) in [
+            ("job-claude", "claude", "opus"),
+            ("job-codex", "codex", "gpt-5.6-sol"),
+        ] {
+            registry
+                .try_insert_running(ReviewJobStart {
+                    id: id.to_string(),
+                    review_run_id: format!("run-{id}"),
+                    worktree_id: "wt-1".to_string(),
+                    worktree_path: "/tmp/wt".to_string(),
+                    session_id: None,
+                    source: "ai".to_string(),
+                    backend: Some(backend.to_string()),
+                    model: Some(model.to_string()),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(registry.list().len(), 2);
+    }
+
+    #[test]
+    fn review_session_name_groups_ai_reviews() {
+        assert_eq!(
+            review_session_name("ai", Some("codex"), Some("gpt-5.6-sol")),
+            "Code Review"
+        );
+        assert_eq!(
+            review_session_name("coderabbit-cli", None, None),
+            "Code Review · CodeRabbit CLI"
+        );
     }
 
     #[test]
@@ -12503,6 +13093,8 @@ mod tests {
                 worktree_path: "/tmp/wt".to_string(),
                 session_id: None,
                 source: "ai".to_string(),
+                backend: Some("claude".to_string()),
+                model: Some("opus".to_string()),
             })
             .unwrap();
 
@@ -12514,6 +13106,49 @@ mod tests {
         registry.remove("job-6");
         assert!(registry.get("job-6").is_none());
         assert!(!registry.has_running_for_worktree("wt-1"));
+    }
+
+    #[test]
+    fn commit_job_registry_reserves_worktree_and_records_completion() {
+        let registry = CommitJobRegistry::default();
+        let (job, _) = registry
+            .try_insert_running("job-1".to_string(), "/tmp/wt".to_string())
+            .unwrap();
+
+        assert_eq!(job.status, CommitJobStatus::Running);
+        let (same_running_job, is_new) = registry
+            .try_insert_running("job-2".to_string(), "/tmp/wt".to_string())
+            .unwrap();
+        assert_eq!(same_running_job.id, "job-1");
+        assert!(!is_new);
+
+        let response = CreateCommitResponse {
+            commit_hash: "abc123".to_string(),
+            message: "fix: background commit".to_string(),
+            pushed: false,
+            push_fell_back: false,
+            push_permission_denied: false,
+        };
+        let completed = registry.mark_completed("job-1", response).unwrap();
+
+        assert_eq!(completed.status, CommitJobStatus::Completed);
+        assert_eq!(completed.response.unwrap().commit_hash, "abc123");
+        assert!(completed.error.is_none());
+    }
+
+    #[test]
+    fn commit_job_registry_treats_repeated_job_id_as_the_same_start() {
+        let registry = CommitJobRegistry::default();
+        let (_, first_is_new) = registry
+            .try_insert_running("job-1".to_string(), "/tmp/wt".to_string())
+            .unwrap();
+        let (same_job, second_is_new) = registry
+            .try_insert_running("job-1".to_string(), "/tmp/wt".to_string())
+            .unwrap();
+
+        assert!(first_is_new);
+        assert!(!second_is_new);
+        assert_eq!(same_job.id, "job-1");
     }
 
     #[test]
@@ -12799,8 +13434,8 @@ Body
 
     #[test]
     fn format_claude_cli_failure_does_not_report_max_turns_summary_as_error() {
-        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at the diff: two main features — WebSocket reconnect sends minimal payload."}]}}
-{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Looking at the diff: two main features — WebSocket reconnect sends minimal payload."}"#;
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at the diff: two main features — web reload restores fresh state."}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Looking at the diff: two main features — web reload restores fresh state."}"#;
 
         let result = format_claude_cli_failure("", stdout);
 
@@ -12942,13 +13577,17 @@ Body
     }
 
     #[test]
-    fn test_build_claude_structured_output_args_includes_default_tools_without_plan_mode() {
+    fn test_build_claude_structured_output_args_disables_tools_for_structured_output() {
         let args = build_claude_structured_output_args("sonnet", "none", REVIEW_SCHEMA);
 
         assert!(args.windows(2).any(|w| w == ["--max-turns", "3"]));
         assert!(!args.iter().any(|arg| arg == "--permission-mode"));
-        assert!(args.windows(2).any(|w| w == ["--tools", "none"]));
-        assert!(args.windows(2).any(|w| w == ["--tools", "default"]));
+        assert!(args.windows(2).any(|w| w == ["--tools", ""]));
+        assert!(!args.iter().any(|arg| arg == "none" || arg == "default"));
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == "--tools").count(),
+            1
+        );
         assert!(args.windows(2).any(|w| w == ["--model", "sonnet"]));
         assert!(args
             .windows(2)

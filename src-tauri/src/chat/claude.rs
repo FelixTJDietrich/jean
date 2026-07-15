@@ -2676,7 +2676,11 @@ mod tests {
     fn auth_scrub_list_covers_documented_high_precedence_vars() {
         // https://code.claude.com/docs/en/authentication — vars that
         // override subscription OAuth at the CLI level.
-        let required = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+        let required = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ];
         for var in required {
             assert!(
                 CLAUDE_AUTH_ENV_VARS_TO_CLEAR.contains(&var),

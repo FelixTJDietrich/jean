@@ -927,9 +927,8 @@ fn persist_claude_credentials(
             let tmp_suffix = uuid::Uuid::new_v4();
             let tmp = path.with_extension(format!("tmp.{tmp_suffix}"));
             {
-                let mut f = std::fs::File::create(&tmp).map_err(|e| {
-                    format!("Failed to create Claude credentials tmp: {e}")
-                })?;
+                let mut f = std::fs::File::create(&tmp)
+                    .map_err(|e| format!("Failed to create Claude credentials tmp: {e}"))?;
                 f.write_all(payload.as_bytes())
                     .map_err(|e| format!("Failed to write Claude credentials tmp: {e}"))?;
                 f.sync_all()
@@ -938,10 +937,7 @@ fn persist_claude_credentials(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &tmp,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
             }
             std::fs::rename(&tmp, path).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
@@ -1565,10 +1561,7 @@ pub async fn delete_claude_account(app: AppHandle, id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub async fn set_active_claude_account(
-    app: AppHandle,
-    id: Option<String>,
-) -> Result<(), String> {
+pub async fn set_active_claude_account(app: AppHandle, id: Option<String>) -> Result<(), String> {
     accounts::mutate_preferences(&app, |prefs| {
         if let Some(ref target_id) = id {
             if !prefs.claude_accounts.iter().any(|a| &a.id == target_id) {
@@ -1593,10 +1586,7 @@ pub async fn rename_claude_account(
     // share implementation with create_claude_account so the two commands
     // cannot drift.
     let canonical_name = accounts::validate_name(&name)?;
-    let canonical_color = color
-        .as_deref()
-        .map(accounts::validate_color)
-        .transpose()?;
+    let canonical_color = color.as_deref().map(accounts::validate_color).transpose()?;
 
     // Capture the updated account inside the critical section so the
     // returned summary always reflects *this* write, even if another

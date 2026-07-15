@@ -266,6 +266,31 @@ fn infer_backend_from_model(model: &str, fallback: Backend) -> Backend {
     }
 }
 
+fn codex_reasoning_effort<'a>(effort: &'a EffortLevel, model: Option<&str>) -> Option<&'a str> {
+    let supports_ultra = matches!(
+        model,
+        Some(
+            "gpt-5.6"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-sol-fast"
+                | "gpt-5-6-sol"
+                | "gpt-5-6-sol-fast"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-terra-fast"
+                | "gpt-5-6-terra"
+                | "gpt-5-6-terra-fast"
+        )
+    );
+    match effort {
+        EffortLevel::Off => None,
+        EffortLevel::Minimal => Some("low"),
+        // Migrate GPT 5.6 sessions persisted before the Codex-native value was fixed.
+        EffortLevel::Ultracode if supports_ultra => Some("ultra"),
+        EffortLevel::Ultracode => Some("xhigh"),
+        _ => effort.effort_value(),
+    }
+}
+
 fn resume_id_for_persisted_claude_run<'a>(
     backend: &Backend,
     resume_id: &'a str,
@@ -2531,7 +2556,7 @@ pub async fn send_chat_message(
     }
 
     // Clear stale completion flags from previous turn — prevents approve
-    // buttons from appearing on WS reconnect during this turn.
+    // buttons from appearing after a web reload during this turn.
     with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
         if let Some(session) = sessions.find_session_mut(&session_id) {
             session.waiting_for_input = false;
@@ -2657,9 +2682,7 @@ pub async fn send_chat_message(
     ) {
         None
     } else {
-        thinking_level
-            .as_ref()
-            .map(|t| format!("{t:?}").to_lowercase())
+        thinking_level.as_ref().map(ThinkingLevel::thinking_value)
     };
     let run_effort_level = match effective_backend {
         Backend::Cursor | Backend::Commandcode => None,
@@ -2670,6 +2693,7 @@ pub async fn send_chat_message(
             EffortLevel::Medium => "medium",
             EffortLevel::High => "high",
             EffortLevel::Xhigh | EffortLevel::Max | EffortLevel::Ultracode => "xhigh",
+            EffortLevel::Other(value) => value.as_str(),
         }),
         _ => effort_level.as_ref().and_then(|e| e.effort_value()),
     };
@@ -2685,7 +2709,7 @@ pub async fn send_chat_message(
         &message,
         model.as_deref(),
         execution_mode.as_deref(),
-        run_thinking_level.as_deref(),
+        run_thinking_level,
         run_effort_level,
         Some(effective_backend.clone()),
         custom_profile_name.as_deref(),
@@ -2972,19 +2996,10 @@ pub async fn send_chat_message(
                 // === Codex execution path ===
                 log::trace!("About to call execute_codex_via_server...");
 
-                // Map EffortLevel to Codex reasoning effort values
-                // Codex has no "max" or "ultracode"; cap at xhigh.
-                let codex_reasoning_effort: Option<String> =
-                    thread_effort_level.as_ref().and_then(|e| match e {
-                        super::types::EffortLevel::Minimal => Some("low".to_string()),
-                        super::types::EffortLevel::Low => Some("low".to_string()),
-                        super::types::EffortLevel::Medium => Some("medium".to_string()),
-                        super::types::EffortLevel::High => Some("high".to_string()),
-                        super::types::EffortLevel::Xhigh => Some("xhigh".to_string()),
-                        super::types::EffortLevel::Max => Some("xhigh".to_string()),
-                        super::types::EffortLevel::Ultracode => Some("xhigh".to_string()),
-                        super::types::EffortLevel::Off => None,
-                    });
+                let codex_reasoning_effort = thread_effort_level
+                    .as_ref()
+                    .and_then(|effort| codex_reasoning_effort(effort, thread_model.as_deref()))
+                    .map(str::to_string);
 
                 // Build add_dirs for Codex
                 let mut codex_add_dirs = Vec::new();
@@ -3441,6 +3456,7 @@ pub async fn send_chat_message(
                         super::types::EffortLevel::Max => Some("xhigh".to_string()),
                         super::types::EffortLevel::Ultracode => Some("xhigh".to_string()),
                         super::types::EffortLevel::Off => None,
+                        super::types::EffortLevel::Other(value) => Some(value.clone()),
                     });
 
                 let system_prompt = {
@@ -4242,6 +4258,7 @@ pub async fn send_chat_message(
                         super::types::EffortLevel::Max => Some("max".to_string()),
                         super::types::EffortLevel::Ultracode => Some("max".to_string()),
                         super::types::EffortLevel::Off => None,
+                        super::types::EffortLevel::Other(value) => Some(value.clone()),
                     });
 
                 match super::grok::execute_grok(super::grok::GrokExecutionOptions {
@@ -8847,6 +8864,29 @@ pub async fn answer_opencode_question(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_reasoning_effort_preserves_new_model_levels() {
+        assert_eq!(
+            codex_reasoning_effort(&EffortLevel::Max, Some("gpt-5.6-sol")),
+            Some("max")
+        );
+        assert_eq!(
+            codex_reasoning_effort(&EffortLevel::Ultracode, Some("gpt-5.6-sol")),
+            Some("ultra")
+        );
+        assert_eq!(
+            codex_reasoning_effort(
+                &EffortLevel::Other("ultra".to_string()),
+                Some("gpt-5.6-sol")
+            ),
+            Some("ultra")
+        );
+        assert_eq!(
+            codex_reasoning_effort(&EffortLevel::Ultracode, Some("gpt-5.6-luna")),
+            Some("xhigh")
+        );
+    }
     use crate::chat::types::ToolCall;
 
     #[test]

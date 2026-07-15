@@ -14,13 +14,19 @@ vi.mock('@/lib/environment', () => ({
   hasBackend: () => true,
 }))
 
-const { mockInvoke, mockUseUIState, mockUseSaveUIState, mockUseProjects } =
-  vi.hoisted(() => ({
-    mockInvoke: vi.fn(),
-    mockUseUIState: vi.fn(),
-    mockUseSaveUIState: vi.fn(() => ({ mutate: vi.fn() })),
-    mockUseProjects: vi.fn(),
-  }))
+const {
+  mockInvoke,
+  mockSaveUIState,
+  mockUseUIState,
+  mockUseSaveUIState,
+  mockUseProjects,
+} = vi.hoisted(() => ({
+  mockInvoke: vi.fn(),
+  mockSaveUIState: vi.fn(),
+  mockUseUIState: vi.fn(),
+  mockUseSaveUIState: vi.fn(),
+  mockUseProjects: vi.fn(),
+}))
 
 vi.mock('@/lib/transport', () => ({
   invoke: mockInvoke,
@@ -75,6 +81,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       isSuccess: true,
     })
     mockUseProjects.mockReturnValue({ data: [], isSuccess: true })
+    mockUseSaveUIState.mockReturnValue({ mutate: mockSaveUIState })
 
     useTerminalStore.setState({
       terminals: {},
@@ -95,7 +102,64 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       activeWorktreePath: null,
       activeSessionIds: {},
       sessionWorktreeMap: {},
+      inputDrafts: {},
     })
+  })
+
+  it('restores unsent input drafts for every session', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({
+        input_drafts: {
+          'session-1': 'first unsent message',
+          'session-2': 'second unsent message',
+        },
+      }),
+      isSuccess: true,
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().inputDrafts).toEqual({
+        'session-1': 'first unsent message',
+        'session-2': 'second unsent message',
+      })
+    })
+  })
+
+  it('debounces persistence when a session input draft changes', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useUIStore.getState().uiStateInitialized).toBe(true)
+    })
+
+    useChatStore.getState().setInputDraft('session-1', 'unsent message')
+
+    await waitFor(() => {
+      expect(mockSaveUIState).toHaveBeenCalledTimes(1)
+    })
+    expect(mockSaveUIState).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        input_drafts: { 'session-1': 'unsent message' },
+      })
+    )
   })
 
   it('clears stale terminal store + disposes xterm instances when backend reports zero live PTYs', async () => {

@@ -53,7 +53,12 @@ import {
   canReconnectSession,
 } from '@/services/chat'
 import { usePreferences } from '@/services/preferences'
-import { useWorktree, useProjects, useRunScripts } from '@/services/projects'
+import {
+  useWorktree,
+  useProjects,
+  useRunScripts,
+  type PackageScript,
+} from '@/services/projects'
 import { useGitHubPRs } from '@/services/github'
 import {
   useGitStatus,
@@ -72,6 +77,7 @@ import { ChatWindow } from './ChatWindow'
 import { ModalTerminalDrawer } from './ModalTerminalDrawer'
 import { ModalBrowserDrawer } from '@/components/browser/ModalBrowserDrawer'
 import { OpenInButton } from '@/components/open-in/OpenInButton'
+import { ScriptsButton } from '@/components/open-in/ScriptsButton'
 import { DevToolsDropdown } from './DevToolsDropdown'
 import {
   DropdownMenu,
@@ -246,7 +252,10 @@ export function SessionChatModal({
   const activeSessionId = useChatStore(
     state => state.activeSessionIds[worktreeId]
   )
-  const currentSessionId = activeSessionId ?? sessions[0]?.id ?? null
+  const currentSessionId =
+    activeSessionId && sessions.some(session => session.id === activeSessionId)
+      ? activeSessionId
+      : (sessions[0]?.id ?? null)
   const currentSession = sessions.find(s => s.id === currentSessionId) ?? null
   // Canonical store state shared with canvas for consistent status derivation.
   const storeState = useCanvasStoreState()
@@ -346,8 +355,6 @@ export function SessionChatModal({
   const currentLabel = useChatStore(state =>
     labelSessionId ? (state.sessionLabels[labelSessionId] ?? null) : null
   )
-
-
 
   // Rename session state
   const renameSession = useRenameSession()
@@ -475,7 +482,6 @@ export function SessionChatModal({
       if (activeSessions.length <= 1) {
         const action = () => {
           handleDeleteSession(session.id)
-          onClose()
         }
         const sessionIsEmpty = !session.message_count
         if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
@@ -492,10 +498,8 @@ export function SessionChatModal({
     [
       sessions,
       handleDeleteSession,
-      onClose,
       preferences?.confirm_session_close,
       selectVisualNeighbor,
-      handleArchiveSession,
     ]
   )
 
@@ -608,8 +612,8 @@ export function SessionChatModal({
       })
   }, [isOpen, worktreeId, worktreePath])
 
-  // Sorted tab order: attention and active sessions first, review next,
-  // idle/new empty sessions last. Within each tier, manual tab order wins.
+  // Keep Code Review first, then attention and active sessions, review,
+  // and idle/new empty sessions. Within each tier, manual tab order wins.
   const sortedCards = useMemo(() => {
     return sortSessionCardsForTabs(cards)
   }, [cards])
@@ -822,6 +826,18 @@ export function SessionChatModal({
     [worktreeId]
   )
 
+  const handlePackageScript = useCallback(
+    (script: PackageScript) => {
+      useTerminalStore
+        .getState()
+        .addTerminal(worktreeId, script.command, script.name, {
+          commandArgs: script.args,
+        })
+      useTerminalStore.getState().setModalTerminalOpen(worktreeId, true)
+    },
+    [worktreeId]
+  )
+
   // Close on Escape key
   useEffect(() => {
     if (!isOpen) return
@@ -980,6 +996,11 @@ export function SessionChatModal({
                   <OpenInButton
                     worktreePath={worktreePath}
                     branch={worktree?.branch}
+                  />
+                  <ScriptsButton
+                    projectId={worktree?.project_id}
+                    worktreePath={worktreePath}
+                    onRun={handlePackageScript}
                   />
                   {currentSessionId && (
                     <DevToolsDropdown

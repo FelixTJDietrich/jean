@@ -16,6 +16,7 @@ import type {
   MergeableStatus,
 } from '@/types/pr-status'
 import type { DiffRequest } from '@/types/git-diff'
+import type { PackageScript } from '@/services/projects'
 import type {
   LoadedIssueContext,
   LoadedPullRequestContext,
@@ -68,6 +69,8 @@ export interface ChatToolbarProps {
   activeSessionId: string | null | undefined
   projectId: string | undefined
   runScripts?: string[]
+  packageScripts?: PackageScript[]
+  favoritePackageScripts?: string[]
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
@@ -106,4 +109,6 @@ export interface ChatToolbarProps {
   onToggleMcpServer: (serverName: string) => void
   onOpenProjectSettings?: () => void
   onRunCommand?: (command: string) => void
+  onRunPackageScript?: (script: PackageScript) => void
+  onToggleFavoritePackageScript?: (scriptName: string) => void
 }

@@ -33,6 +33,7 @@ describe('ChatStore', () => {
       reviewResults: {},
       reviewSidebarVisible: false,
       fixedReviewFindings: {},
+      tableCheckedRows: {},
       worktreePaths: {},
       sendingSessionIds: {},
       sendStartedAt: {},

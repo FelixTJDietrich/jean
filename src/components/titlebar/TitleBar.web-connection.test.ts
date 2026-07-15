@@ -1,0 +1,18 @@
+import { readFileSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
+
+describe('web connection header', () => {
+  const source = readFileSync(
+    `${process.cwd()}/src/components/titlebar/TitleBar.tsx`,
+    'utf8'
+  )
+
+  it('does not duplicate the full-screen connection indicator', () => {
+    expect(source).not.toContain('useWsConnectionStatus')
+    expect(source).not.toContain('Reconnecting…')
+    expect(source).not.toContain('Loader2')
+    expect(source).toContain(
+      '<UnreadBell title={title} hideTitle={hideTitle} />'
+    )
+  })
+})

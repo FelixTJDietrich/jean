@@ -120,11 +120,7 @@ fn resolve_from_prefs(
     let Some(active_id) = prefs.active_claude_account_id.as_ref() else {
         return Ok(ActiveConfigDir::Default);
     };
-    if !prefs
-        .claude_accounts
-        .iter()
-        .any(|a| &a.id == active_id)
-    {
+    if !prefs.claude_accounts.iter().any(|a| &a.id == active_id) {
         return Err(format!(
             "Active Claude account '{active_id}' no longer exists. \
              Switch profile or create the account again."
@@ -189,10 +185,11 @@ pub(super) fn validate_color(color: &str) -> Result<String, String> {
     // Accept "#rgb" / "#rrggbb" (case-insensitive).
     let s = color.trim();
     let hex = s.strip_prefix('#').unwrap_or(s);
-    let ok = (hex.len() == 3 || hex.len() == 6)
-        && hex.chars().all(|c| c.is_ascii_hexdigit());
+    let ok = (hex.len() == 3 || hex.len() == 6) && hex.chars().all(|c| c.is_ascii_hexdigit());
     if !ok {
-        return Err(format!("Invalid color '{color}'; expected hex like #3b82f6"));
+        return Err(format!(
+            "Invalid color '{color}'; expected hex like #3b82f6"
+        ));
     }
     let hex_lower = hex.to_lowercase();
     Ok(format!("#{hex_lower}"))
@@ -261,8 +258,7 @@ fn create_symlink_if_missing(source: &Path, target: &Path) -> Result<(), String>
 
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(source, target)
-            .map_err(|e| format!("symlink failed: {e}"))
+        std::os::unix::fs::symlink(source, target).map_err(|e| format!("symlink failed: {e}"))
     }
     #[cfg(windows)]
     {
@@ -337,10 +333,7 @@ pub fn delete_account_on_disk(app: &AppHandle, account_id: &str) -> Result<(), S
             return Ok(());
         }
         Err(e) => {
-            return Err(format!(
-                "Failed to stat account dir {}: {e}",
-                dir.display()
-            ));
+            return Err(format!("Failed to stat account dir {}: {e}", dir.display()));
         }
     }
     std::fs::remove_dir_all(&dir)
@@ -519,7 +512,10 @@ mod tests {
     #[test]
     fn powershell_quoting_escapes_single_quotes() {
         assert_eq!(powershell_single_quote("simple"), "'simple'");
-        assert_eq!(powershell_single_quote("C:\\Users\\a b"), "'C:\\Users\\a b'");
+        assert_eq!(
+            powershell_single_quote("C:\\Users\\a b"),
+            "'C:\\Users\\a b'"
+        );
         // PowerShell doubles single quotes inside single-quoted strings.
         assert_eq!(powershell_single_quote("it's"), "'it''s'");
         // Dollar signs and backticks are literal inside single quotes.
@@ -530,10 +526,7 @@ mod tests {
     /// defaults via `AppPreferences::default()` rather than listing every
     /// field here so the test doesn't break on every unrelated prefs
     /// addition.
-    fn test_prefs(
-        accounts: Vec<ClaudeAccount>,
-        active: Option<String>,
-    ) -> AppPreferences {
+    fn test_prefs(accounts: Vec<ClaudeAccount>, active: Option<String>) -> AppPreferences {
         let mut prefs = AppPreferences::default();
         prefs.claude_accounts = accounts;
         prefs.active_claude_account_id = active;
@@ -587,7 +580,10 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         let prefs = test_prefs(vec![test_account(&id)], Some(id));
         let err = resolve_from_prefs(Some(&prefs), tmp.path()).unwrap_err();
-        assert!(err.contains("missing"), "expected 'missing' error, got: {err}");
+        assert!(
+            err.contains("missing"),
+            "expected 'missing' error, got: {err}"
+        );
     }
 
     #[test]

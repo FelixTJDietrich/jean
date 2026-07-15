@@ -25,6 +25,23 @@ function card(id: string, status: SessionCardData['status'], order: number) {
 }
 
 describe('session tab ordering', () => {
+  it('always keeps the code review session first', () => {
+    const review = card('review-session', 'review', 99)
+    review.session.name = 'Code Review · Claude · claude-opus-4-8[1m]'
+
+    const sorted = sortSessionCardsForTabs([
+      card('waiting', 'waiting', 0),
+      card('running', 'vibing', 1),
+      review,
+    ])
+
+    expect(sorted.map(item => item.session.id)).toEqual([
+      'review-session',
+      'waiting',
+      'running',
+    ])
+  })
+
   it('keeps status priority while sorting sessions inside each status by manual order', () => {
     const sorted = sortSessionCardsForTabs([
       card('idle-low', 'idle', 0),

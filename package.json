@@ -1,7 +1,7 @@
 {
   "name": "jean",
   "private": true,
-  "version": "0.1.63",
+  "version": "0.1.67",
   "type": "module",
   "author": "Andras Bacsai",
   "copyright": "Copyright © 2025 Andras Bacsai. All rights reserved.",
@@ -50,7 +50,8 @@
     "task:rename-done": "node scripts/complete-task.js --rename-existing",
     "version:bump": "node scripts/bump-version.js",
     "release:assert-version": "node scripts/assert-release-version.js",
-    "test:server-ci": "node --test scripts/server-ci-assets.test.mjs"
+    "test:server-ci": "node --test scripts/server-ci-assets.test.mjs",
+    "deploy:hosted": "bash scripts/update-hosted-release.sh"
   },
   "dependencies": {
     "@atlaskit/pragmatic-drag-and-drop": "^1.8.1",

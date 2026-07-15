@@ -10,6 +10,7 @@ import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { chatQueryKeys, refreshWorktreeSessionsCaches } from '@/services/chat'
+import { startCommitJob } from '@/services/commit-jobs'
 import { buildMcpConfigJson } from '@/services/mcp'
 import { saveWorktreePr, projectsQueryKeys } from '@/services/projects'
 import {
@@ -24,7 +25,6 @@ import type { PrStatusEvent } from '@/types/pr-status'
 import { isBaseSession } from '@/types/projects'
 import type {
   CreatePrResponse,
-  CreateCommitResponse,
   DetectPrResponse,
   RevertCommitResponse,
   ReviewJob,
@@ -50,8 +50,13 @@ import {
   resolveMagicPromptProvider,
   type CliBackend,
   type AppPreferences,
+  type MagicCodeReviewConfig,
 } from '@/types/preferences'
 import type { InvestigateOverride } from './useMagicCommands'
+import {
+  resolveCodeReviewConfigs,
+  startCodeReviewsSequentially,
+} from '@/lib/code-review-configs'
 
 interface SessionMutation<T> {
   mutate: (args: T) => void
@@ -388,8 +393,7 @@ export function useGitOperations({
     const opToast = dismissibleToast.loading(`Creating commit on ${prefix}...`)
 
     try {
-      const result = await invoke<CreateCommitResponse>(
-        'create_commit_with_ai',
+      await startCommitJob(
         {
           worktreePath: activeWorktreePath,
           customPrompt: preferences?.magic_prompts?.commit_message,
@@ -403,19 +407,23 @@ export function useGitOperations({
           reasoningEffort:
             preferences?.magic_prompt_efforts?.commit_message_effort ?? null,
           specificFiles,
+        },
+        job => {
+          clearWorktreeLoading(activeWorktreeId)
+          if (job.status === 'failed' || !job.response) {
+            opToast.error(`${prefix}: Failed to commit: ${job.error}`)
+            return
+          }
+
+          clearGitDiffSelectedFiles()
+          triggerImmediateGitPoll()
+          window.dispatchEvent(new CustomEvent('git-commit-completed'))
+          opToast.success(`${prefix}: ${job.response.message.split('\n')[0]}`)
         }
       )
-
-      // Clear selected files and trigger refresh
-      clearGitDiffSelectedFiles()
-      triggerImmediateGitPoll()
-      window.dispatchEvent(new CustomEvent('git-commit-completed'))
-
-      opToast.success(`${prefix}: ${result.message.split('\n')[0]}`)
     } catch (error) {
-      opToast.error(`${prefix}: Failed to commit: ${error}`)
-    } finally {
       clearWorktreeLoading(activeWorktreeId)
+      opToast.error(`${prefix}: Failed to commit: ${error}`)
     }
   }, [
     activeWorktreeId,
@@ -451,8 +459,7 @@ export function useGitOperations({
       )
 
       try {
-        const result = await invoke<CreateCommitResponse>(
-          'create_commit_with_ai',
+        await startCommitJob(
           {
             worktreePath: activeWorktreePath,
             customPrompt: preferences?.magic_prompts?.commit_message,
@@ -468,42 +475,48 @@ export function useGitOperations({
             reasoningEffort:
               preferences?.magic_prompt_efforts?.commit_message_effort ?? null,
             specificFiles,
+          },
+          job => {
+            clearWorktreeLoading(activeWorktreeId)
+            if (job.status === 'failed' || !job.response) {
+              opToast.error(`${prefix}: Failed: ${job.error}`)
+              return
+            }
+
+            clearGitDiffSelectedFiles()
+            triggerImmediateGitPoll()
+            window.dispatchEvent(new CustomEvent('git-commit-completed'))
+
+            const result = job.response
+            if (result.push_permission_denied) {
+              opToast.error(
+                `${prefix}: No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
+                {
+                  action: {
+                    label: toastActionLabel('Open PR'),
+                    onClick: () =>
+                      window.dispatchEvent(
+                        new CustomEvent('magic-command', {
+                          detail: { command: 'open-pr' },
+                        })
+                      ),
+                  },
+                }
+              )
+            } else if (result.push_fell_back) {
+              opToast.warning(
+                `${prefix}: Could not push to PR branch, pushed to new branch instead`
+              )
+            } else if (result.commit_hash) {
+              opToast.success(`${prefix}: ${result.message.split('\n')[0]}`)
+            } else {
+              opToast.success(`${prefix}: Pushed to remote`)
+            }
           }
         )
-
-        // Clear selected files and trigger refresh
-        clearGitDiffSelectedFiles()
-        triggerImmediateGitPoll()
-        window.dispatchEvent(new CustomEvent('git-commit-completed'))
-
-        if (result.push_permission_denied) {
-          opToast.error(
-            `${prefix}: No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
-            {
-              action: {
-                label: toastActionLabel('Open PR'),
-                onClick: () =>
-                  window.dispatchEvent(
-                    new CustomEvent('magic-command', {
-                      detail: { command: 'open-pr' },
-                    })
-                  ),
-              },
-            }
-          )
-        } else if (result.push_fell_back) {
-          opToast.warning(
-            `${prefix}: Could not push to PR branch, pushed to new branch instead`
-          )
-        } else if (result.commit_hash) {
-          opToast.success(`${prefix}: ${result.message.split('\n')[0]}`)
-        } else {
-          opToast.success(`${prefix}: Pushed to remote`)
-        }
       } catch (error) {
-        opToast.error(`${prefix}: Failed: ${error}`)
-      } finally {
         clearWorktreeLoading(activeWorktreeId)
+        opToast.error(`${prefix}: Failed: ${error}`)
       }
     },
     [
@@ -630,7 +643,19 @@ export function useGitOperations({
     const { setWorktreeLoading, clearWorktreeLoading } = useChatStore.getState()
     setWorktreeLoading(activeWorktreeId, 'pr')
     const branch = worktree?.branch ?? ''
-    const toastId = toast.loading(`Creating PR for ${branch}...`)
+    let cancellationRequested = false
+    const toastId = toast.loading(`Creating PR for ${branch}...`, {
+      cancel: {
+        label: 'Cancel',
+        onClick: async () => {
+          cancellationRequested = true
+          toast.info('Cancelling PR creation...', { id: toastId })
+          await invoke<boolean>('cancel_create_pr_with_ai_content', {
+            worktreePath: activeWorktreePath,
+          })
+        },
+      },
+    })
 
     try {
       const result = await invoke<CreatePrResponse>(
@@ -676,7 +701,12 @@ export function useGitOperations({
         }
       )
     } catch (error) {
-      toast.error(`Failed to create PR: ${error}`, { id: toastId })
+      const message = String(error)
+      if (cancellationRequested || message.includes('PR creation cancelled')) {
+        toast.info('PR creation cancelled', { id: toastId })
+      } else {
+        toast.error(`Failed to create PR: ${error}`, { id: toastId })
+      }
     } finally {
       clearWorktreeLoading(activeWorktreeId)
     }
@@ -697,7 +727,11 @@ export function useGitOperations({
   // If existingSessionId is provided, stores results on that session (in-place review from ChatWindow)
   // Creates a new session and stores review results in it
   const runReview = useCallback(
-    async (source: 'ai' | 'coderabbit-cli' | 'coderabbit-pr') => {
+    async (
+      source: 'ai' | 'coderabbit-cli' | 'coderabbit-pr',
+      reviewConfig?: MagicCodeReviewConfig,
+      reviewSessionId?: string
+    ) => {
       if (!activeWorktreeId || !activeWorktreePath) return
 
       const { setWorktreeLoading, clearWorktreeLoading } =
@@ -800,17 +834,29 @@ export function useGitOperations({
             worktreeId: activeWorktreeId,
             worktreePath: activeWorktreePath,
             source,
+            backend:
+              reviewConfig?.backend ??
+              resolveMagicPromptBackend(
+                preferences?.magic_prompt_backends,
+                'code_review_backend',
+                preferences?.default_backend
+              ),
             customPrompt: preferences?.magic_prompts?.code_review,
-            model: preferences?.magic_prompt_models?.code_review_model,
+            model:
+              reviewConfig?.model ??
+              preferences?.magic_prompt_models?.code_review_model,
             customProfileName: resolveMagicPromptProvider(
               preferences?.magic_prompt_providers,
               'code_review_provider',
               preferences?.default_provider
             ),
             reasoningEffort:
-              preferences?.magic_prompt_efforts?.code_review_effort ?? null,
+              reviewConfig?.reasoning_effort ??
+              preferences?.magic_prompt_efforts?.code_review_effort ??
+              null,
             reviewRunId,
             reviewType: source === 'coderabbit-cli' ? 'all' : null,
+            sessionId: reviewSessionId,
           }
         )
 
@@ -832,6 +878,7 @@ export function useGitOperations({
           `${reviewLabel} running for ${projectName}/${worktreeName}...`,
           {
             id: toastId,
+            duration: 5000,
             cancel: {
               label: 'Cancel',
               onClick: () => {
@@ -915,6 +962,7 @@ export function useGitOperations({
           }).catch(() => null)
           if (currentJob) handleTerminalReviewJob(currentJob)
         }
+        return job.sessionId
       } catch (error) {
         toast.error(`Failed to start review: ${error}`, { id: toastId })
       } finally {
@@ -929,23 +977,41 @@ export function useGitOperations({
       queryClient,
       preferences?.magic_prompts?.code_review,
       preferences?.magic_prompt_models?.code_review_model,
+      preferences?.magic_code_review_configs,
+      preferences?.magic_prompt_backends,
+      preferences?.default_backend,
       preferences?.magic_prompt_providers,
       preferences?.default_provider,
       preferences?.magic_prompt_efforts?.code_review_effort,
     ]
   )
 
-  const handleReview = useCallback(() => runReview('ai'), [runReview])
+  const handleReview = useCallback(async () => {
+    const configs = resolveCodeReviewConfigs({
+      configured: preferences?.magic_code_review_configs,
+      fallbackBackend:
+        resolveMagicPromptBackend(
+          preferences?.magic_prompt_backends,
+          'code_review_backend',
+          preferences?.default_backend
+        ) ?? 'claude',
+      fallbackModel:
+        preferences?.magic_prompt_models?.code_review_model ?? 'sonnet',
+    })
+    let reviewSessionId: string | undefined
+    await startCodeReviewsSequentially(configs, async config => {
+      reviewSessionId =
+        (await runReview('ai', config, reviewSessionId)) ?? reviewSessionId
+    })
+  }, [preferences, runReview])
 
-  const handleCodeRabbitReview = useCallback(
-    () => runReview('coderabbit-cli'),
-    [runReview]
-  )
+  const handleCodeRabbitReview = useCallback(async () => {
+    await runReview('coderabbit-cli')
+  }, [runReview])
 
-  const handleCodeRabbitPrReview = useCallback(
-    () => runReview('coderabbit-pr'),
-    [runReview]
-  )
+  const handleCodeRabbitPrReview = useCallback(async () => {
+    await runReview('coderabbit-pr')
+  }, [runReview])
 
   // Handle Merge - validates and shows merge options dialog
   const handleMerge = useCallback(async () => {

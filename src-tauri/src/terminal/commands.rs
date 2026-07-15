@@ -1,6 +1,8 @@
 use serde::Serialize;
+use serde_json::Value;
 #[cfg(unix)]
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tauri::AppHandle;
 
 use super::pty::{
@@ -22,6 +24,14 @@ pub struct TerminalPortInfo {
     pub port: u16,
     pub process_name: String,
     pub local_address: String,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageScript {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// Start a terminal
@@ -90,6 +100,62 @@ pub async fn get_run_scripts(worktree_path: String) -> Vec<String> {
         .and_then(|config| config.scripts.run)
         .map(|r| r.into_vec())
         .unwrap_or_default()
+}
+
+/// Get executable package.json scripts for a project or worktree.
+#[tauri::command]
+pub async fn get_package_scripts(worktree_path: String) -> Vec<PackageScript> {
+    read_package_scripts(Path::new(&worktree_path))
+}
+
+fn read_package_scripts(worktree_path: &Path) -> Vec<PackageScript> {
+    let Ok(contents) = std::fs::read_to_string(worktree_path.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(package) = serde_json::from_str::<Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(scripts) = package.get("scripts").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let manager = package
+        .get("packageManager")
+        .and_then(Value::as_str)
+        .and_then(|value| value.split('@').next())
+        .filter(|value| matches!(*value, "bun" | "pnpm" | "yarn" | "npm"))
+        .unwrap_or_else(|| detect_package_manager(worktree_path));
+    let command = package_manager_binary(manager);
+
+    scripts
+        .iter()
+        .filter(|(_, value)| value.is_string())
+        .map(|(name, _)| PackageScript {
+            name: name.clone(),
+            command: command.clone(),
+            args: vec!["run".to_string(), name.clone()],
+        })
+        .collect()
+}
+
+fn detect_package_manager(worktree_path: &Path) -> &'static str {
+    if worktree_path.join("bun.lock").exists() || worktree_path.join("bun.lockb").exists() {
+        "bun"
+    } else if worktree_path.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if worktree_path.join("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+fn package_manager_binary(manager: &str) -> String {
+    if cfg!(windows) && manager != "bun" {
+        format!("{manager}.cmd")
+    } else {
+        manager.to_string()
+    }
 }
 
 /// Get configured ports from jean.json for a worktree
@@ -333,4 +399,61 @@ pub async fn get_terminal_listening_ports() -> Vec<TerminalPortInfo> {
 #[cfg(unix)]
 fn extract_port(addr: &str) -> Option<u16> {
     addr.rsplit(':').next()?.parse::<u16>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn package_scripts_are_read_in_package_json_order() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "packageManager": "pnpm@10.0.0",
+                "scripts": {
+                    "dev": "vite",
+                    "test:unit": "vitest run"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+
+        let scripts = read_package_scripts(dir.path());
+
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].name, "dev");
+        assert_eq!(scripts[0].command, package_manager_binary("pnpm"));
+        assert_eq!(scripts[0].args, vec!["run", "dev"]);
+        assert_eq!(scripts[1].name, "test:unit");
+        assert_eq!(scripts[1].args, vec!["run", "test:unit"]);
+    }
+
+    #[test]
+    fn package_scripts_use_lockfile_to_choose_runner() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .expect("write package.json");
+        fs::write(dir.path().join("bun.lock"), "").expect("write lockfile");
+
+        let scripts = read_package_scripts(dir.path());
+
+        assert_eq!(scripts[0].command, package_manager_binary("bun"));
+        assert_eq!(scripts[0].args, vec!["run", "build"]);
+    }
+
+    #[test]
+    fn invalid_or_missing_package_json_has_no_scripts() {
+        let missing = tempfile::tempdir().expect("temp dir");
+        assert!(read_package_scripts(missing.path()).is_empty());
+
+        let invalid = tempfile::tempdir().expect("temp dir");
+        fs::write(invalid.path().join("package.json"), "not json").expect("write package.json");
+        assert!(read_package_scripts(invalid.path()).is_empty());
+    }
 }

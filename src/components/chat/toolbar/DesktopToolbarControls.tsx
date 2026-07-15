@@ -65,6 +65,7 @@ import {
 import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBackendModelPicker'
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
+import type { ModelReasoningCapability } from '@/services/model-catalog'
 
 interface DesktopToolbarControlsProps {
   hasPendingQuestions: boolean
@@ -80,6 +81,7 @@ interface DesktopToolbarControlsProps {
   providerLocked?: boolean
   customCliProfiles: CustomCliProfile[]
   isCodex: boolean
+  modelReasoning?: ModelReasoningCapability | null
 
   prUrl: string | undefined
   prNumber: number | undefined
@@ -145,6 +147,7 @@ export function DesktopToolbarControls({
   providerLocked,
   customCliProfiles,
   isCodex,
+  modelReasoning,
   prUrl,
   prNumber,
   displayStatus,
@@ -191,29 +194,53 @@ export function DesktopToolbarControls({
 }: DesktopToolbarControlsProps) {
   const isPi = selectedBackend === 'pi'
   const isGrok = selectedBackend === 'grok'
-  const usesEffortControl = useAdaptiveThinking || isCodex || isPi || isGrok
-  const effortLevelOptions = isPi
-    ? PI_EFFORT_LEVEL_OPTIONS
-    : isCodex
-      ? CODEX_EFFORT_LEVEL_OPTIONS
-      : isGrok
-        ? GROK_EFFORT_LEVEL_OPTIONS
-        : EFFORT_LEVEL_OPTIONS
+  const usesEffortControl =
+    modelReasoning?.type === 'effort' ||
+    (modelReasoning === undefined &&
+      (useAdaptiveThinking || isCodex || isPi || isGrok))
+  const effortLevelOptions =
+    modelReasoning?.type === 'effort'
+      ? modelReasoning.levels
+      : isPi
+        ? PI_EFFORT_LEVEL_OPTIONS
+        : isCodex
+          ? CODEX_EFFORT_LEVEL_OPTIONS
+          : isGrok
+            ? GROK_EFFORT_LEVEL_OPTIONS
+            : EFFORT_LEVEL_OPTIONS
+  const thinkingLevelOptions =
+    modelReasoning?.type === 'thinking'
+      ? modelReasoning.levels
+      : THINKING_LEVEL_OPTIONS
   const displayedEffortLevel =
-    isCodex || isPi
-      ? selectedEffortLevel === 'max'
-        ? 'high'
-        : selectedEffortLevel === 'ultracode'
-          ? 'xhigh'
+    modelReasoning?.type === 'effort'
+      ? modelReasoning.levels.some(o => o.value === selectedEffortLevel)
+        ? selectedEffortLevel
+        : modelReasoning.default
+      : isCodex || isPi
+        ? selectedEffortLevel === 'max'
+          ? 'high'
+          : selectedEffortLevel === 'ultracode'
+            ? 'xhigh'
+            : selectedEffortLevel
+        : isGrok && selectedEffortLevel === 'ultracode'
+          ? 'max'
           : selectedEffortLevel
-      : isGrok && selectedEffortLevel === 'ultracode'
-        ? 'max'
-        : selectedEffortLevel
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
+  const displayedThinkingLevel =
+    modelReasoning?.type === 'thinking' &&
+    !modelReasoning.levels.some(o => o.value === selectedThinkingLevel)
+      ? modelReasoning.default
+      : selectedThinkingLevel
+  const displayedThinkingLabel =
+    thinkingLevelOptions.find(o => o.value === displayedThinkingLevel)?.label ??
+    displayedThinkingLevel
   const hideReasoningControl =
-    hideThinkingLevel || selectedBackend === 'commandcode'
+    hideThinkingLevel ||
+    modelReasoning === null ||
+    selectedBackend === 'commandcode'
 
   // Prevent Radix from restoring focus to the trigger button;
   // redirect focus to the chat input instead.
@@ -549,64 +576,64 @@ export function DesktopToolbarControls({
       )}
 
       {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
-          <>
-            <div className="hidden @xl:block h-4 w-px bg-border/50" />
-            <DropdownMenu
-              open={providerDropdownOpen}
-              onOpenChange={setProviderDropdownOpen}
+        <>
+          <div className="hidden @xl:block h-4 w-px bg-border/50" />
+          <DropdownMenu
+            open={providerDropdownOpen}
+            onOpenChange={setProviderDropdownOpen}
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    <span>{providerDisplayName}</span>
+                  </button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent>Provider (⌘⇧P)</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent
+              align="start"
+              className="min-w-40"
+              onEscapeKeyDown={e => e.stopPropagation()}
+              onCloseAutoFocus={focusChatInput}
             >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                    >
-                      <span>{providerDisplayName}</span>
-                    </button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>Provider (⌘⇧P)</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent
-                align="start"
-                className="min-w-40"
-                onEscapeKeyDown={e => e.stopPropagation()}
-                onCloseAutoFocus={focusChatInput}
+              <DropdownMenuRadioGroup
+                value={selectedProvider ?? '__anthropic__'}
+                onValueChange={handleProviderChange}
               >
-                <DropdownMenuRadioGroup
-                  value={selectedProvider ?? '__anthropic__'}
-                  onValueChange={handleProviderChange}
-                >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
-                    <Kbd className="ml-auto text-[10px]">1</Kbd>
-                  </DropdownMenuRadioItem>
-                  {customCliProfiles.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
-                        Custom Providers
-                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
-                          cc
-                        </span>
-                      </DropdownMenuLabel>
-                      {customCliProfiles.map((profile, i) => (
-                        <DropdownMenuRadioItem
-                          key={profile.name}
-                          value={profile.name}
-                        >
-                          {profile.name}
-                          <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
-        )}
+                <DropdownMenuRadioItem value="__anthropic__">
+                  Anthropic
+                  <Kbd className="ml-auto text-[10px]">1</Kbd>
+                </DropdownMenuRadioItem>
+                {customCliProfiles.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
+                      Custom Providers
+                      <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
+                        cc
+                      </span>
+                    </DropdownMenuLabel>
+                    {customCliProfiles.map((profile, i) => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                      >
+                        {profile.name}
+                        <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
+      )}
 
       <div className="hidden @xl:block h-4 w-px bg-border/50" />
 
@@ -686,22 +713,16 @@ export function DesktopToolbarControls({
                   <Brain
                     className={cn(
                       'h-3.5 w-3.5',
-                      selectedThinkingLevel !== 'off' &&
+                      displayedThinkingLevel !== 'off' &&
                         'text-purple-600 dark:text-purple-400'
                     )}
                   />
-                  <span>
-                    {
-                      THINKING_LEVEL_OPTIONS.find(
-                        o => o.value === selectedThinkingLevel
-                      )?.label
-                    }
-                  </span>
+                  <span>{displayedThinkingLabel}</span>
                 </button>
               </DropdownMenuTrigger>
             </TooltipTrigger>
             <TooltipContent>
-              {`Thinking: ${THINKING_LEVEL_OPTIONS.find(o => o.value === selectedThinkingLevel)?.label} (⌘⇧E)`}
+              {`Thinking: ${displayedThinkingLabel} (⌘⇧E)`}
             </TooltipContent>
           </Tooltip>
           <DropdownMenuContent
@@ -710,15 +731,15 @@ export function DesktopToolbarControls({
             onCloseAutoFocus={focusChatInput}
           >
             <DropdownMenuRadioGroup
-              value={selectedThinkingLevel}
+              value={displayedThinkingLevel}
               onValueChange={handleThinkingLevelChange}
             >
-              {THINKING_LEVEL_OPTIONS.map((option, i) => (
+              {thinkingLevelOptions.map((option, i) => (
                 <DropdownMenuRadioItem key={option.value} value={option.value}>
                   <Brain className="mr-2 h-4 w-4" />
                   {option.label}
                   <span className="ml-auto pl-4 text-xs text-muted-foreground">
-                    {option.tokens}
+                    {'tokens' in option ? option.tokens : option.description}
                   </span>
                   <Kbd className="ml-2 text-[10px]">{i + 1}</Kbd>
                 </DropdownMenuRadioItem>

@@ -2,9 +2,10 @@
 // Contains ephemeral UI state that should be restored on app restart
 // Note: Field names use snake_case to match Rust struct exactly
 //
-// Session-specific state (answered_questions, submitted_answers, fixed_findings,
-// pending_permission_denials, denied_message_context, reviewing_sessions) is now
-// stored in the Session files. See useSessionStatePersistence.
+// Durable session state (answered_questions, submitted_answers, fixed_findings,
+// pending_permission_denials, denied_message_context, reviewing_sessions) is
+// stored in Session files. Lightweight unsent input drafts stay here so all
+// session textareas survive a full UI reload.
 // Review results are also stored in Session files (review_results field).
 
 import type { LabelData } from '@/types/chat'
@@ -46,6 +47,8 @@ export interface UIState {
   left_sidebar_visible?: boolean
   /** Active session ID per worktree (for restoring open tabs) */
   active_session_ids: Record<string, string>
+  /** Unsent chat textarea content per session */
+  input_drafts?: Record<string, string>
   /** Whether the review sidebar is visible */
   review_sidebar_visible?: boolean
   /** Modal terminal drawer open state per worktree */
@@ -58,7 +61,7 @@ export interface UIState {
   modal_terminal_width?: number
   /** Modal terminal height in pixels for bottom dock */
   modal_terminal_height?: number
-  /** Terminal instances persisted per worktree for web refresh reconnect */
+  /** Terminal instances persisted per worktree for restoration after web refresh */
   terminal_instances?: Record<string, PersistedTerminalInstance[]>
   /** Active terminal id per worktree */
   terminal_active_ids?: Record<string, string>
@@ -118,6 +121,7 @@ export const defaultUIState: UIState = {
   left_sidebar_size: 250,
   left_sidebar_visible: false,
   active_session_ids: {},
+  input_drafts: {},
   modal_terminal_open: {},
   modal_terminal_dock_mode: 'floating',
   modal_terminal_width: 400,

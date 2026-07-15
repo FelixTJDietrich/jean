@@ -31,9 +31,10 @@ import { getFileManagerName } from '@/lib/platform'
 
 import type { AppPreferences } from '@/types/preferences'
 import type { AdvisoryContext } from '@/types/github'
-import { hasBackend } from '@/lib/environment'
+import { hasBackend, hasBackendTransport } from '@/lib/environment'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { shouldSuppressAutoFixConflictNotification } from './worktree-conflict-events'
+import { preserveQueryCacheOnError } from '@/lib/query-error'
 
 // Check if a backend is available (Tauri IPC or WebSocket)
 // Kept as `isTauri` for backward compatibility across the codebase
@@ -59,7 +60,7 @@ export function useProjects() {
   return useQuery({
     queryKey: projectsQueryKeys.list(),
     queryFn: async (): Promise<Project[]> => {
-      if (!isTauri()) {
+      if (!hasBackendTransport()) {
         logger.debug('Not in Tauri context, returning empty projects')
         return []
       }
@@ -71,7 +72,7 @@ export function useProjects() {
         return projects
       } catch (error) {
         logger.error('Failed to load projects', { error })
-        return []
+        return preserveQueryCacheOnError(error)
       }
     },
     staleTime: 1000 * 60 * 5, // 5 minutes
@@ -86,7 +87,7 @@ export function useWorktrees(projectId: string | null) {
   return useQuery({
     queryKey: projectsQueryKeys.worktrees(projectId ?? ''),
     queryFn: async (): Promise<Worktree[]> => {
-      if (!isTauri() || !projectId) {
+      if (!hasBackendTransport() || !projectId) {
         return []
       }
 
@@ -101,7 +102,7 @@ export function useWorktrees(projectId: string | null) {
         return worktrees
       } catch (error) {
         logger.error('Failed to load worktrees', { error, projectId })
-        return []
+        return preserveQueryCacheOnError(error)
       }
     },
     enabled: !!projectId,
@@ -129,7 +130,7 @@ export function useWorktree(worktreeId: string | null) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<Worktree | null> => {
-      if (!isTauri() || !worktreeId) {
+      if (!hasBackendTransport() || !worktreeId) {
         return null
       }
 
@@ -142,7 +143,7 @@ export function useWorktree(worktreeId: string | null) {
         return worktree
       } catch (error) {
         logger.error('Failed to load worktree', { error, worktreeId })
-        return null
+        return preserveQueryCacheOnError(error)
       }
     },
     enabled: !!worktreeId && !isPending,
@@ -2192,6 +2193,25 @@ export function useRunScripts(worktreePath: string | null) {
     },
     enabled: !!worktreePath,
     staleTime: 30_000, // Cache for 30 seconds
+  })
+}
+
+export interface PackageScript {
+  name: string
+  command: string
+  args: string[]
+}
+
+/** Get scripts from package.json with the detected package-manager command. */
+export function usePackageScripts(worktreePath: string | null) {
+  return useQuery<PackageScript[]>({
+    queryKey: ['package-scripts', worktreePath],
+    queryFn: () =>
+      worktreePath
+        ? invoke<PackageScript[]>('get_package_scripts', { worktreePath })
+        : Promise.resolve([]),
+    enabled: !!worktreePath && hasBackendTransport(),
+    staleTime: 30_000,
   })
 }
 

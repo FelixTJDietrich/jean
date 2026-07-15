@@ -24,6 +24,7 @@ vi.mock('@/services/preferences', () => ({
   usePatchPreferences: () => ({ mutate: vi.fn() }),
 }))
 vi.mock('@/services/model-catalog', () => ({
+  getCatalogModelReasoning: () => undefined,
   getCatalogModelFastInfo: () => ({ supportsFast: false, isFast: false }),
   getCatalogModelOptions: (_catalog: unknown, backend: string) =>
     backend === 'codex'

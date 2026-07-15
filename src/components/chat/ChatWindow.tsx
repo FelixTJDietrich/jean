@@ -47,6 +47,8 @@ import {
   useWorktree,
   useProjects,
   useRunScripts,
+  usePackageScripts,
+  type PackageScript,
   projectsQueryKeys,
 } from '@/services/projects'
 import { useProjectsStore } from '@/store/projects-store'
@@ -66,7 +68,11 @@ import { useLoadedLinearIssueContexts } from '@/services/linear'
 import { useChatStore, DEFAULT_THINKING_LEVEL } from '@/store/chat-store'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { getLabelTextColor } from '@/lib/label-colors'
-import { PREDEFINED_CLI_PROFILES, type CliBackend } from '@/types/preferences'
+import {
+  PREDEFINED_CLI_PROFILES,
+  resolveMagicPromptBackend,
+  type CliBackend,
+} from '@/types/preferences'
 import type {
   ChatMessage,
   ToolCall,
@@ -107,6 +113,7 @@ import { SkillBadge } from './SkillBadge'
 import { FileContentModal } from './FileContentModal'
 import { FilePreview } from './FilePreview'
 import { ContextPreview } from './ContextPreview'
+import { getLinkedPrContextPreviewExclusion } from './context-preview-utils'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
 import { ChatToolbar } from './ChatToolbar'
@@ -153,6 +160,10 @@ import {
 } from '@/lib/model-utils'
 import { copyToClipboard, copyHtmlToClipboard } from '@/lib/clipboard'
 import { useClaudeCliStatus } from '@/services/claude-cli'
+import {
+  getCatalogModelReasoning,
+  useModelCatalog,
+} from '@/services/model-catalog'
 import { useAvailablePiModels } from '@/services/pi-cli'
 import { usePrStatus, usePrStatusEvents } from '@/services/pr-status'
 import type { PrDisplayStatus, CheckStatus } from '@/types/pr-status'
@@ -652,6 +663,9 @@ export function ChatWindow({
 
   // Run scripts for this worktree (used by CMD+R keybinding)
   const { data: runScripts = [] } = useRunScripts(activeWorktreePath ?? null)
+  const { data: packageScripts = [] } = usePackageScripts(
+    activeWorktreePath ?? null
+  )
   const handleRunCommand = useCallback(
     (command: string) => {
       if (!activeWorktreeId) return
@@ -660,6 +674,45 @@ export function ChatWindow({
       useTerminalStore.getState().setModalTerminalOpen(activeWorktreeId, true)
     },
     [activeWorktreeId]
+  )
+  const handleRunPackageScript = useCallback(
+    (script: PackageScript) => {
+      if (!activeWorktreeId) return
+      useTerminalStore
+        .getState()
+        .addTerminal(activeWorktreeId, script.command, script.name, {
+          commandArgs: script.args,
+        })
+      useUIStore.getState().setSessionChatModalOpen(true, activeWorktreeId)
+      useTerminalStore.getState().setModalTerminalOpen(activeWorktreeId, true)
+    },
+    [activeWorktreeId]
+  )
+  const favoritePackageScripts = useMemo(() => {
+    const projectId = worktree?.project_id
+    if (!projectId) return []
+    const prefix = `${projectId}:`
+    return (preferences?.favorite_package_scripts ?? [])
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length))
+  }, [preferences?.favorite_package_scripts, worktree?.project_id])
+  const handleToggleFavoritePackageScript = useCallback(
+    (scriptName: string) => {
+      const projectId = worktree?.project_id
+      if (!projectId) return
+      const key = `${projectId}:${scriptName}`
+      const favorites = preferences?.favorite_package_scripts ?? []
+      patchPreferences.mutate({
+        favorite_package_scripts: favorites.includes(key)
+          ? favorites.filter(favorite => favorite !== key)
+          : [...favorites, key],
+      })
+    },
+    [
+      patchPreferences,
+      preferences?.favorite_package_scripts,
+      worktree?.project_id,
+    ]
   )
 
   // Per-session provider selection: persisted session → zustand → project default → global default
@@ -770,13 +823,7 @@ export function ChatWindow({
     (session?.selected_effort_level as EffortLevel | undefined) ??
     sessionEffortLevel ??
     defaultEffortLevel
-  const selectedEffortLevel: EffortLevel = isCodexBackend
-    ? rawSelectedEffortLevel === 'max'
-      ? 'high'
-      : rawSelectedEffortLevel === 'ultracode'
-        ? 'xhigh'
-        : rawSelectedEffortLevel
-    : rawSelectedEffortLevel
+  const selectedEffortLevel: EffortLevel = rawSelectedEffortLevel
 
   // MCP servers: resolve enabled servers cascade (session → project → global)
   // Fetches from ALL installed backends so toolbar shows grouped sections
@@ -790,10 +837,22 @@ export function ChatWindow({
 
   // CLI version for adaptive thinking feature detection
   const { data: cliStatus } = useClaudeCliStatus()
+  const { data: modelCatalog } = useModelCatalog()
+  const selectedModelReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    selectedBackend,
+    selectedModel
+  )
   // Custom providers don't support Opus 4.6 adaptive thinking — use thinking levels instead
   const useAdaptiveThinkingFlag =
     !isCustomProvider &&
-    supportsAdaptiveThinking(selectedModel, cliStatus?.version ?? null)
+    supportsAdaptiveThinking(
+      selectedModel,
+      cliStatus?.version ?? null,
+      selectedModelReasoning === undefined
+        ? undefined
+        : selectedModelReasoning?.type === 'effort'
+    )
 
   // Hide thinking level UI entirely for providers that don't support it
   const customCliProfiles = preferences?.custom_cli_profiles ?? []
@@ -1861,20 +1920,24 @@ export function ChatWindow({
       const store = useChatStore.getState()
       store.setSessionReviewing(activeSessionId, false)
 
+      const backend = resolveMagicPromptBackend(
+        preferences?.magic_prompt_backends,
+        'code_review_backend',
+        preferences?.default_backend
+      )
+
       // Create new session
       let newSession: Session
       try {
         newSession = await createSession.mutateAsync({
           worktreeId: activeWorktreeId,
           worktreePath: activeWorktreePath,
+          backend: backend ?? undefined,
         })
       } catch (err) {
         toast.error(`Failed to create session: ${err}`)
         return
       }
-
-      // Switch to new session
-      store.setActiveSession(activeWorktreeId, newSession.id)
 
       const model =
         preferences?.magic_prompt_models?.code_review_model ??
@@ -1884,6 +1947,9 @@ export function ChatWindow({
       store.setError(newSession.id, null)
       store.addSendingSession(newSession.id)
       store.setSelectedModel(newSession.id, model)
+      if (backend) {
+        store.setSelectedBackend(newSession.id, backend)
+      }
       store.setExecutingMode(newSession.id, executionMode)
 
       sendMessage.mutate({
@@ -1892,6 +1958,7 @@ export function ChatWindow({
         worktreePath: activeWorktreePath,
         message,
         model,
+        backend: backend ?? undefined,
         executionMode,
         thinkingLevel: selectedThinkingLevelRef.current,
       })
@@ -3179,14 +3246,9 @@ export function ChatWindow({
                               excludeIssueNumber={
                                 worktree?.issue_number ?? null
                               }
-                              excludePrNumber={
-                                worktree?.issue_number ||
-                                worktree?.security_alert_number ||
-                                worktree?.advisory_ghsa_id ||
-                                worktree?.linear_issue_identifier
-                                  ? null
-                                  : (worktree?.pr_number ?? null)
-                              }
+                              excludePrNumber={getLinkedPrContextPreviewExclusion(
+                                worktree
+                              )}
                               excludeSecurityAlertNumber={
                                 worktree?.security_alert_number ?? null
                               }
@@ -3412,6 +3474,12 @@ export function ChatWindow({
                                   handleOpenProjectSettings
                                 }
                                 onRunCommand={handleRunCommand}
+                                packageScripts={packageScripts}
+                                favoritePackageScripts={favoritePackageScripts}
+                                onRunPackageScript={handleRunPackageScript}
+                                onToggleFavoritePackageScript={
+                                  handleToggleFavoritePackageScript
+                                }
                               />
                             </div>
                           </form>

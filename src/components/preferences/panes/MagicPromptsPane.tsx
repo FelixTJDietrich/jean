@@ -1,5 +1,12 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { Check, ChevronsUpDown, RotateCcw } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  ChevronsUpDown,
+  Plus,
+  RotateCcw,
+  Trash2,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -22,6 +29,13 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
@@ -31,6 +45,7 @@ import { useAvailablePiModels } from '@/services/pi-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
 import {
   getCatalogModelOptions,
+  getCatalogModelReasoning,
   useModelCatalog,
 } from '@/services/model-catalog'
 import {
@@ -66,6 +81,7 @@ import {
   DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_MAGIC_PROMPT_PROVIDERS,
   DEFAULT_MAGIC_PROMPT_BACKENDS,
+  DEFAULT_MAGIC_PROMPT_EFFORTS,
   DEFAULT_MAGIC_PROMPT_MODES,
   CLAUDE_DEFAULT_MAGIC_PROMPT_BACKENDS,
   CODEX_DEFAULT_MAGIC_PROMPT_BACKENDS,
@@ -75,6 +91,12 @@ import {
   GROK_DEFAULT_MAGIC_PROMPT_BACKENDS,
   CODEX_DEFAULT_MAGIC_PROMPT_MODELS,
   CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
   OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS,
   PI_DEFAULT_MAGIC_PROMPT_MODELS,
   COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS,
@@ -87,14 +109,22 @@ import {
   isPiModel,
   type MagicPrompts,
   type MagicPromptModels,
+  type MagicPromptReasoningEfforts,
   type MagicPromptProviders,
   type MagicPromptBackends,
   type MagicPromptModel,
   type MagicPromptModes,
   type MagicPromptExecutionMode,
+  type MagicCodeReviewConfig,
+  type CliBackend,
+  type CustomCliProfile,
 } from '@/types/preferences'
 import { cn } from '@/lib/utils'
 import { BackendLabel } from '@/components/ui/backend-label'
+import {
+  codeReviewConfigKey,
+  resolveCodeReviewConfigs,
+} from '@/lib/code-review-configs'
 
 interface VariableInfo {
   name: string
@@ -104,6 +134,7 @@ interface VariableInfo {
 interface PromptConfig {
   key: keyof MagicPrompts
   modelKey?: keyof MagicPromptModels
+  effortKey?: keyof MagicPromptReasoningEfforts
   providerKey?: keyof MagicPromptProviders
   backendKey?: keyof MagicPromptBackends
   modeKey?: keyof MagicPromptModes
@@ -126,6 +157,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_issue',
         modelKey: 'investigate_issue_model',
+        effortKey: 'investigate_issue_effort',
         providerKey: 'investigate_issue_provider',
         backendKey: 'investigate_issue_backend',
         modeKey: 'investigate_issue_mode',
@@ -148,6 +180,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_pr',
         modelKey: 'investigate_pr_model',
+        effortKey: 'investigate_pr_effort',
         providerKey: 'investigate_pr_provider',
         backendKey: 'investigate_pr_backend',
         modeKey: 'investigate_pr_mode',
@@ -170,6 +203,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_workflow_run',
         modelKey: 'investigate_workflow_run_model',
+        effortKey: 'investigate_workflow_run_effort',
         providerKey: 'investigate_workflow_run_provider',
         backendKey: 'investigate_workflow_run_backend',
         modeKey: 'investigate_workflow_run_mode',
@@ -198,6 +232,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_security_alert',
         modelKey: 'investigate_security_alert_model',
+        effortKey: 'investigate_security_alert_effort',
         providerKey: 'investigate_security_alert_provider',
         backendKey: 'investigate_security_alert_backend',
         modeKey: 'investigate_security_alert_mode',
@@ -221,6 +256,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_advisory',
         modelKey: 'investigate_advisory_model',
+        effortKey: 'investigate_advisory_effort',
         providerKey: 'investigate_advisory_provider',
         backendKey: 'investigate_advisory_backend',
         modeKey: 'investigate_advisory_mode',
@@ -242,6 +278,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'investigate_linear_issue',
         modelKey: 'investigate_linear_issue_model',
+        effortKey: 'investigate_linear_issue_effort',
         providerKey: 'investigate_linear_issue_provider',
         backendKey: 'investigate_linear_issue_backend',
         modeKey: 'investigate_linear_issue_mode',
@@ -273,6 +310,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'code_review',
         modelKey: 'code_review_model',
+        effortKey: 'code_review_effort',
         providerKey: 'code_review_provider',
         backendKey: 'code_review_backend',
         label: 'Code Review',
@@ -295,6 +333,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'review_comments',
         modelKey: 'review_comments_model',
+        effortKey: 'review_comments_effort',
         providerKey: 'review_comments_provider',
         backendKey: 'review_comments_backend',
         modeKey: 'review_comments_mode',
@@ -318,6 +357,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'commit_message',
         modelKey: 'commit_message_model',
+        effortKey: 'commit_message_effort',
         providerKey: 'commit_message_provider',
         backendKey: 'commit_message_backend',
         label: 'Commit Message',
@@ -341,6 +381,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'pr_content',
         modelKey: 'pr_content_model',
+        effortKey: 'pr_content_effort',
         providerKey: 'pr_content_provider',
         backendKey: 'pr_content_backend',
         label: 'PR Description',
@@ -377,6 +418,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'resolve_conflicts',
         modelKey: 'resolve_conflicts_model',
+        effortKey: 'resolve_conflicts_effort',
         providerKey: 'resolve_conflicts_provider',
         backendKey: 'resolve_conflicts_backend',
         modeKey: 'resolve_conflicts_mode',
@@ -389,6 +431,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'release_notes',
         modelKey: 'release_notes_model',
+        effortKey: 'release_notes_effort',
         providerKey: 'release_notes_provider',
         backendKey: 'release_notes_backend',
         label: 'Release Notes',
@@ -429,6 +472,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'context_summary',
         modelKey: 'context_summary_model',
+        effortKey: 'context_summary_effort',
         providerKey: 'context_summary_provider',
         backendKey: 'context_summary_backend',
         label: 'Context Summary',
@@ -451,6 +495,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
       {
         key: 'session_naming',
         modelKey: 'session_naming_model',
+        effortKey: 'session_naming_effort',
         providerKey: 'session_naming_provider',
         backendKey: 'session_naming_backend',
         label: 'Session Naming',
@@ -515,12 +560,83 @@ const PROMPT_SECTIONS: PromptSection[] = [
 const PROMPT_CONFIGS = PROMPT_SECTIONS.flatMap(s => s.configs)
 const PROMPT_CONFIG_KEYS = new Set(PROMPT_CONFIGS.map(config => config.key))
 const MAGIC_PROMPT_HIGHLIGHT_DURATION_MS = 1800
+const BACKEND_EFFORT_FALLBACK = {
+  type: 'effort' as const,
+  default: 'high',
+  levels: [
+    { value: 'low', label: 'Low', description: 'Light' },
+    { value: 'medium', label: 'Medium', description: 'Moderate' },
+    { value: 'high', label: 'High', description: 'Deep' },
+    { value: 'xhigh', label: 'Extra high', description: 'Extra deep' },
+  ],
+}
+
+function getMagicPromptModelReasoning(
+  catalog: Parameters<typeof getCatalogModelReasoning>[0],
+  backend: CliBackend,
+  model: string,
+  provider: string | null | undefined,
+  profiles: CustomCliProfile[]
+) {
+  const profile =
+    backend === 'claude' && provider
+      ? profiles.find(candidate => candidate.name === provider)
+      : undefined
+  // Custom providers can remap Claude aliases to arbitrary models. Without
+  // provider-specific catalog metadata, Anthropic effort levels are unsafe.
+  if (profile) return null
+  const reasoning = getCatalogModelReasoning(catalog, backend, model)
+  if (reasoning !== undefined) return reasoning
+  return ['opencode', 'pi', 'grok'].includes(backend)
+    ? BACKEND_EFFORT_FALLBACK
+    : undefined
+}
+
+function getMagicPromptReasoningDefaults(
+  catalog: Parameters<typeof getCatalogModelReasoning>[0],
+  backend: CliBackend,
+  models: MagicPromptModels
+): MagicPromptReasoningEfforts {
+  const efforts = { ...DEFAULT_MAGIC_PROMPT_EFFORTS }
+  for (const config of PROMPT_CONFIGS) {
+    if (!config.modelKey || !config.effortKey) continue
+    efforts[config.effortKey] =
+      getMagicPromptModelReasoning(
+        catalog,
+        backend,
+        models[config.modelKey],
+        null,
+        []
+      )?.default ?? null
+  }
+  return efforts
+}
+
+function makeCodeReviewConfig(
+  catalog: Parameters<typeof getCatalogModelReasoning>[0],
+  backend: CliBackend,
+  model: MagicPromptModel
+): MagicCodeReviewConfig {
+  return {
+    backend,
+    model,
+    reasoning_effort:
+      getMagicPromptModelReasoning(catalog, backend, model, null, [])
+        ?.default ?? null,
+  }
+}
 
 export function getMagicPromptItemId(key: keyof MagicPrompts): string {
   return `settings-magic-prompt-${key}`
 }
 
 const CODEX_MODEL_OPTIONS: { value: MagicPromptModel; label: string }[] = [
+  { value: 'gpt-5.6-sol', label: 'GPT 5.6 Sol' },
+  { value: 'gpt-5.6-sol-fast', label: 'GPT 5.6 Sol Fast' },
+  { value: 'gpt-5.6-terra', label: 'GPT 5.6 Terra' },
+  { value: 'gpt-5.6-terra-fast', label: 'GPT 5.6 Terra Fast' },
+  { value: 'gpt-5.6-luna', label: 'GPT 5.6 Luna' },
+  { value: 'gpt-5.6-luna-fast', label: 'GPT 5.6 Luna Fast' },
   { value: 'gpt-5.5', label: 'GPT 5.5' },
   { value: 'gpt-5.5-fast', label: 'GPT 5.5 Fast' },
   { value: 'gpt-5.4', label: 'GPT 5.4' },
@@ -529,7 +645,15 @@ const CODEX_MODEL_OPTIONS: { value: MagicPromptModel; label: string }[] = [
   { value: 'gpt-5.4-mini-fast', label: 'GPT 5.4 Mini Fast' },
   ...codexModelOptions
     .filter(
-      o => !['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'].includes(o.value) // Already listed above
+      o =>
+        ![
+          'gpt-5.6-sol',
+          'gpt-5.6-terra',
+          'gpt-5.6-luna',
+          'gpt-5.5',
+          'gpt-5.4',
+          'gpt-5.4-mini',
+        ].includes(o.value) // Already listed above
     )
     .map(o => ({ value: o.value as MagicPromptModel, label: o.label })),
 ]
@@ -647,6 +771,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     preferences?.magic_prompt_providers ?? DEFAULT_MAGIC_PROMPT_PROVIDERS
   const currentBackends =
     preferences?.magic_prompt_backends ?? DEFAULT_MAGIC_PROMPT_BACKENDS
+  const currentEfforts =
+    preferences?.magic_prompt_efforts ?? DEFAULT_MAGIC_PROMPT_EFFORTS
   const currentModes =
     preferences?.magic_prompt_modes ?? DEFAULT_MAGIC_PROMPT_MODES
   const profiles = useMemo(
@@ -673,6 +799,23 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   // Resolve effective backend for model filtering: per-operation override > global default_backend
   const effectiveBackend =
     currentBackend ?? preferences?.default_backend ?? 'claude'
+  const modelReasoning = currentModel
+    ? getMagicPromptModelReasoning(
+        modelCatalog,
+        effectiveBackend as CliBackend,
+        currentModel,
+        currentProvider,
+        profiles
+      )
+    : undefined
+  const currentReasoning = selectedConfig.effortKey
+    ? currentEfforts[selectedConfig.effortKey]
+    : null
+  const selectedReasoning = modelReasoning
+    ? modelReasoning.levels.some(level => level.value === currentReasoning)
+      ? currentReasoning
+      : modelReasoning.default
+    : null
   const currentModelIsCodex = currentModel ? isCodexModel(currentModel) : false
   const currentModelIsOpenCode = currentModel
     ? currentModel.startsWith('opencode/')
@@ -731,6 +874,151 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     currentModelIsPi,
     currentModelIsGrok,
     profiles,
+  ])
+
+  const getReviewModelOptions = useCallback(
+    (backend: string) => {
+      if (backend === 'claude') return filteredClaudeOptions
+      if (backend === 'codex') return CODEX_MODEL_OPTIONS
+      if (backend === 'cursor') return cursorModelOptions
+      if (backend === 'commandcode') return commandCodeModelOptions
+      if (backend === 'pi') return piModelOptions
+      if (backend === 'grok') return grokModelOptions
+      return opencodeModelOptions
+    },
+    [
+      commandCodeModelOptions,
+      cursorModelOptions,
+      filteredClaudeOptions,
+      grokModelOptions,
+      opencodeModelOptions,
+      piModelOptions,
+    ]
+  )
+
+  const getReviewReasoning = useCallback(
+    (config: Pick<MagicCodeReviewConfig, 'backend' | 'model'>) =>
+      getMagicPromptModelReasoning(
+        modelCatalog,
+        config.backend as CliBackend,
+        config.model,
+        config.backend === 'claude' ? currentProvider : null,
+        profiles
+      ),
+    [modelCatalog, currentProvider, profiles]
+  )
+
+  const codeReviewConfigs = useMemo(
+    () =>
+      resolveCodeReviewConfigs({
+        configured: preferences?.magic_code_review_configs,
+        fallbackBackend: effectiveBackend,
+        fallbackModel: currentModels.code_review_model,
+      }),
+    [
+      currentModels.code_review_model,
+      effectiveBackend,
+      preferences?.magic_code_review_configs,
+    ]
+  )
+  const showProviderControl =
+    currentProvider !== undefined &&
+    profiles.length > 0 &&
+    (selectedKey === 'code_review'
+      ? codeReviewConfigs.some(config => config.backend === 'claude')
+      : effectiveBackend === 'claude')
+  const hasPromptConfigControls =
+    selectedKey !== 'code_review' &&
+    (currentBackend !== undefined ||
+      showProviderControl ||
+      Boolean(currentModel) ||
+      Boolean(selectedConfig.effortKey) ||
+      Boolean(currentMode))
+
+  const saveCodeReviewConfigs = useCallback(
+    (configs: MagicCodeReviewConfig[]) => {
+      if (!preferences || configs.length === 0) return
+      const first = configs[0]
+      if (!first) return
+      patchPreferences.mutate({
+        magic_code_review_configs: configs,
+        magic_prompt_backends: {
+          ...currentBackends,
+          code_review_backend: first.backend,
+        },
+        magic_prompt_models: {
+          ...currentModels,
+          code_review_model: first.model,
+        },
+        magic_prompt_efforts: {
+          ...currentEfforts,
+          code_review_effort: first.reasoning_effort ?? null,
+        },
+      })
+    },
+    [
+      preferences,
+      patchPreferences,
+      currentBackends,
+      currentModels,
+      currentEfforts,
+    ]
+  )
+
+  const updateCodeReviewConfig = useCallback(
+    (index: number, config: MagicCodeReviewConfig) => {
+      const duplicate = codeReviewConfigs.some(
+        (item, itemIndex) =>
+          itemIndex !== index &&
+          codeReviewConfigKey(item) === codeReviewConfigKey(config)
+      )
+      if (duplicate) return
+      saveCodeReviewConfigs(
+        codeReviewConfigs.map((item, itemIndex) =>
+          itemIndex === index ? config : item
+        )
+      )
+    },
+    [codeReviewConfigs, saveCodeReviewConfigs]
+  )
+
+  const addCodeReviewConfig = useCallback(() => {
+    if (codeReviewConfigs.length >= 5) return
+    const representedBackends = new Set(
+      codeReviewConfigs.map(config => config.backend)
+    )
+    const orderedBackends = [
+      ...installedBackends.filter(backend => !representedBackends.has(backend)),
+      ...installedBackends.filter(backend => representedBackends.has(backend)),
+    ]
+    for (const backend of orderedBackends) {
+      const model = getReviewModelOptions(backend).find(
+        option =>
+          !codeReviewConfigs.some(
+            config =>
+              codeReviewConfigKey(config) ===
+              codeReviewConfigKey({ backend, model: option.value })
+          )
+      )?.value
+      if (model) {
+        saveCodeReviewConfigs([
+          ...codeReviewConfigs,
+          {
+            backend,
+            model,
+            reasoning_effort:
+              getReviewReasoning({ backend, model })?.default ?? null,
+          },
+        ])
+        return
+      }
+    }
+  }, [
+    codeReviewConfigs,
+    getReviewModelOptions,
+    getReviewReasoning,
+    installedBackends,
+    saveCodeReviewConfigs,
   ])
 
   const isModified = currentPrompts[selectedKey] !== null
@@ -850,32 +1138,111 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const handleModelChange = useCallback(
     (model: MagicPromptModel) => {
       if (!preferences || !selectedConfig.modelKey) return
+      const reasoning = getMagicPromptModelReasoning(
+        modelCatalog,
+        effectiveBackend as CliBackend,
+        model,
+        currentProvider,
+        profiles
+      )
       patchPreferences.mutate({
         magic_prompt_models: {
           ...currentModels,
           [selectedConfig.modelKey]: model,
         },
+        ...(selectedConfig.effortKey
+          ? {
+              magic_prompt_efforts: {
+                ...currentEfforts,
+                [selectedConfig.effortKey]: reasoning?.default ?? null,
+              },
+            }
+          : {}),
       })
     },
-    [preferences, patchPreferences, currentModels, selectedConfig.modelKey]
+    [
+      preferences,
+      selectedConfig.modelKey,
+      selectedConfig.effortKey,
+      modelCatalog,
+      effectiveBackend,
+      patchPreferences,
+      currentModels,
+      currentEfforts,
+      currentProvider,
+      profiles,
+    ]
+  )
+
+  const handleReasoningChange = useCallback(
+    (reasoning: string) => {
+      if (!preferences || !selectedConfig.effortKey) return
+      patchPreferences.mutate({
+        magic_prompt_efforts: {
+          ...currentEfforts,
+          [selectedConfig.effortKey]: reasoning,
+        },
+      })
+    },
+    [preferences, selectedConfig.effortKey, patchPreferences, currentEfforts]
   )
 
   const handleProviderChange = useCallback(
     (provider: string) => {
       if (!preferences || !selectedConfig.providerKey) return
+      const selectedProvider = provider === 'anthropic' ? null : provider
+      const reasoning = currentModel
+        ? getMagicPromptModelReasoning(
+            modelCatalog,
+            effectiveBackend as CliBackend,
+            currentModel,
+            selectedProvider,
+            profiles
+          )
+        : undefined
+      const reviewConfigs =
+        selectedKey === 'code_review'
+          ? codeReviewConfigs.map(config => ({
+              ...config,
+              reasoning_effort:
+                getMagicPromptModelReasoning(
+                  modelCatalog,
+                  config.backend as CliBackend,
+                  config.model,
+                  config.backend === 'claude' ? selectedProvider : null,
+                  profiles
+                )?.default ?? null,
+            }))
+          : undefined
       patchPreferences.mutate({
         magic_prompt_providers: {
           ...currentProviders,
-          [selectedConfig.providerKey]:
-            provider === 'anthropic' ? null : provider,
+          [selectedConfig.providerKey]: selectedProvider,
         },
+        ...(selectedConfig.effortKey
+          ? {
+              magic_prompt_efforts: {
+                ...currentEfforts,
+                [selectedConfig.effortKey]: reasoning?.default ?? null,
+              },
+            }
+          : {}),
+        ...(reviewConfigs ? { magic_code_review_configs: reviewConfigs } : {}),
       })
     },
     [
       preferences,
       patchPreferences,
       currentProviders,
+      currentEfforts,
+      currentModel,
+      modelCatalog,
+      effectiveBackend,
+      profiles,
+      selectedKey,
+      codeReviewConfigs,
       selectedConfig.providerKey,
+      selectedConfig.effortKey,
     ]
   )
 
@@ -901,6 +1268,15 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           defaultModel = grokModelOptions[0]?.value
         }
       }
+      const reasoning = defaultModel
+        ? getMagicPromptModelReasoning(
+            modelCatalog,
+            backend as CliBackend,
+            defaultModel,
+            backend === 'claude' ? currentProvider : null,
+            profiles
+          )
+        : undefined
       patchPreferences.mutate({
         magic_prompt_backends: {
           ...currentBackends,
@@ -914,6 +1290,14 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
               },
             }
           : {}),
+        ...(selectedConfig.effortKey
+          ? {
+              magic_prompt_efforts: {
+                ...currentEfforts,
+                [selectedConfig.effortKey]: reasoning?.default ?? null,
+              },
+            }
+          : {}),
       })
     },
     [
@@ -921,8 +1305,13 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       patchPreferences,
       currentBackends,
       currentModels,
+      currentEfforts,
+      modelCatalog,
+      currentProvider,
+      profiles,
       selectedConfig.backendKey,
       selectedConfig.modelKey,
+      selectedConfig.effortKey,
       selectedConfig.defaultModel,
       cursorModelOptions,
       piModelOptions,
@@ -949,48 +1338,113 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     if (!preferences) return
     patchPreferences.mutate({
       magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_code_review_configs: [
+        makeCodeReviewConfig(
+          modelCatalog,
+          'claude',
+          DEFAULT_MAGIC_PROMPT_MODELS.code_review_model
+        ),
+      ],
       magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
       magic_prompt_backends: CLAUDE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+      magic_prompt_efforts: getMagicPromptReasoningDefaults(
+        modelCatalog,
+        'claude',
+        DEFAULT_MAGIC_PROMPT_MODELS
+      ),
     })
-  }, [preferences, patchPreferences])
+  }, [preferences, patchPreferences, modelCatalog])
 
-  const handleApplyCodexDefaults = useCallback(() => {
-    if (!preferences) return
-    patchPreferences.mutate({
-      magic_prompt_models: CODEX_DEFAULT_MAGIC_PROMPT_MODELS,
-      magic_prompt_backends: CODEX_DEFAULT_MAGIC_PROMPT_BACKENDS,
-    })
-  }, [preferences, patchPreferences])
+  const handleApplyCodexDefaults = useCallback(
+    (models: MagicPromptModels) => {
+      if (!preferences) return
+      const presetModels = {
+        ...models,
+        commit_message_model:
+          CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS.commit_message_model,
+      }
+      patchPreferences.mutate({
+        magic_prompt_models: presetModels,
+        magic_code_review_configs: [
+          makeCodeReviewConfig(modelCatalog, 'codex', models.code_review_model),
+        ],
+        magic_prompt_backends: CODEX_DEFAULT_MAGIC_PROMPT_BACKENDS,
+        magic_prompt_efforts: {
+          ...getMagicPromptReasoningDefaults(
+            modelCatalog,
+            'codex',
+            presetModels
+          ),
+          commit_message_effort: 'low',
+        },
+      })
+    },
+    [preferences, patchPreferences, modelCatalog]
+  )
 
-  const handleApplyCodexFastDefaults = useCallback(() => {
-    if (!preferences) return
-    patchPreferences.mutate({
-      magic_prompt_models: CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
-      magic_prompt_backends: CODEX_DEFAULT_MAGIC_PROMPT_BACKENDS,
-    })
-  }, [preferences, patchPreferences])
+  const handleApplyLegacyCodexDefaults = useCallback(
+    () => handleApplyCodexDefaults(CODEX_DEFAULT_MAGIC_PROMPT_MODELS),
+    [handleApplyCodexDefaults]
+  )
+
+  const handleApplyCodexFastDefaults = useCallback(
+    () => handleApplyCodexDefaults(CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS),
+    [handleApplyCodexDefaults]
+  )
 
   const handleApplyOpenCodeDefaults = useCallback(() => {
     if (!preferences) return
     patchPreferences.mutate({
       magic_prompt_models: OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_code_review_configs: [
+        makeCodeReviewConfig(
+          modelCatalog,
+          'opencode',
+          OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS.code_review_model
+        ),
+      ],
       magic_prompt_backends: OPENCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+      magic_prompt_efforts: getMagicPromptReasoningDefaults(
+        modelCatalog,
+        'opencode',
+        OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS
+      ),
     })
-  }, [preferences, patchPreferences])
+  }, [preferences, patchPreferences, modelCatalog])
 
   const handleApplyPiDefaults = useCallback(() => {
     if (!preferences) return
     patchPreferences.mutate({
       magic_prompt_models: PI_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_code_review_configs: [
+        makeCodeReviewConfig(
+          modelCatalog,
+          'pi',
+          PI_DEFAULT_MAGIC_PROMPT_MODELS.code_review_model
+        ),
+      ],
       magic_prompt_backends: PI_DEFAULT_MAGIC_PROMPT_BACKENDS,
+      magic_prompt_efforts: getMagicPromptReasoningDefaults(
+        modelCatalog,
+        'pi',
+        PI_DEFAULT_MAGIC_PROMPT_MODELS
+      ),
     })
-  }, [preferences, patchPreferences])
+  }, [preferences, patchPreferences, modelCatalog])
 
   const handleApplyCommandCodeDefaults = useCallback(() => {
     if (!preferences) return
     patchPreferences.mutate({
       magic_prompt_models: COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_code_review_configs: [
+        makeCodeReviewConfig(
+          modelCatalog,
+          'commandcode',
+          COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS.code_review_model
+        ),
+      ],
       magic_prompt_backends: COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+      magic_prompt_efforts: DEFAULT_MAGIC_PROMPT_EFFORTS,
     })
   }, [preferences, patchPreferences])
 
@@ -998,9 +1452,21 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     if (!preferences) return
     patchPreferences.mutate({
       magic_prompt_models: GROK_DEFAULT_MAGIC_PROMPT_MODELS,
+      magic_code_review_configs: [
+        makeCodeReviewConfig(
+          modelCatalog,
+          'grok',
+          GROK_DEFAULT_MAGIC_PROMPT_MODELS.code_review_model
+        ),
+      ],
       magic_prompt_backends: GROK_DEFAULT_MAGIC_PROMPT_BACKENDS,
+      magic_prompt_efforts: getMagicPromptReasoningDefaults(
+        modelCatalog,
+        'grok',
+        GROK_DEFAULT_MAGIC_PROMPT_MODELS
+      ),
     })
-  }, [preferences, patchPreferences])
+  }, [preferences, patchPreferences, modelCatalog])
 
   // Flush pending save when switching prompts
   const prevSelectedKeyRef = useRef(selectedKey)
@@ -1032,72 +1498,123 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
 
   return (
     <div className="flex flex-col min-h-0 flex-1">
-      {/* Preset buttons */}
-      <div className="flex items-center gap-2 mb-3 shrink-0 overflow-x-auto pb-1">
+      {/* Preset menu */}
+      <div className="flex items-center gap-2 mb-3 shrink-0">
         <span className="text-xs text-muted-foreground">Presets:</span>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyClaudeDefaults}
-          disabled={!installedBackends.includes('claude')}
-          className="h-7 text-xs"
-        >
-          Claude Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyCodexDefaults}
-          disabled={!installedBackends.includes('codex')}
-          className="h-7 text-xs"
-        >
-          Codex Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyCodexFastDefaults}
-          disabled={!installedBackends.includes('codex')}
-          className="h-7 text-xs"
-        >
-          Codex (Fast) Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyOpenCodeDefaults}
-          disabled={!installedBackends.includes('opencode')}
-          className="h-7 text-xs"
-        >
-          OpenCode Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyPiDefaults}
-          disabled={!installedBackends.includes('pi')}
-          className="h-7 text-xs"
-        >
-          Pi Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyCommandCodeDefaults}
-          disabled={!installedBackends.includes('commandcode')}
-          className="h-7 text-xs"
-        >
-          Command Code Defaults
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleApplyGrokDefaults}
-          disabled={!installedBackends.includes('grok')}
-          className="h-7 text-xs"
-        >
-          Grok Defaults
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="h-7 text-xs">
+              Apply preset
+              <ChevronDown className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem
+              onSelect={handleApplyClaudeDefaults}
+              disabled={!installedBackends.includes('claude')}
+            >
+              Claude Defaults
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Sol
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Sol Fast
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Luna
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Luna Fast
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Terra
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                handleApplyCodexDefaults(
+                  CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS
+                )
+              }
+              disabled={!installedBackends.includes('codex')}
+            >
+              GPT 5.6 Terra Fast
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleApplyLegacyCodexDefaults}
+              disabled={!installedBackends.includes('codex')}
+            >
+              Codex Defaults
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleApplyCodexFastDefaults}
+              disabled={!installedBackends.includes('codex')}
+            >
+              Codex (Fast) Defaults
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={handleApplyOpenCodeDefaults}
+              disabled={!installedBackends.includes('opencode')}
+            >
+              OpenCode Defaults
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleApplyPiDefaults}
+              disabled={!installedBackends.includes('pi')}
+            >
+              Pi Defaults
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleApplyCommandCodeDefaults}
+              disabled={!installedBackends.includes('commandcode')}
+            >
+              Command Code Defaults
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleApplyGrokDefaults}
+              disabled={!installedBackends.includes('grok')}
+            >
+              Grok Defaults
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Master-detail layout */}
@@ -1174,11 +1691,201 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           </div>
 
           {/* Backend / Model / Provider / Reset row */}
-          <div className="flex flex-wrap items-center gap-2 mb-2 shrink-0">
-            {currentBackend !== undefined && (
+          <div
+            data-testid={
+              hasPromptConfigControls ? 'magic-prompt-config' : undefined
+            }
+            className={cn(
+              'mb-2 shrink-0',
+              hasPromptConfigControls
+                ? 'flex w-full flex-col gap-2 rounded-lg border border-border/60 p-2.5'
+                : 'flex flex-wrap items-center gap-2'
+            )}
+          >
+            {selectedKey === 'code_review' && (
+              <div className="flex w-full flex-col gap-2">
+                {codeReviewConfigs.map((config, index) => {
+                  const reasoning = getReviewReasoning(config)
+                  const selectedReviewReasoning = reasoning
+                    ? reasoning.levels.some(
+                        level => level.value === config.reasoning_effort
+                      )
+                      ? config.reasoning_effort
+                      : reasoning.default
+                    : null
+                  return (
+                    <div
+                      data-testid={`magic-code-review-config-${index}`}
+                      key={`${codeReviewConfigKey(config)}-${index}`}
+                      className="flex flex-col gap-2 rounded-lg border border-border/60 p-2.5"
+                    >
+                      <div className="flex h-7 items-center justify-between">
+                        <span className="text-xs font-medium">
+                          Review {index + 1}
+                        </span>
+                        {codeReviewConfigs.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Remove review ${index + 1}`}
+                            onClick={() =>
+                              saveCodeReviewConfigs(
+                                codeReviewConfigs.filter(
+                                  (_, itemIndex) => itemIndex !== index
+                                )
+                              )
+                            }
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          Backend
+                        </span>
+                        <Select
+                          value={config.backend}
+                          onValueChange={backend => {
+                            const model = getReviewModelOptions(backend).find(
+                              option =>
+                                !codeReviewConfigs.some(
+                                  (item, itemIndex) =>
+                                    itemIndex !== index &&
+                                    codeReviewConfigKey(item) ===
+                                      codeReviewConfigKey({
+                                        backend,
+                                        model: option.value,
+                                      })
+                                )
+                            )?.value
+                            if (model) {
+                              updateCodeReviewConfig(index, {
+                                backend,
+                                model,
+                                reasoning_effort:
+                                  getReviewReasoning({ backend, model })
+                                    ?.default ?? null,
+                              })
+                            }
+                          }}
+                        >
+                          <SelectTrigger
+                            aria-label={`Review ${index + 1} backend`}
+                            size="sm"
+                            className="w-full text-xs"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {installedBackends.map(backend => (
+                              <SelectItem key={backend} value={backend}>
+                                <BackendLabel backend={backend} />
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          Model
+                        </span>
+                        <Select
+                          value={config.model}
+                          onValueChange={model =>
+                            updateCodeReviewConfig(index, {
+                              ...config,
+                              model: model as MagicPromptModel,
+                              reasoning_effort:
+                                getReviewReasoning({
+                                  backend: config.backend,
+                                  model: model as MagicPromptModel,
+                                })?.default ?? null,
+                            })
+                          }
+                        >
+                          <SelectTrigger
+                            aria-label={`Review ${index + 1} model`}
+                            size="sm"
+                            className="w-full min-w-0 text-xs"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {getReviewModelOptions(config.backend).map(
+                              option => {
+                                const duplicate = codeReviewConfigs.some(
+                                  (item, itemIndex) =>
+                                    itemIndex !== index &&
+                                    codeReviewConfigKey(item) ===
+                                      codeReviewConfigKey({
+                                        backend: config.backend,
+                                        model: option.value,
+                                      })
+                                )
+                                return (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                    disabled={duplicate}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                )
+                              }
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          Reasoning
+                        </span>
+                        <Select
+                          value={selectedReviewReasoning ?? undefined}
+                          onValueChange={reasoningEffort =>
+                            updateCodeReviewConfig(index, {
+                              ...config,
+                              reasoning_effort: reasoningEffort,
+                            })
+                          }
+                          disabled={!reasoning}
+                        >
+                          <SelectTrigger
+                            aria-label={`Review ${index + 1} reasoning`}
+                            size="sm"
+                            className="w-full min-w-0 text-xs"
+                          >
+                            <SelectValue placeholder="Not supported" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {reasoning?.levels.map(level => (
+                              <SelectItem key={level.value} value={level.value}>
+                                {level.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )
+                })}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-fit"
+                  onClick={addCodeReviewConfig}
+                  disabled={codeReviewConfigs.length >= 5}
+                >
+                  <Plus className="size-3.5" />
+                  Add review
+                </Button>
+              </div>
+            )}
+            {selectedKey !== 'code_review' && currentBackend !== undefined && (
               <div
                 data-testid="magic-prompt-backend-control"
-                className="flex items-center gap-2 max-md:w-full md:contents"
+                className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2"
               >
                 <span className="text-xs text-muted-foreground">Backend</span>
                 <Select
@@ -1188,7 +1895,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                   <SelectTrigger
                     aria-label="Backend"
                     size="sm"
-                    className="flex-1 text-xs md:w-[120px] md:flex-none"
+                    className="w-full min-w-0 text-xs"
                     hideIcon={installedBackends.length <= 1}
                   >
                     <SelectValue />
@@ -1230,50 +1937,38 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                 </Select>
               </div>
             )}
-            {currentProvider !== undefined &&
-              profiles.length > 0 &&
-              !currentModelIsCodex &&
-              !currentModelIsCursor &&
-              !currentModelIsCommandCode &&
-              !currentModelIsOpenCode &&
-              !currentModelIsPi &&
-              !currentModelIsGrok &&
-              effectiveBackend !== 'opencode' &&
-              effectiveBackend !== 'cursor' &&
-              effectiveBackend !== 'commandcode' &&
-              effectiveBackend !== 'pi' &&
-              effectiveBackend !== 'codex' &&
-              effectiveBackend !== 'grok' && (
-                <div className="flex items-center gap-2 max-md:w-full md:contents">
-                  <span className="text-xs text-muted-foreground">
-                    Provider
-                  </span>
-                  <Select
-                    value={currentProvider ?? 'anthropic'}
-                    onValueChange={handleProviderChange}
+            {showProviderControl && (
+              <div
+                data-testid="magic-prompt-provider-control"
+                className="grid w-full grid-cols-[72px_minmax(0,1fr)] items-center gap-2"
+              >
+                <span className="text-xs text-muted-foreground">Provider</span>
+                <Select
+                  value={currentProvider ?? 'anthropic'}
+                  onValueChange={handleProviderChange}
+                >
+                  <SelectTrigger
+                    aria-label="Provider"
+                    size="sm"
+                    className="w-full min-w-0 text-xs"
                   >
-                    <SelectTrigger
-                      aria-label="Provider"
-                      size="sm"
-                      className="flex-1 text-xs md:w-[130px] md:flex-none"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="anthropic">Anthropic</SelectItem>
-                      {profiles.map(p => (
-                        <SelectItem key={p.name} value={p.name}>
-                          {p.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-            {currentModel && (
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                    {profiles.map(p => (
+                      <SelectItem key={p.name} value={p.name}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {selectedKey !== 'code_review' && currentModel && (
               <div
                 data-testid="magic-prompt-model-control"
-                className="flex items-center gap-2 max-md:w-full md:contents"
+                className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2"
               >
                 <span className="text-xs text-muted-foreground">Model</span>
                 <Popover
@@ -1286,7 +1981,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                       role="combobox"
                       aria-label="Model"
                       aria-expanded={modelPopoverOpen}
-                      className="h-8 flex-1 justify-between text-xs font-normal md:w-[160px] md:flex-none"
+                      className="h-8 w-full min-w-0 justify-between text-xs font-normal"
                     >
                       <span className="truncate">
                         {(() => {
@@ -1499,17 +2194,49 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                 </Popover>
               </div>
             )}
+            {selectedConfig.effortKey && selectedKey !== 'code_review' && (
+              <div
+                data-testid="magic-prompt-reasoning-control"
+                className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2"
+              >
+                <span className="text-xs text-muted-foreground">
+                  {modelReasoning?.type === 'thinking'
+                    ? 'Thinking'
+                    : 'Reasoning'}
+                </span>
+                <Select
+                  value={selectedReasoning ?? undefined}
+                  onValueChange={handleReasoningChange}
+                  disabled={!modelReasoning}
+                >
+                  <SelectTrigger
+                    aria-label="Reasoning level"
+                    size="sm"
+                    className="w-full min-w-0 text-xs"
+                  >
+                    <SelectValue placeholder="Not supported" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelReasoning?.levels.map(level => (
+                      <SelectItem key={level.value} value={level.value}>
+                        {level.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             {currentMode && (
               <div
                 data-testid="magic-prompt-mode-control"
-                className="flex items-center gap-2 max-md:w-full md:contents"
+                className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2"
               >
                 <span className="text-xs text-muted-foreground">Mode</span>
                 <Select value={currentMode} onValueChange={handleModeChange}>
                   <SelectTrigger
                     aria-label="Default mode"
                     size="sm"
-                    className="flex-1 text-xs md:w-[110px] md:flex-none"
+                    className="w-full min-w-0 text-xs"
                   >
                     <SelectValue />
                   </SelectTrigger>

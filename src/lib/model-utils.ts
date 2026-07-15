@@ -48,10 +48,12 @@ export function getModelImpliedBackend(
  */
 export function supportsAdaptiveThinking(
   model: string,
-  cliVersion: string | null | undefined
+  cliVersion: string | null | undefined,
+  catalogUsesEffort?: boolean
 ): boolean {
   const usesEffortLevels =
-    model.startsWith('claude-fable-') || model.startsWith('claude-opus-')
+    catalogUsesEffort ??
+    (model.startsWith('claude-fable-') || model.startsWith('claude-opus-'))
   if (!usesEffortLevels) return false
   if (!cliVersion) return false
   return compareVersions(cliVersion, ADAPTIVE_THINKING_MIN_CLI_VERSION) >= 0

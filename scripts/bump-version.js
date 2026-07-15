@@ -37,11 +37,15 @@ const tauriConf = JSON.parse(readFileSync(tauriConfPath, 'utf-8'))
 tauriConf.version = newVersion
 writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + '\n')
 
-// Update Cargo.toml
-const cargoPath = resolve(root, 'src-tauri/Cargo.toml')
-let cargo = readFileSync(cargoPath, 'utf-8')
-cargo = cargo.replace(/^version = ".*"/m, `version = "${newVersion}"`)
-writeFileSync(cargoPath, cargo)
+// Update Cargo.toml files
+for (const cargoPath of [
+  resolve(root, 'src-tauri/Cargo.toml'),
+  resolve(root, 'src-server/Cargo.toml'),
+]) {
+  let cargo = readFileSync(cargoPath, 'utf-8')
+  cargo = cargo.replace(/^version = ".*"/m, `version = "${newVersion}"`)
+  writeFileSync(cargoPath, cargo)
+}
 
 console.log(
   `Bumped version: ${pkg.version.replace(newVersion, '')}${major}.${minor}.${patch} → ${newVersion}`

@@ -154,22 +154,46 @@ pub enum MessageRole {
 
 /// Thinking level for Claude responses
 /// Controls --settings alwaysThinkingEnabled and MAX_THINKING_TOKENS env var
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ThinkingLevel {
     Off,
     Think,
     Megathink,
     #[default]
     Ultrathink,
+    Other(String),
+}
+
+impl Serialize for ThinkingLevel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.thinking_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "off" => Self::Off,
+            "think" => Self::Think,
+            "megathink" => Self::Megathink,
+            "ultrathink" => Self::Ultrathink,
+            _ => Self::Other(value),
+        })
+    }
 }
 
 /// Effort level for Opus adaptive thinking
 /// Controls --settings {"effort": "<level>"} via CLI
 /// Replaces ThinkingLevel when model is Opus (latest) on CLI >= 2.1.32
 /// Ultracode enables Claude Code's xhigh-effort Dynamic Workflow mode.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum EffortLevel {
     /// Don't send effort (used when thinking is disabled for mode)
     Off,
@@ -181,6 +205,36 @@ pub enum EffortLevel {
     Xhigh,
     Max,
     Ultracode,
+    Other(String),
+}
+
+impl Serialize for EffortLevel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.effort_value().unwrap_or("off"))
+    }
+}
+
+impl<'de> Deserialize<'de> for EffortLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "off" => Self::Off,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::Xhigh,
+            "max" => Self::Max,
+            "ultracode" => Self::Ultracode,
+            _ => Self::Other(value),
+        })
+    }
 }
 
 impl EffortLevel {
@@ -195,11 +249,22 @@ impl EffortLevel {
             EffortLevel::Xhigh => Some("xhigh"),
             EffortLevel::Max => Some("max"),
             EffortLevel::Ultracode => Some("ultracode"),
+            EffortLevel::Other(value) => Some(value.as_str()),
         }
     }
 }
 
 impl ThinkingLevel {
+    pub fn thinking_value(&self) -> &str {
+        match self {
+            Self::Off => "off",
+            Self::Think => "think",
+            Self::Megathink => "megathink",
+            Self::Ultrathink => "ultrathink",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
     /// Whether thinking is enabled for this level
     pub fn is_enabled(&self) -> bool {
         !matches!(self, ThinkingLevel::Off)
@@ -212,6 +277,7 @@ impl ThinkingLevel {
             ThinkingLevel::Think => Some(4_000),
             ThinkingLevel::Megathink => Some(10_000),
             ThinkingLevel::Ultrathink => Some(31_999),
+            ThinkingLevel::Other(value) => value.parse().ok(),
         }
     }
 }
@@ -702,7 +768,6 @@ pub struct Session {
     /// Key = "{messageId}:{markdownOffset}". Presence = checklist mode on.
     #[serde(default)]
     pub table_checked_rows: HashMap<String, Vec<u32>>,
-
     // ========================================================================
     // Run recovery state (for showing correct status on app restart)
     // ========================================================================
@@ -1716,6 +1781,21 @@ mod tests {
     #[test]
     fn test_effort_level_ultracode_value() {
         assert_eq!(EffortLevel::Ultracode.effort_value(), Some("ultracode"));
+    }
+
+    #[test]
+    fn effort_level_accepts_catalog_defined_values() {
+        let effort = serde_json::from_str::<EffortLevel>("\"turbo\"").unwrap();
+        assert_eq!(effort.effort_value(), Some("turbo"));
+        assert_eq!(serde_json::to_string(&effort).unwrap(), "\"turbo\"");
+    }
+
+    #[test]
+    fn thinking_level_accepts_catalog_defined_token_budgets() {
+        let thinking = serde_json::from_str::<ThinkingLevel>("\"16000\"").unwrap();
+        assert!(thinking.is_enabled());
+        assert_eq!(thinking.thinking_tokens(), Some(16_000));
+        assert_eq!(serde_json::to_string(&thinking).unwrap(), "\"16000\"");
     }
 
     #[test]

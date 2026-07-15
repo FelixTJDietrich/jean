@@ -3,6 +3,7 @@ import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { isNativeApp } from '@/lib/environment'
 import { ZOOM_LEVEL_DEFAULT, zoomLevelTicks } from '@/types/preferences'
 import { isMacOS } from '@/lib/platform'
+import { useIsMobile } from '@/hooks/use-mobile'
 
 const tickValues = zoomLevelTicks.map(t => t.value)
 
@@ -44,12 +45,18 @@ async function applyZoom(scaleFactor: number) {
 export function useZoom() {
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
+  const isMobile = useIsMobile()
+  const syncZoomLevels = preferences?.sync_zoom_levels ?? true
+  const desktopZoom = preferences?.zoom_level ?? ZOOM_LEVEL_DEFAULT
+  const zoomLevel =
+    isMobile && !syncZoomLevels
+      ? (preferences?.mobile_zoom_level ?? ZOOM_LEVEL_DEFAULT)
+      : desktopZoom
 
   // Apply zoom when preferences change
   useEffect(() => {
-    const zoomLevel = preferences?.zoom_level ?? ZOOM_LEVEL_DEFAULT
     applyZoom(zoomLevel / 100)
-  }, [preferences?.zoom_level])
+  }, [zoomLevel])
 
   // Keyboard shortcuts: Cmd/Ctrl + =/- for zoom, Cmd/Ctrl + 0 for reset
   useEffect(() => {
@@ -63,7 +70,7 @@ export function useZoom() {
       e.preventDefault()
       e.stopPropagation()
 
-      const currentZoom = preferences?.zoom_level ?? ZOOM_LEVEL_DEFAULT
+      const currentZoom = zoomLevel
       const currentIndex = findNearestTickIndex(currentZoom)
 
       let newZoom = currentZoom
@@ -78,12 +85,21 @@ export function useZoom() {
       }
 
       if (newZoom !== currentZoom && preferences) {
-        patchPreferences.mutate({ zoom_level: newZoom })
+        if (syncZoomLevels) {
+          patchPreferences.mutate({
+            zoom_level: newZoom,
+            mobile_zoom_level: newZoom,
+          })
+        } else if (isMobile) {
+          patchPreferences.mutate({ mobile_zoom_level: newZoom })
+        } else {
+          patchPreferences.mutate({ zoom_level: newZoom })
+        }
       }
     }
 
     document.addEventListener('keydown', handleKeyDown, { capture: true })
     return () =>
       document.removeEventListener('keydown', handleKeyDown, { capture: true })
-  }, [preferences, patchPreferences])
+  }, [isMobile, patchPreferences, preferences, syncZoomLevels, zoomLevel])
 }

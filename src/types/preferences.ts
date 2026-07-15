@@ -4,6 +4,13 @@ import { getServerPlatform, isServerWindows } from '../lib/platform'
 
 export type CodexGoalExecutionMode = Extract<ExecutionMode, 'build' | 'yolo'>
 
+export interface MagicCodeReviewConfig {
+  backend: string
+  model: MagicPromptModel
+  /** Explicit reasoning level for this backend/model pair. */
+  reasoning_effort?: string | null
+}
+
 // =============================================================================
 // Notification Sounds
 // =============================================================================
@@ -774,6 +781,20 @@ export const CODEX_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
 export const CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
   makeMagicPromptModelsPreset('gpt-5.5-fast')
 
+/** GPT-5.6 Codex presets for all magic prompts */
+export const CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-sol')
+export const CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-sol-fast')
+export const CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-luna')
+export const CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-luna-fast')
+export const CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-terra')
+export const CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('gpt-5.6-terra-fast')
+
 /** OpenCode preset for all magic prompts */
 export const OPENCODE_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels = {
   investigate_issue_model: 'opencode/gpt-5.5',
@@ -1054,6 +1075,7 @@ export interface AppPreferences {
   auto_recaps_enabled?: boolean // Ask agents to end multi-step/tool turns with a recap
   magic_prompts: MagicPrompts // Customizable prompts for AI-powered features
   magic_prompt_models: MagicPromptModels // Per-prompt model overrides
+  magic_code_review_configs?: MagicCodeReviewConfig[] // Up to five backend/model/reasoning review runners
   magic_prompt_providers: MagicPromptProviders // Per-prompt provider overrides (null = use default_provider)
   magic_prompt_backends: MagicPromptBackends // Per-prompt backend overrides (null = use project/global default_backend)
   magic_prompt_efforts: MagicPromptReasoningEfforts // Per-prompt reasoning effort overrides (null = model default)
@@ -1083,10 +1105,13 @@ export interface AppPreferences {
   has_seen_jean_config_wizard: boolean // Whether user has seen the jean.json setup wizard
   has_seen_jean_mcp_intro: boolean // Whether user has seen the Jean MCP server announcement
   chrome_enabled: boolean // Enable browser automation via Chrome extension
-  zoom_level: number // Zoom level percentage (50-200, default 100)
+  zoom_level: number // Desktop zoom level percentage (50-200, default 90)
+  mobile_zoom_level?: number // Mobile zoom level percentage (50-200, default 90)
+  sync_zoom_levels?: boolean // Keep desktop and mobile zoom levels in sync (default true)
   custom_cli_profiles: CustomCliProfile[] // Custom CLI settings profiles (e.g., OpenRouter, MiniMax)
   default_provider: string | null // Default provider profile name (null = Anthropic direct)
   favorite_models: string[] // Favourited model keys ("backend:model") shown at top of picker
+  favorite_package_scripts?: string[] // Favourited package script keys ("project_id:script")
   fast_mode_models: string[] // Model keys ("backend:baseModel") with fast tier last enabled
 
   confirm_session_close: boolean // Show confirmation dialog before closing sessions/worktrees
@@ -1486,10 +1511,10 @@ export const codexDefaultModelOptions: {
   label: string
 }[] = [
   { value: 'gpt-5.6-sol', label: 'GPT 5.6 Sol' },
-  { value: 'gpt-5.6-sol-fast', label: 'GPT 5.6 Sol Fast' },
   { value: 'gpt-5.6-terra', label: 'GPT 5.6 Terra' },
-  { value: 'gpt-5.6-terra-fast', label: 'GPT 5.6 Terra Fast' },
   { value: 'gpt-5.6-luna', label: 'GPT 5.6 Luna' },
+  { value: 'gpt-5.6-sol-fast', label: 'GPT 5.6 Sol Fast' },
+  { value: 'gpt-5.6-terra-fast', label: 'GPT 5.6 Terra Fast' },
   { value: 'gpt-5.6-luna-fast', label: 'GPT 5.6 Luna Fast' },
   { value: 'gpt-5.5', label: 'GPT 5.5' },
   { value: 'gpt-5.5-fast', label: 'GPT 5.5 Fast' },
@@ -1500,6 +1525,7 @@ export const codexDefaultModelOptions: {
   ...codexModelOptions.filter(
     option =>
       ![
+        'gpt-5.6',
         'gpt-5.6-sol',
         'gpt-5.6-terra',
         'gpt-5.6-luna',
@@ -1511,6 +1537,14 @@ export const codexDefaultModelOptions: {
 ]
 
 const deprecatedCodexFastModelMap = {
+  'gpt-5.6': 'gpt-5.6-sol',
+  'gpt-5.6-fast': 'gpt-5.6-sol-fast',
+  'gpt-5-6-sol': 'gpt-5.6-sol',
+  'gpt-5-6-sol-fast': 'gpt-5.6-sol-fast',
+  'gpt-5-6-terra': 'gpt-5.6-terra',
+  'gpt-5-6-terra-fast': 'gpt-5.6-terra-fast',
+  'gpt-5-6-luna': 'gpt-5.6-luna',
+  'gpt-5-6-luna-fast': 'gpt-5.6-luna-fast',
   'gpt-5.3-fast': 'gpt-5.3',
   'gpt-5.3-codex-fast': 'gpt-5.3-codex',
   'gpt-5.3-codex-spark-fast': 'gpt-5.3-codex-spark',
@@ -1530,14 +1564,9 @@ export function normalizeCodexModel(model: string): CodexModel {
   return isCodexModel(model) ? model : 'gpt-5.5'
 }
 
-export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type CodexReasoningEffort = string
 
-export type MagicPromptReasoningEffort =
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | null
+export type MagicPromptReasoningEffort = string | null
 
 // =============================================================================
 // Magic Prompt Model (unified type for both Claude and Codex)
@@ -1962,6 +1991,7 @@ export const defaultPreferences: AppPreferences = {
   auto_recaps_enabled: true, // Default: enabled
   magic_prompts: DEFAULT_MAGIC_PROMPTS,
   magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
+  magic_code_review_configs: [],
   magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
   magic_prompt_backends: DEFAULT_MAGIC_PROMPT_BACKENDS,
   magic_prompt_efforts: DEFAULT_MAGIC_PROMPT_EFFORTS,
@@ -1992,9 +2022,12 @@ export const defaultPreferences: AppPreferences = {
   has_seen_jean_mcp_intro: false, // Default: not seen
   chrome_enabled: true, // Default: enabled
   zoom_level: ZOOM_LEVEL_DEFAULT,
+  mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
+  sync_zoom_levels: true,
   custom_cli_profiles: [],
   default_provider: null,
   favorite_models: [],
+  favorite_package_scripts: [],
   fast_mode_models: [],
   confirm_session_close: true, // Default: enabled (show confirmation)
   default_execution_mode: 'plan', // Default: plan mode

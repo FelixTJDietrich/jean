@@ -447,6 +447,11 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "cancel_create_pr_with_ai_content" => {
+            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
+            let result = crate::projects::cancel_create_pr_with_ai_content(worktree_path).await?;
+            to_value(result)
+        }
         "merge_github_pr" => {
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let result = crate::projects::merge_github_pr(app.clone(), worktree_path).await?;
@@ -455,7 +460,7 @@ pub async fn dispatch_command(
         }
         "create_commit_with_ai" => {
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let custom_prompt: Option<String> = field_opt(&args, "magicPrompt", "magic_prompt")?;
+            let custom_prompt: Option<String> = field_opt(&args, "customPrompt", "custom_prompt")?;
             let push: bool = from_field_opt(&args, "push")?.unwrap_or(false);
             let remote: Option<String> = from_field_opt(&args, "remote")?;
             let pr_number: Option<u32> = from_field_opt(&args, "prNumber")?;
@@ -480,6 +485,40 @@ pub async fn dispatch_command(
             )
             .await?;
             to_value(result)
+        }
+        "start_commit_job" => {
+            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
+            let custom_prompt: Option<String> = field_opt(&args, "customPrompt", "custom_prompt")?;
+            let push: bool = from_field_opt(&args, "push")?.unwrap_or(false);
+            let remote: Option<String> = from_field_opt(&args, "remote")?;
+            let pr_number: Option<u32> = field_opt(&args, "prNumber", "pr_number")?;
+            let model: Option<String> = from_field_opt(&args, "model")?;
+            let custom_profile_name: Option<String> =
+                field_opt(&args, "customProfileName", "custom_profile_name")?;
+            let reasoning_effort: Option<String> =
+                field_opt(&args, "reasoningEffort", "reasoning_effort")?;
+            let specific_files: Option<Vec<String>> =
+                field_opt(&args, "specificFiles", "specific_files")?;
+            let job_id: Option<String> = field_opt(&args, "jobId", "job_id")?;
+            let result = crate::projects::start_commit_job(
+                app.clone(),
+                worktree_path,
+                custom_prompt,
+                push,
+                remote,
+                pr_number,
+                model,
+                custom_profile_name,
+                reasoning_effort,
+                specific_files,
+                job_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "get_commit_job" => {
+            let job_id: String = field(&args, "jobId", "job_id")?;
+            to_value(crate::projects::get_commit_job(job_id).await?)
         }
 
         "run_coderabbit_review" => {
@@ -524,6 +563,7 @@ pub async fn dispatch_command(
             let review_run_id: Option<String> = field_opt(&args, "reviewRunId", "review_run_id")?;
             let reasoning_effort: Option<String> =
                 field_opt(&args, "reasoningEffort", "reasoning_effort")?;
+            let backend: Option<String> = from_field_opt(&args, "backend")?;
             let result = crate::projects::run_review_with_ai(
                 app.clone(),
                 worktree_path,
@@ -532,6 +572,7 @@ pub async fn dispatch_command(
                 custom_profile_name,
                 review_run_id,
                 reasoning_effort,
+                backend,
             )
             .await?;
             to_value(result)
@@ -540,6 +581,7 @@ pub async fn dispatch_command(
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let source: String = from_field(&args, "source")?;
+            let backend: Option<String> = from_field_opt(&args, "backend")?;
             let magic_prompt: Option<String> = field_opt(&args, "customPrompt", "custom_prompt")?;
             let model: Option<String> = from_field_opt(&args, "model")?;
             let custom_profile_name: Option<String> =
@@ -548,17 +590,20 @@ pub async fn dispatch_command(
             let reasoning_effort: Option<String> =
                 field_opt(&args, "reasoningEffort", "reasoning_effort")?;
             let review_type: Option<String> = field_opt(&args, "reviewType", "review_type")?;
+            let session_id: Option<String> = field_opt(&args, "sessionId", "session_id")?;
             let result = crate::projects::start_review_job(
                 app.clone(),
                 worktree_id,
                 worktree_path,
                 source,
+                backend,
                 magic_prompt,
                 model,
                 custom_profile_name,
                 review_run_id,
                 reasoning_effort,
                 review_type,
+                session_id,
             )
             .await?;
             to_value(result)
@@ -1233,11 +1278,7 @@ pub async fn dispatch_command(
                     }
                     Some(crate::chat::types::ThinkingLevel::Off)
                 }
-                Some(other) => {
-                    return Err(format!(
-                            "invalid args `thinkingLevel` for command `send_chat_message`: unknown variant `{other}`, expected one of `off`, `think`, `megathink`, `ultrathink`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`"
-                        ));
-                }
+                Some(other) => Some(crate::chat::types::ThinkingLevel::Other(other.to_string())),
             };
             let mcp_config: Option<String> = field_opt(&args, "mcpConfig", "mcp_config")?;
             let chrome_enabled: Option<bool> = field_opt(&args, "chromeEnabled", "chrome_enabled")?;
@@ -1922,6 +1963,11 @@ pub async fn dispatch_command(
         "get_run_scripts" => {
             let parsed = parse_worktree_path_args(&args)?;
             let result = crate::terminal::get_run_scripts(parsed.worktree_path).await;
+            to_value(result)
+        }
+        "get_package_scripts" => {
+            let parsed = parse_worktree_path_args(&args)?;
+            let result = crate::terminal::get_package_scripts(parsed.worktree_path).await;
             to_value(result)
         }
         "get_ports" => {

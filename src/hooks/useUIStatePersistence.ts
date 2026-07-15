@@ -82,15 +82,15 @@ export function useUIStatePersistence() {
   }, [saveUIState])
 
   // Helper to get current UI state from stores
-  // NOTE: Session-specific state (answered_questions, submitted_answers, fixed_findings,
-  // pending_permission_denials, denied_message_context, reviewing_sessions) is now
-  // stored in the Session files, not ui-state.json. See useSessionStatePersistence.
+  // NOTE: Durable session-specific state is stored in Session files. Unsent
+  // input drafts remain lightweight UI state so they survive full UI reloads.
   const getCurrentUIState = useCallback((): UIState => {
     const {
       activeWorktreeId,
       activeWorktreePath,
       lastActiveWorktreeId,
       activeSessionIds,
+      inputDrafts,
       reviewSidebarVisible,
       lastOpenedPerProject,
     } = useChatStore.getState()
@@ -155,6 +155,7 @@ export function useUIStatePersistence() {
       left_sidebar_size: leftSidebarSize,
       left_sidebar_visible: leftSidebarVisible,
       active_session_ids: limitActiveSessionIds(activeSessionIds),
+      input_drafts: inputDrafts,
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
       // Modal terminal drawer state
@@ -350,9 +351,16 @@ export function useUIStatePersistence() {
       }
     }
 
-    // NOTE: Session-specific state (answered_questions, submitted_answers, fixed_findings,
-    // pending_permission_denials, denied_message_context, reviewing_sessions) is now
-    // loaded from Session files by useSessionStatePersistence hook.
+    const inputDrafts = uiState.input_drafts ?? {}
+    if (Object.keys(inputDrafts).length > 0) {
+      logger.debug('Restoring input drafts', {
+        count: Object.keys(inputDrafts).length,
+      })
+      useChatStore.setState({ inputDrafts })
+    }
+
+    // NOTE: Other session-specific state is loaded from Session files by the
+    // useSessionStatePersistence hook.
 
     // Restore review sidebar visibility
     if (uiState.review_sidebar_visible != null) {
@@ -859,6 +867,7 @@ export function useUIStatePersistence() {
     let prevWorktreePath = useChatStore.getState().activeWorktreePath
     let prevLastActiveWorktreeId = useChatStore.getState().lastActiveWorktreeId
     let prevActiveSessionIds = useChatStore.getState().activeSessionIds
+    let prevInputDrafts = useChatStore.getState().inputDrafts
     let prevReviewSidebarVisible = useChatStore.getState().reviewSidebarVisible
     let prevLastOpenedPerProject = useChatStore.getState().lastOpenedPerProject
     let prevTerminalInstances = useTerminalStore.getState().terminals
@@ -951,8 +960,9 @@ export function useUIStatePersistence() {
       }
     })
 
-    // Subscribe to chat-store changes (active worktree, sessions, and worktree-scoped state)
-    // NOTE: Session-specific state is handled by useSessionStatePersistence
+    // Subscribe to chat-store changes (active worktree, sessions, input drafts,
+    // and worktree-scoped state). Other session-specific state is handled by
+    // useSessionStatePersistence.
     const unsubChat = useChatStore.subscribe(state => {
       // Check if active worktree or active sessions changed
       const worktreeChanged =
@@ -960,6 +970,7 @@ export function useUIStatePersistence() {
         state.activeWorktreePath !== prevWorktreePath ||
         state.lastActiveWorktreeId !== prevLastActiveWorktreeId
       const sessionsChanged = state.activeSessionIds !== prevActiveSessionIds
+      const inputDraftsChanged = state.inputDrafts !== prevInputDrafts
       const reviewSidebarChanged =
         state.reviewSidebarVisible !== prevReviewSidebarVisible
       const lastOpenedChanged =
@@ -968,6 +979,7 @@ export function useUIStatePersistence() {
       if (
         worktreeChanged ||
         sessionsChanged ||
+        inputDraftsChanged ||
         reviewSidebarChanged ||
         lastOpenedChanged
       ) {
@@ -975,6 +987,7 @@ export function useUIStatePersistence() {
         prevWorktreePath = state.activeWorktreePath
         prevLastActiveWorktreeId = state.lastActiveWorktreeId
         prevActiveSessionIds = state.activeSessionIds
+        prevInputDrafts = state.inputDrafts
         prevReviewSidebarVisible = state.reviewSidebarVisible
         prevLastOpenedPerProject = state.lastOpenedPerProject
         const currentState = getCurrentUIState()

@@ -19,6 +19,19 @@ vi.mock('@/services/model-catalog', async importOriginal => {
           codex: {
             models: [{ id: 'gpt-remote', label: 'GPT Remote' }],
           },
+          grok: {
+            models: [
+              {
+                id: 'grok/remote',
+                label: 'Grok Remote',
+                reasoning: {
+                  type: 'effort',
+                  default: 'max',
+                  levels: [{ value: 'max', label: 'Maximum' }],
+                },
+              },
+            ],
+          },
         },
       },
     }),
@@ -50,6 +63,29 @@ describe('useToolbarDerivedState', () => {
       },
     ])
     expect(result.current.selectedModelLabel).toBe('Remote')
+  })
+
+  it('adds CDN models and reasoning metadata for non-Codex backends', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'grok',
+        selectedProvider: null,
+        selectedModel: 'grok/remote',
+        customCliProfiles: [],
+        installedBackends: ['grok'],
+        grokModelOptions: [{ value: 'grok/local', label: 'Grok Local' }],
+      })
+    )
+
+    expect(result.current.filteredModelOptions).toEqual([
+      { value: 'grok/remote', label: 'Grok Remote' },
+      { value: 'grok/local', label: 'Grok Local' },
+    ])
+    expect(result.current.selectedModelReasoning).toEqual({
+      type: 'effort',
+      default: 'max',
+      levels: [{ value: 'max', label: 'Maximum' }],
+    })
   })
 
   it('keeps provider-specific Claude aliases instead of remote catalog options', () => {

@@ -33,7 +33,7 @@ export type ScheduledWakeupStatus = 'pending' | 'fired' | 'cancelled'
 export interface ScheduledWakeupState extends ScheduledWakeup {
   status: ScheduledWakeupStatus
 }
-import type { ReviewResponse } from '@/types/projects'
+import type { StoredReviewResults } from '@/types/projects'
 import { invoke } from '@/lib/transport'
 import type { ClaudeModel, CodexModel, CliBackend } from '@/types/preferences'
 export type { ClaudeModel, CodexModel }
@@ -86,7 +86,7 @@ interface ChatUIState {
   activeSessionIds: Record<string, string>
 
   // AI review results per session (sessionId → results)
-  reviewResults: Record<string, ReviewResponse>
+  reviewResults: Record<string, StoredReviewResults>
 
   // Whether the review sidebar is visible (global toggle)
   reviewSidebarVisible: boolean
@@ -303,7 +303,7 @@ interface ChatUIState {
   getActiveSession: (worktreeId: string) => string | undefined
 
   // Actions - AI Review results management (session-scoped)
-  setReviewResults: (sessionId: string, results: ReviewResponse) => void
+  setReviewResults: (sessionId: string, results: StoredReviewResults) => void
   clearReviewResults: (sessionId: string) => void
   setReviewSidebarVisible: (visible: boolean) => void
   toggleReviewSidebar: () => void
@@ -321,7 +321,6 @@ interface ChatUIState {
     tableKey: string,
     rowIndex: number
   ) => void
-
   // Actions - ScheduleWakeup indicator state (keyed by tool_call_id)
   setScheduledWakeup: (toolCallId: string, wakeup: ScheduledWakeupState) => void
   markScheduledWakeupStatus: (
@@ -3184,6 +3183,8 @@ export const useChatStore = create<ChatUIState>()(
               state.completedDurations
             const { [sessionId]: _replay, ...restReplayContentBlocks } =
               state.streamingReplayContentBlocks
+            const { [sessionId]: _checkedRows, ...restTableCheckedRows } =
+              state.tableCheckedRows
 
             return {
               approvedTools: restApproved,
@@ -3205,6 +3206,7 @@ export const useChatStore = create<ChatUIState>()(
               codexGoals: restCodexGoals,
               completedDurations: restDurations,
               streamingReplayContentBlocks: restReplayContentBlocks,
+              tableCheckedRows: restTableCheckedRows,
             }
           },
           undefined,

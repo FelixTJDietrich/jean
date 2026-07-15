@@ -440,6 +440,22 @@ export interface CreateCommitResponse {
   push_permission_denied: boolean
 }
 
+export type CommitJobStatus = 'running' | 'completed' | 'failed'
+
+export interface CommitJob {
+  id: string
+  worktreePath: string
+  status: CommitJobStatus
+  response?: CreateCommitResponse
+  error?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface StartCommitJobResponse {
+  job: CommitJob
+}
+
 /** Response from reverting the last local commit */
 export interface RevertCommitResponse {
   /** Hash of the reverted commit */
@@ -508,6 +524,20 @@ export interface ReviewResponse {
   approval_status: 'approved' | 'changes_requested' | 'needs_discussion'
 }
 
+export interface ReviewResultEntry {
+  backend: string
+  model: string
+  status?: ReviewJobStatus
+  result?: ReviewResponse
+  error?: string
+}
+
+export interface GroupedReviewResults {
+  reviews: ReviewResultEntry[]
+}
+
+export type StoredReviewResults = ReviewResponse | GroupedReviewResults
+
 export type ReviewJobStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface ReviewJob {
@@ -517,6 +547,8 @@ export interface ReviewJob {
   worktreePath: string
   sessionId?: string
   source: 'ai' | 'coderabbit-cli' | string
+  backend?: string
+  model?: string
   status: ReviewJobStatus
   findingCount?: number
   error?: string

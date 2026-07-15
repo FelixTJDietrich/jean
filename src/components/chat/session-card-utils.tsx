@@ -20,6 +20,7 @@ export type SessionStatus =
   | 'planning'
   | 'vibing'
   | 'yoloing'
+  | 'reviewing'
   | 'waiting'
   | 'review'
   | 'permission'
@@ -90,6 +91,11 @@ export const statusConfig: Record<
     label: 'Yoloing',
     indicatorStatus: 'running',
     indicatorVariant: 'destructive',
+  },
+  reviewing: {
+    label: 'Reviewing',
+    indicatorStatus: 'running',
+    indicatorVariant: 'loading',
   },
   waiting: {
     label: 'Waiting',
@@ -184,7 +190,7 @@ export function shouldShowCodeReviewLoadingPanel({
   hasReviewResults: boolean
 }): boolean {
   if (!session || !isSessionReviewing || hasReviewResults) return false
-  return session.name === 'Code Review' && session.messages.length === 0
+  return session.name.startsWith('Code Review') && session.messages.length === 0
 }
 
 export function computeSessionCardData(
@@ -375,7 +381,17 @@ export function computeSessionCardData(
     status = 'vibing'
   } else if (sessionSending && executionMode === 'yolo') {
     status = 'yoloing'
-  } else if (reviewingSessions[session.id] || session.review_results) {
+  } else if (
+    session.name.startsWith('Code Review') &&
+    session.is_reviewing &&
+    !session.review_results
+  ) {
+    status = 'reviewing'
+  } else if (
+    session.is_reviewing ||
+    reviewingSessions[session.id] ||
+    session.review_results
+  ) {
     status = 'review'
   } else if (
     !sessionSending &&
@@ -483,7 +499,7 @@ const STATUS_GROUP_ORDER: {
   {
     key: 'inProgress',
     title: 'In Progress',
-    statuses: ['planning', 'vibing', 'yoloing'],
+    statuses: ['planning', 'vibing', 'yoloing', 'reviewing'],
   },
   { key: 'review', title: 'Review', statuses: ['review', 'completed'] },
   { key: 'idle', title: 'Idle', statuses: ['idle'] },

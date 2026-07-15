@@ -209,6 +209,8 @@ pub struct AppPreferences {
     #[serde(default)]
     pub magic_prompt_models: MagicPromptModels, // Per-prompt model overrides
     #[serde(default)]
+    pub magic_code_review_configs: Vec<MagicCodeReviewConfig>, // Up to five backend/model/reasoning review runners
+    #[serde(default)]
     pub magic_prompt_providers: MagicPromptProviders, // Per-prompt provider overrides (None = use default_provider)
     #[serde(default)]
     pub magic_prompt_backends: MagicPromptBackends, // Per-prompt backend overrides (None = use project/global default_backend)
@@ -269,13 +271,19 @@ pub struct AppPreferences {
     #[serde(default = "default_chrome_enabled")]
     pub chrome_enabled: bool, // Enable browser automation via Chrome extension
     #[serde(default = "default_zoom_level")]
-    pub zoom_level: u32, // Zoom level percentage (50-200, default 100)
+    pub zoom_level: u32, // Desktop zoom level percentage (50-200, default 90)
+    #[serde(default = "default_zoom_level")]
+    pub mobile_zoom_level: u32, // Mobile zoom level percentage (50-200, default 90)
+    #[serde(default = "default_sync_zoom_levels")]
+    pub sync_zoom_levels: bool, // Keep desktop and mobile zoom levels in sync
     #[serde(default)]
     pub custom_cli_profiles: Vec<CustomCliProfile>, // Custom CLI settings profiles (e.g., OpenRouter, MiniMax)
     #[serde(default)]
     pub default_provider: Option<String>, // Default provider profile name (None = Anthropic direct)
     #[serde(default)]
     pub favorite_models: Vec<String>, // Favourited model keys ("backend:model") shown at top of picker
+    #[serde(default)]
+    pub favorite_package_scripts: Vec<String>, // Favourited package script keys ("project_id:script")
     #[serde(default)]
     pub fast_mode_models: Vec<String>, // Model keys ("backend:baseModel") with fast tier last enabled
     #[serde(default = "default_canvas_layout")]
@@ -699,6 +707,10 @@ fn default_zoom_level() -> u32 {
     90 // 90% = slightly smaller default
 }
 
+fn default_sync_zoom_levels() -> bool {
+    true
+}
+
 fn default_allow_web_tools_in_plan_mode() -> bool {
     true // Enabled by default
 }
@@ -977,6 +989,19 @@ mod tests {
     }
 
     #[test]
+    fn app_preferences_sync_zoom_levels_for_existing_prefs() {
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        let object = prefs_json.as_object_mut().unwrap();
+        object.remove("mobile_zoom_level");
+        object.remove("sync_zoom_levels");
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+
+        assert_eq!(prefs.mobile_zoom_level, 90);
+        assert!(prefs.sync_zoom_levels);
+    }
+
+    #[test]
     fn app_preferences_default_jean_mcp_intro_unseen_for_existing_prefs() {
         assert!(!AppPreferences::default().has_seen_jean_mcp_intro);
 
@@ -1058,6 +1083,14 @@ mod tests {
             }),
         );
         object.insert(
+            "magic_code_review_configs".to_string(),
+            json!([{
+                "backend": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "xhigh"
+            }]),
+        );
+        object.insert(
             "magic_prompt_modes".to_string(),
             json!({
                 "investigate_issue_mode": "yolo",
@@ -1085,6 +1118,12 @@ mod tests {
         assert_eq!(
             prefs.magic_prompt_efforts.review_comments_effort.as_deref(),
             Some("medium")
+        );
+        assert_eq!(
+            prefs.magic_code_review_configs[0]
+                .reasoning_effort
+                .as_deref(),
+            Some("xhigh")
         );
         assert_eq!(prefs.magic_prompt_modes.investigate_issue_mode, "yolo");
         assert_eq!(prefs.magic_prompt_modes.review_comments_mode, "plan");
@@ -1797,6 +1836,14 @@ pub struct MagicPromptModels {
     pub review_comments_model: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicCodeReviewConfig {
+    pub backend: String,
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
 fn default_sonnet_model() -> String {
     "sonnet".to_string()
 }
@@ -2127,6 +2174,7 @@ impl Default for AppPreferences {
             auto_recaps_enabled: default_auto_recaps_enabled(),
             magic_prompts: MagicPrompts::default(),
             magic_prompt_models: MagicPromptModels::default(),
+            magic_code_review_configs: Vec::new(),
             magic_prompt_providers: MagicPromptProviders::default(),
             magic_prompt_backends: MagicPromptBackends::default(),
             magic_prompt_efforts: MagicPromptReasoningEfforts::default(),
@@ -2159,9 +2207,12 @@ impl Default for AppPreferences {
             has_seen_jean_mcp_intro: false,
             chrome_enabled: default_chrome_enabled(),
             zoom_level: default_zoom_level(),
+            mobile_zoom_level: default_zoom_level(),
+            sync_zoom_levels: default_sync_zoom_levels(),
             custom_cli_profiles: Vec::new(),
             default_provider: None,
             favorite_models: Vec::new(),
+            favorite_package_scripts: Vec::new(),
             fast_mode_models: Vec::new(),
             canvas_layout: default_canvas_layout(),
             confirm_session_close: default_confirm_session_close(),
@@ -2220,9 +2271,8 @@ impl Default for AppPreferences {
 // UI State data structure
 // Contains ephemeral UI state that should be restored on app restart
 //
-// NOTE: Session-specific state (answered_questions, submitted_answers, fixed_findings,
-// pending_permission_denials, denied_message_context, reviewing_sessions) is now
-// stored in the Session files. See update_session_state command.
+// NOTE: Durable session-specific state is stored in Session files. Lightweight
+// unsent input drafts stay here so textareas survive full UI reloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UIState {
     /// Last opened worktree ID (to restore active worktree)
@@ -2261,6 +2311,10 @@ pub struct UIState {
     #[serde(default)]
     pub active_session_ids: std::collections::HashMap<String, String>,
 
+    /// Unsent chat textarea content per session
+    #[serde(default)]
+    pub input_drafts: std::collections::HashMap<String, String>,
+
     /// Whether the review sidebar is visible
     #[serde(default)]
     pub review_sidebar_visible: Option<bool>,
@@ -2285,7 +2339,7 @@ pub struct UIState {
     #[serde(default)]
     pub modal_terminal_height: Option<f64>,
 
-    /// Terminal instances persisted per worktree for web refresh reconnect
+    /// Terminal instances persisted per worktree for restoration after web refresh
     #[serde(default)]
     pub terminal_instances: std::collections::HashMap<String, Vec<TerminalInstancePersisted>>,
 
@@ -2428,6 +2482,7 @@ impl Default for UIState {
             left_sidebar_size: None,
             left_sidebar_visible: None,
             active_session_ids: std::collections::HashMap::new(),
+            input_drafts: std::collections::HashMap::new(),
             review_sidebar_visible: None,
             modal_terminal_open: std::collections::HashMap::new(),
             modal_terminal_dock_mode: None,
@@ -4601,8 +4656,11 @@ pub fn run() {
             projects::open_worktree_in_editor,
             projects::open_pull_request,
             projects::create_pr_with_ai_content,
+            projects::cancel_create_pr_with_ai_content,
             projects::merge_github_pr,
             projects::create_commit_with_ai,
+            projects::start_commit_job,
+            projects::get_commit_job,
             projects::revert_last_local_commit,
             projects::run_review_with_ai,
             projects::run_coderabbit_review,
@@ -4733,6 +4791,7 @@ pub fn run() {
             terminal::get_active_terminals,
             terminal::has_active_terminal,
             terminal::get_run_scripts,
+            terminal::get_package_scripts,
             terminal::get_ports,
             terminal::get_terminal_listening_ports,
             terminal::kill_all_terminals,

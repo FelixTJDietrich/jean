@@ -129,10 +129,12 @@ export function ApprovalModelSubmenu({
   )
   const cursorModelOptions = useMemo(
     () =>
-      availableCursorModels?.map(model => ({
-        value: `cursor/${model.id}`,
-        label: model.label || formatCursorModelLabel(model.id),
-      })) ?? CURSOR_MODEL_OPTIONS,
+      availableCursorModels?.length
+        ? availableCursorModels.map(model => ({
+            value: `cursor/${model.id}`,
+            label: model.label || formatCursorModelLabel(model.id),
+          }))
+        : CURSOR_MODEL_OPTIONS,
     [availableCursorModels]
   )
 

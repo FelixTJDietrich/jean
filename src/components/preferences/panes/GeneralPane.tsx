@@ -132,11 +132,11 @@ import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import {
   getCatalogDefaultModelOptions,
   getCatalogModelOptions,
+  getCatalogModelReasoning,
   useModelCatalog,
 } from '@/services/model-catalog'
 import type { AppPreferences } from '@/types/preferences'
 import {
-  thinkingLevelOptions,
   effortLevelOptions,
   codexReasoningOptions,
   backendOptions,
@@ -189,7 +189,10 @@ import {
 } from '@/services/git-status'
 import { getPathUpdateAction } from '@/lib/cli-update'
 import { SettingsSection } from '../SettingsSection'
-import { resolvePiDefaultModel } from '@/lib/session-defaults'
+import {
+  resolveDefaultModelForBackend,
+  resolvePiDefaultModel,
+} from '@/lib/session-defaults'
 
 interface CleanupResult {
   deleted_worktrees: number
@@ -234,6 +237,20 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const queryClient = useQueryClient()
   const { data: preferences } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
+  const codexReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    'codex',
+    preferences?.selected_codex_model ?? 'gpt-5.5'
+  )
+  const selectedCodexReasoningOptions =
+    codexReasoning?.type === 'effort'
+      ? codexReasoning.levels
+      : codexReasoningOptions
+  const claudeReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    'claude',
+    preferences?.selected_model ?? 'claude-opus-4-8[1m]'
+  )
   const patchPreferences = usePatchPreferences()
   const isWebAccessView = !isNativeApp()
   const webAccessSoundsEnabled = preferences?.web_access_sounds_enabled ?? true
@@ -1032,6 +1049,44 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedPiModelLabel =
     piModelOptions.find(option => option.value === selectedPiModel)?.label ??
     formatPiModelLabel(selectedPiModel)
+  const buildModel =
+    preferences?.build_model ??
+    resolveDefaultModelForBackend(
+      effectiveBuildBackend,
+      preferences,
+      piModelOptions
+    )
+  const yoloModel =
+    preferences?.yolo_model ??
+    resolveDefaultModelForBackend(
+      effectiveYoloBackend,
+      preferences,
+      piModelOptions
+    )
+  const buildReasoning =
+    getCatalogModelReasoning(modelCatalog, effectiveBuildBackend, buildModel) ??
+    (['codex', 'opencode', 'pi', 'grok'].includes(effectiveBuildBackend)
+      ? {
+          type: 'effort' as const,
+          default: 'high',
+          levels:
+            effectiveBuildBackend === 'codex'
+              ? codexReasoningOptions
+              : effortLevelOptions,
+        }
+      : null)
+  const yoloReasoning =
+    getCatalogModelReasoning(modelCatalog, effectiveYoloBackend, yoloModel) ??
+    (['codex', 'opencode', 'pi', 'grok'].includes(effectiveYoloBackend)
+      ? {
+          type: 'effort' as const,
+          default: 'high',
+          levels:
+            effectiveYoloBackend === 'codex'
+              ? codexReasoningOptions
+              : effortLevelOptions,
+        }
+      : null)
   const piAuthMessage = piAuth?.error
 
   const selectedCommandCodeModel =
@@ -2715,47 +2770,57 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </Select>
             </InlineField>
 
-            <InlineField
-              label="Thinking"
-              description="Claude Sonnet/traditional thinking level"
-            >
-              <Select
-                value={preferences?.thinking_level ?? 'off'}
-                onValueChange={handleThinkingLevelChange}
+            {claudeReasoning?.type === 'thinking' && (
+              <InlineField
+                label="Thinking"
+                description="Thinking level for the selected Claude model"
               >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {thinkingLevelOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
+                <Select
+                  value={preferences?.thinking_level ?? claudeReasoning.default}
+                  onValueChange={value =>
+                    handleThinkingLevelChange(value as ThinkingLevel)
+                  }
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {claudeReasoning.levels.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
 
-            <InlineField
-              label="Effort"
-              description="Claude Opus adaptive effort (requires CLI 2.1.32+)"
-            >
-              <Select
-                value={preferences?.default_effort_level ?? 'high'}
-                onValueChange={handleEffortLevelChange}
+            {claudeReasoning?.type === 'effort' && (
+              <InlineField
+                label="Effort"
+                description="Effort level for the selected Claude model"
               >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {effortLevelOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
+                <Select
+                  value={
+                    preferences?.default_effort_level ?? claudeReasoning.default
+                  }
+                  onValueChange={value =>
+                    handleEffortLevelChange(value as EffortLevel)
+                  }
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {claudeReasoning.levels.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
 
             <InlineField
               label="Chrome browser integration"
@@ -2815,7 +2880,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {codexReasoningOptions.map(option => (
+                  {selectedCodexReasoningOptions.map(option => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
@@ -3614,49 +3679,50 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     </Select>
                   )}
                 </div>
-                <div>
-                  <Select
-                    value={preferences?.build_thinking_level ?? 'default'}
-                    onValueChange={handleBuildThinkingLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">Default thinking</SelectItem>
-                      {thinkingLevelOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                {buildReasoning?.type === 'thinking' && (
+                  <div>
+                    <Select
+                      value={preferences?.build_thinking_level ?? 'default'}
+                      onValueChange={handleBuildThinkingLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default thinking
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Select
-                    value={preferences?.build_effort_level ?? 'default'}
-                    onValueChange={handleBuildEffortLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">
-                        {effectiveBuildBackend === 'codex'
-                          ? 'Default reasoning'
-                          : 'Default effort'}
-                      </SelectItem>
-                      {(effectiveBuildBackend === 'codex'
-                        ? codexReasoningOptions
-                        : effortLevelOptions
-                      ).map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                        {buildReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {buildReasoning?.type === 'effort' && (
+                  <div>
+                    <Select
+                      value={preferences?.build_effort_level ?? 'default'}
+                      onValueChange={handleBuildEffortLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default reasoning
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                        {buildReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
             </InlineField>
 
@@ -3858,49 +3924,50 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     </Select>
                   )}
                 </div>
-                <div>
-                  <Select
-                    value={preferences?.yolo_thinking_level ?? 'default'}
-                    onValueChange={handleYoloThinkingLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">Default thinking</SelectItem>
-                      {thinkingLevelOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                {yoloReasoning?.type === 'thinking' && (
+                  <div>
+                    <Select
+                      value={preferences?.yolo_thinking_level ?? 'default'}
+                      onValueChange={handleYoloThinkingLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default thinking
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Select
-                    value={preferences?.yolo_effort_level ?? 'default'}
-                    onValueChange={handleYoloEffortLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">
-                        {effectiveYoloBackend === 'codex'
-                          ? 'Default reasoning'
-                          : 'Default effort'}
-                      </SelectItem>
-                      {(effectiveYoloBackend === 'codex'
-                        ? codexReasoningOptions
-                        : effortLevelOptions
-                      ).map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                        {yoloReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {yoloReasoning?.type === 'effort' && (
+                  <div>
+                    <Select
+                      value={preferences?.yolo_effort_level ?? 'default'}
+                      onValueChange={handleYoloEffortLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default reasoning
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                        {yoloReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
             </InlineField>
 

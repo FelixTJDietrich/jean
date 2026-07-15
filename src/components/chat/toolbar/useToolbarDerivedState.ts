@@ -15,6 +15,7 @@ import { sortModelOptionsByRawModel } from '@/components/chat/toolbar/toolbar-ut
 import {
   getCatalogModelFastInfo,
   getCatalogModelOptions,
+  getCatalogModelReasoning,
   useModelCatalog,
 } from '@/services/model-catalog'
 import { resolvePiDefaultModel } from '@/lib/session-defaults'
@@ -32,6 +33,19 @@ interface UseToolbarDerivedStateArgs {
   installedBackends?: CliBackend[]
   availableMcpServers?: { name: string; backend?: string; disabled?: boolean }[]
   enabledMcpServers?: string[]
+}
+
+function mergeCatalogOptions(
+  catalog: Parameters<typeof getCatalogModelOptions>[0],
+  backend: CliBackend,
+  localOptions: { value: string; label: string }[]
+) {
+  const catalogOptions = getCatalogModelOptions(catalog, backend)
+  const catalogIds = new Set(catalogOptions.map(option => option.value))
+  return [
+    ...catalogOptions,
+    ...localOptions.filter(option => !catalogIds.has(option.value)),
+  ]
 }
 
 export interface BackendModelSection {
@@ -178,17 +192,32 @@ export function useToolbarDerivedState({
     getCatalogModelOptions(modelCatalog, 'codex')
   )
   const resolvedOpencodeModelOptions = sortModelOptionsByRawModel(
-    opencodeModelOptions ?? OPENCODE_MODEL_OPTIONS
+    mergeCatalogOptions(
+      modelCatalog,
+      'opencode',
+      opencodeModelOptions ?? OPENCODE_MODEL_OPTIONS
+    )
   )
   const resolvedCursorModelOptions = sortModelOptionsByRawModel(
-    cursorModelOptions ?? CURSOR_MODEL_OPTIONS
+    mergeCatalogOptions(
+      modelCatalog,
+      'cursor',
+      cursorModelOptions ?? CURSOR_MODEL_OPTIONS
+    )
   )
   const resolvedPiModelOptions = sortModelOptionsByRawModel(
-    piModelOptions ?? PI_MODEL_OPTIONS
+    mergeCatalogOptions(modelCatalog, 'pi', piModelOptions ?? PI_MODEL_OPTIONS)
   )
-  const resolvedCommandCodeModelOptions =
+  const resolvedCommandCodeModelOptions = mergeCatalogOptions(
+    modelCatalog,
+    'commandcode',
     commandcodeModelOptions ?? COMMANDCODE_MODEL_OPTIONS
-  const resolvedGrokModelOptions = grokModelOptions ?? GROK_MODEL_OPTIONS
+  )
+  const resolvedGrokModelOptions = mergeCatalogOptions(
+    modelCatalog,
+    'grok',
+    grokModelOptions ?? GROK_MODEL_OPTIONS
+  )
 
   const backendModelSections = useMemo(
     () =>
@@ -256,6 +285,11 @@ export function useToolbarDerivedState({
   const selectedModelLabel =
     filteredModelOptions.find(o => o.value === labelLookupKey)?.label ??
     labelLookupKey
+  const selectedModelReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    selectedBackend,
+    effectiveSelectedModel
+  )
 
   return {
     isCodex,
@@ -274,5 +308,6 @@ export function useToolbarDerivedState({
     grokModelOptions: resolvedGrokModelOptions,
     isGrok,
     selectedModelLabel,
+    selectedModelReasoning,
   }
 }

@@ -99,6 +99,8 @@ export const ChatToolbar = memo(function ChatToolbar({
   activeSessionId,
   projectId,
   runScripts,
+  packageScripts,
+  favoritePackageScripts,
   loadedIssueContexts,
   loadedPRContexts,
   loadedSecurityContexts,
@@ -133,6 +135,8 @@ export const ChatToolbar = memo(function ChatToolbar({
   onToggleMcpServer,
   onOpenProjectSettings,
   onRunCommand,
+  onRunPackageScript,
+  onToggleFavoritePackageScript,
 }: ChatToolbarProps) {
   const {
     statuses: mcpStatuses,
@@ -190,18 +194,42 @@ export const ChatToolbar = memo(function ChatToolbar({
       is_default: model.is_default,
     })) ?? PI_MODEL_OPTIONS
 
-  const { isCodex, activeMcpCount, backendModelSections, selectedModelLabel } =
-    useToolbarDerivedState({
-      selectedBackend,
-      selectedProvider,
-      selectedModel,
-      opencodeModelOptions,
-      piModelOptions,
-      customCliProfiles,
-      installedBackends,
-      availableMcpServers,
-      enabledMcpServers,
-    })
+  const {
+    isCodex,
+    activeMcpCount,
+    backendModelSections,
+    selectedModelLabel,
+    selectedModelReasoning,
+  } = useToolbarDerivedState({
+    selectedBackend,
+    selectedProvider,
+    selectedModel,
+    opencodeModelOptions,
+    piModelOptions,
+    customCliProfiles,
+    installedBackends,
+    availableMcpServers,
+    enabledMcpServers,
+  })
+  useEffect(() => {
+    if (!selectedModelReasoning) return
+    const values = new Set(
+      selectedModelReasoning.levels.map(level => level.value)
+    )
+    if (selectedModelReasoning.type === 'effort') {
+      if (!values.has(selectedEffortLevel)) {
+        onEffortLevelChange(selectedModelReasoning.default as EffortLevel)
+      }
+    } else if (!values.has(selectedThinkingLevel)) {
+      onThinkingLevelChange(selectedModelReasoning.default as ThinkingLevel)
+    }
+  }, [
+    onEffortLevelChange,
+    onThinkingLevelChange,
+    selectedEffortLevel,
+    selectedModelReasoning,
+    selectedThinkingLevel,
+  ])
   const availableExecutionModes = getSupportedExecutionModes(selectedBackend)
   const hasMultipleBackendModelChoices =
     backendModelSections.reduce(
@@ -424,6 +452,7 @@ export const ChatToolbar = memo(function ChatToolbar({
             hideThinkingLevel={hideThinkingLevel}
             useAdaptiveThinking={useAdaptiveThinking}
             isCodex={isCodex}
+            modelReasoning={selectedModelReasoning}
             customCliProfiles={customCliProfiles}
             onOpenBackendModelPicker={() =>
               setMobileBackendModelPickerOpen(true)
@@ -454,6 +483,10 @@ export const ChatToolbar = memo(function ChatToolbar({
             onAttach={onAttach}
             runScripts={runScripts}
             onRunCommand={onRunCommand}
+            packageScripts={packageScripts}
+            favoritePackageScripts={favoritePackageScripts}
+            onRunPackageScript={onRunPackageScript}
+            onToggleFavoritePackageScript={onToggleFavoritePackageScript}
           />
 
           {isMobile && (
@@ -497,6 +530,7 @@ export const ChatToolbar = memo(function ChatToolbar({
             providerLocked={providerLocked}
             customCliProfiles={customCliProfiles}
             isCodex={isCodex}
+            modelReasoning={selectedModelReasoning}
             prUrl={prUrl}
             prNumber={prNumber}
             displayStatus={displayStatus}

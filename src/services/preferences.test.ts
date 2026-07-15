@@ -18,9 +18,16 @@ import { AppearancePane } from '@/components/preferences/panes/AppearancePane'
 import type { AppPreferences } from '@/types/preferences'
 import {
   FONT_SIZE_DEFAULT,
+  ZOOM_LEVEL_DEFAULT,
   codexDefaultModelOptions,
   CODEX_DEFAULT_MAGIC_PROMPT_MODELS,
   CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_GLOBAL_SYSTEM_PROMPT,
   DEFAULT_MAGIC_PROMPTS,
   DEFAULT_MAGIC_PROMPT_MODELS,
@@ -95,6 +102,12 @@ describe('model option helpers', () => {
     expect(defaultPreferences.compact_chat_view_enabled).toBe(true)
   })
 
+  it('syncs desktop and mobile zoom by default', () => {
+    expect(defaultPreferences.zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
+    expect(defaultPreferences.mobile_zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
+    expect(defaultPreferences.sync_zoom_levels).toBe(true)
+  })
+
   it('offers Claude 1M variants alongside standard context models', () => {
     expect(modelOptions.map(option => option.value)).toEqual([
       'claude-fable-5',
@@ -119,6 +132,21 @@ describe('model option helpers', () => {
     expect(normalizeClaudeModel('claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
   })
 
+  it('offers GPT 5.6 preview variants in Codex selectors', () => {
+    const values = codexDefaultModelOptions.map(option => option.value)
+    expect(values.slice(0, 3)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ])
+    expect(values).not.toContain('gpt-5.6')
+    expect(normalizeCodexModel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
+    expect(normalizeCodexModel('gpt-5.6-terra')).toBe('gpt-5.6-terra')
+    expect(normalizeCodexModel('gpt-5.6-luna')).toBe('gpt-5.6-luna')
+    expect(normalizeCodexModel('gpt-5.6')).toBe('gpt-5.6-sol')
+    expect(normalizeCodexModel('gpt-5-6-sol')).toBe('gpt-5.6-sol')
+  })
+
   it('offers Codex fast modes for default selectors', () => {
     const values = codexDefaultModelOptions.map(option => option.value)
     expect(values).toContain('gpt-5.6-sol-fast')
@@ -129,6 +157,8 @@ describe('model option helpers', () => {
     expect(values).toContain('gpt-5.4-mini-fast')
     expect(normalizeCodexModel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
     expect(normalizeCodexModel('gpt-5.6-sol-fast')).toBe('gpt-5.6-sol-fast')
+    expect(normalizeCodexModel('gpt-5.6-fast')).toBe('gpt-5.6-sol-fast')
+    expect(normalizeCodexModel('gpt-5-6-sol-fast')).toBe('gpt-5.6-sol-fast')
     expect(normalizeCodexModel('gpt-5.5-fast')).toBe('gpt-5.5-fast')
   })
 
@@ -139,6 +169,27 @@ describe('model option helpers', () => {
     expect(
       new Set(Object.values(CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
     ).toEqual(new Set(['gpt-5.5-fast']))
+  })
+
+  it('provides standard and fast GPT 5.6 magic presets for every variant', () => {
+    expect(
+      new Set(Object.values(CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-sol']))
+    expect(
+      new Set(Object.values(CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-sol-fast']))
+    expect(
+      new Set(Object.values(CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-luna']))
+    expect(
+      new Set(Object.values(CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-luna-fast']))
+    expect(
+      new Set(Object.values(CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-terra']))
+    expect(
+      new Set(Object.values(CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-terra-fast']))
   })
 
   it('documents Codex questions-tool answers must re-show the plan tool', () => {
@@ -343,7 +394,7 @@ describe('preferences service', () => {
       expect(result.current.data?.jean_mcp_enabled).toBe(true)
     })
 
-    it('returns defaults on backend error', async () => {
+    it('reports backend errors instead of overwriting cached preferences', async () => {
       const { invoke } = await import('@/lib/transport')
       vi.mocked(invoke).mockRejectedValueOnce(new Error('File not found'))
 
@@ -351,10 +402,9 @@ describe('preferences service', () => {
         wrapper: createWrapper(queryClient),
       })
 
-      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      await waitFor(() => expect(result.current.isError).toBe(true))
 
-      expect(result.current.data?.theme).toBe('system')
-      expect(result.current.data?.jean_mcp_enabled).toBe(true)
+      expect(result.current.data).toBeUndefined()
     })
 
     it('migrates old keybindings to new defaults', async () => {
@@ -1170,6 +1220,66 @@ describe('preferences service', () => {
 
       expect(toast.error).toHaveBeenCalledWith('Failed to save preferences', {
         description: 'Save failed',
+      })
+    })
+  })
+
+  describe('AppearancePane scaling', () => {
+    it('syncs desktop and mobile scaling by default', async () => {
+      const { invoke } = await import('@/lib/transport')
+      let storedPreferences = { ...defaultPreferences }
+      vi.mocked(invoke).mockImplementation(async (command, args) => {
+        if (command === 'load_preferences') return storedPreferences
+        if (command === 'patch_preferences') {
+          storedPreferences = {
+            ...storedPreferences,
+            ...(args as { patch: Partial<AppPreferences> }).patch,
+          }
+          return undefined
+        }
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const user = userEvent.setup()
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const syncCheckbox = await screen.findByRole('checkbox', {
+        name: 'Sync desktop and mobile scaling',
+      })
+      expect(syncCheckbox).toBeChecked()
+      expect(screen.getAllByRole('slider').at(-1)).toHaveAttribute(
+        'data-disabled'
+      )
+
+      await user.click(syncCheckbox)
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: {
+            sync_zoom_levels: false,
+            mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
+          },
+        })
+        expect(syncCheckbox).not.toBeChecked()
+        expect(screen.getAllByRole('slider').at(-1)).not.toHaveAttribute(
+          'data-disabled'
+        )
+      })
+
+      const mobileSlider = screen.getAllByRole('slider').at(-1)
+      mobileSlider?.focus()
+      await user.keyboard('{ArrowRight}')
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: { mobile_zoom_level: 100 },
+        })
       })
     })
   })

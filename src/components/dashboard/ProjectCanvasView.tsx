@@ -92,6 +92,7 @@ import {
   useRemoveProject,
   useReorderWorktrees,
   projectsQueryKeys,
+  type PackageScript,
 } from '@/services/projects'
 import { chatQueryKeys, cancelChatMessage } from '@/services/chat'
 import {
@@ -106,6 +107,7 @@ import { useGitStatus } from '@/services/git-status'
 import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
+import { useTerminalStore } from '@/store/terminal-store'
 import { isBaseSession, type Worktree } from '@/types/projects'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import type { LabelData, Session, WorktreeSessions } from '@/types/chat'
@@ -138,6 +140,7 @@ import {
 } from '@/components/chat/session-card-utils'
 import { WorktreeSetupCard } from '@/components/chat/WorktreeSetupCard'
 import { OpenInButton } from '@/components/open-in/OpenInButton'
+import { ScriptsButton } from '@/components/open-in/ScriptsButton'
 import { useCanvasStoreState } from '@/components/chat/hooks/useCanvasStoreState'
 import {
   type WorktreeSortMode,
@@ -161,6 +164,8 @@ import { usePreferences } from '@/services/preferences'
 import { DEFAULT_KEYBINDINGS, formatShortcutDisplay } from '@/types/keybindings'
 import { CloseWorktreeDialog } from '@/components/chat/CloseWorktreeDialog'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { hasBackendTransport } from '@/lib/environment'
+import { consumeWebReloadState } from '@/lib/web-reload-state'
 import {
   shouldDisableWorktreeTextSelection,
   shouldShowWorktreeLabelContextMenu,
@@ -993,7 +998,7 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     queries: readyWorktrees.map(wt => ({
       queryKey: [...chatQueryKeys.sessions(wt.id), 'with-counts'],
       queryFn: async (): Promise<WorktreeSessions> => {
-        if (!isTauri() || !wt.id || !wt.path) {
+        if (!hasBackendTransport() || !wt.id || !wt.path) {
           return {
             worktree_id: wt.id,
             sessions: [],
@@ -1091,6 +1096,28 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
       setSelectedWorktreeModal({ worktreeId, worktreePath })
     },
     [markWorktreeLastUsed]
+  )
+
+  const handlePackageScript = useCallback(
+    async (script: PackageScript) => {
+      let baseWorktree = worktrees.find(isBaseSession)
+      if (!baseWorktree) {
+        try {
+          baseWorktree = await createBaseSession.mutateAsync(projectId)
+        } catch {
+          return
+        }
+      }
+
+      useTerminalStore
+        .getState()
+        .addTerminal(baseWorktree.id, script.command, script.name, {
+          commandArgs: script.args,
+        })
+      openWorktreeModal(baseWorktree.id, baseWorktree.path)
+      useTerminalStore.getState().setModalTerminalOpen(baseWorktree.id, true)
+    },
+    [createBaseSession, openWorktreeModal, projectId, worktrees]
   )
 
   const handleCanvasResolveConflicts = useCallback(
@@ -1508,6 +1535,22 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     worktreeId: string
     worktreePath: string
   } | null>(null)
+
+  useEffect(() => {
+    const reloadState = consumeWebReloadState(projectId)
+    if (!reloadState) return
+
+    useChatStore
+      .getState()
+      .setActiveSession(
+        reloadState.modalWorktreeId,
+        reloadState.activeSessionId
+      )
+    setSelectedWorktreeModal({
+      worktreeId: reloadState.modalWorktreeId,
+      worktreePath: reloadState.modalWorktreePath,
+    })
+  }, [projectId])
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Track highlighted card to survive reordering
   const highlightedCardRef = useRef<{
@@ -2907,17 +2950,14 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="w-64">
                     <DropdownMenuItem
-                      onSelect={() =>
-                        useProjectsStore
-                          .getState()
-                          .openProjectSettings(projectId)
-                      }
+                      onSelect={() => {
+                        useProjectsStore.getState().selectProject(projectId)
+                        useUIStore.getState().setNewWorktreeModalOpen(true)
+                      }}
                     >
-                      <Settings className="h-4 w-4" />
-                      Project Settings
+                      <Plus className="h-4 w-4" />
+                      New Worktree
                     </DropdownMenuItem>
-
-                    <DropdownMenuSeparator />
 
                     <DropdownMenuItem
                       onSelect={() => createBaseSession.mutate(projectId)}
@@ -2929,13 +2969,14 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                     </DropdownMenuItem>
 
                     <DropdownMenuItem
-                      onSelect={() => {
-                        useProjectsStore.getState().selectProject(projectId)
-                        useUIStore.getState().setNewWorktreeModalOpen(true)
-                      }}
+                      onSelect={() =>
+                        useProjectsStore
+                          .getState()
+                          .openProjectSettings(projectId)
+                      }
                     >
-                      <Plus className="h-4 w-4" />
-                      New Worktree
+                      <Settings className="h-4 w-4" />
+                      Project Settings
                     </DropdownMenuItem>
 
                     {mobileGitHubEnabled && (
@@ -3216,6 +3257,11 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
             {!isMobile && (
               <div className="flex items-center gap-2 shrink-0 justify-end col-start-3">
                 <OpenInButton worktreePath={project.path} />
+                <ScriptsButton
+                  projectId={project.id}
+                  worktreePath={project.path}
+                  onRun={handlePackageScript}
+                />
               </div>
             )}
           </div>

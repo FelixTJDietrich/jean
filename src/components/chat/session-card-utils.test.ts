@@ -3,6 +3,7 @@ import {
   computeSessionCardData,
   getEffectiveSessionWaiting,
   shouldShowCodeReviewLoadingPanel,
+  statusConfig,
   type ChatStoreState,
 } from './session-card-utils'
 import type { ContentBlock, Session } from '@/types/chat'
@@ -156,6 +157,21 @@ describe('computeSessionCardData', () => {
 
     expect(card.isWaiting).toBe(false)
     expect(card.status).toBe('review')
+  })
+
+  it('shows an unopened code review session as loading from persisted state', () => {
+    const session = createBaseSession({
+      name: 'Code Review · Codex · gpt-5.6-sol',
+      is_reviewing: true,
+    })
+
+    const card = computeSessionCardData(session, createBaseStoreState())
+
+    expect(card.status).toBe('reviewing')
+    expect(statusConfig[card.status]).toMatchObject({
+      indicatorStatus: 'running',
+      indicatorVariant: 'loading',
+    })
   })
 
   it('ignores stale Zustand waiting flag when remote run completed normally', () => {

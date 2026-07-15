@@ -1,4 +1,4 @@
-import type { ReviewResponse } from '@/types/projects'
+import type { StoredReviewResults } from '@/types/projects'
 
 /**
  * Role of a chat message sender
@@ -13,7 +13,12 @@ export type MessageRole = 'user' | 'assistant'
  * - megathink: 10K tokens budget
  * - ultrathink: 32K tokens budget (default)
  */
-export type ThinkingLevel = 'off' | 'think' | 'megathink' | 'ultrathink'
+export type ThinkingLevel =
+  | 'off'
+  | 'think'
+  | 'megathink'
+  | 'ultrathink'
+  | (string & {})
 
 /**
  * Effort level for Opus adaptive thinking
@@ -24,6 +29,7 @@ export type ThinkingLevel = 'off' | 'think' | 'megathink' | 'ultrathink'
  * - high: Deep reasoning (default), almost always thinks
  * - xhigh: Extra high effort (Opus 4.8 recommended default for coding/agentic)
  * - max: No constraints on thinking depth
+ * - ultra: Codex native maximum reasoning with automatic task delegation
  * - ultracode: Claude Code ultracode mode (xhigh + Dynamic Workflows)
  */
 export type EffortLevel =
@@ -34,7 +40,9 @@ export type EffortLevel =
   | 'high'
   | 'xhigh'
   | 'max'
+  | 'ultra'
   | 'ultracode'
+  | (string & {})
 
 /**
  * Backend for a chat session (Claude CLI, Codex CLI, OpenCode, Cursor, PI, or Command Code)
@@ -266,7 +274,7 @@ export interface Session {
   /** Original message context for re-send after permission approval */
   denied_message_context?: DeniedMessageContext
   /** AI code review results for this session */
-  review_results?: ReviewResponse
+  review_results?: StoredReviewResults
   /** Whether this session is marked for review */
   is_reviewing?: boolean
   /** Whether this session is waiting for user input (AskUserQuestion, ExitPlanMode) */
@@ -821,7 +829,6 @@ export function buildCodexUserInputAnswerMap(
     })
   )
 }
-
 
 export function getAskUserQuestions(input: unknown): Question[] | null {
   if (typeof input !== 'object' || input === null || !('questions' in input)) {
