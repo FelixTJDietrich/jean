@@ -44,6 +44,7 @@ import { useIsMobile } from '@/hooks/use-mobile'
 import { invoke } from '@/lib/transport'
 import { useWsConnectionStatus } from '@/lib/transport'
 import { isNativeApp } from '@/lib/environment'
+import { isMobileWebSafeMode } from '@/lib/mobile-web-safe-mode'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { copyToClipboard } from '@/lib/clipboard'
 import { useUIStore } from '@/store/ui-store'
@@ -177,6 +178,7 @@ const serverLg = () => true
 export function FloatingDock() {
   const chatToolbarMounted = useUIStore(state => state.chatToolbarMounted)
   const isMobile = useIsMobile()
+  const mobileWebSafeMode = isMobileWebSafeMode()
   const isLg = useSyncExternalStore(subscribeLg, snapshotLg, serverLg)
   const { data: preferences } = usePreferences()
   const queryClient = useQueryClient()
@@ -229,12 +231,13 @@ export function FloatingDock() {
     | 'pi'
     | 'commandcode'
 
-  const codexStatus = useCodexCliStatus()
+  const codexStatus = useCodexCliStatus({ enabled: !mobileWebSafeMode })
   const codexAuth = useCodexCliAuth({
-    enabled: !!codexStatus.data?.installed,
+    enabled: !mobileWebSafeMode && !!codexStatus.data?.installed,
   })
   const codexUsage = useCodexUsage({
     enabled:
+      !mobileWebSafeMode &&
       !!codexStatus.data?.installed &&
       !!codexAuth.data?.authenticated &&
       shouldFetchUsage,
