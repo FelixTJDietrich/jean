@@ -951,73 +951,75 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
-  // If stored default_backend isn't installed, fall back to the first installed one
+  // Default backend: only installed AND authenticated backends are selectable.
   const stored = preferences?.default_backend ?? 'claude'
-  const claudeInstalled = cliStatus?.installed
-  const codexInstalled = codexStatus?.installed
-  const opencodeInstalled = opencodeStatus?.installed
-  const cursorInstalled = cursorStatus?.installed
-  const piInstalled = piStatus?.installed
-  const commandcodeInstalled = commandcodeStatus?.installed
-  const grokInstalled = grokStatus?.installed
-  const kimiInstalled = kimiStatus?.installed
+  const claudeUsable = !!cliStatus?.installed && !!claudeAuth?.authenticated
+  const codexUsable = !!codexStatus?.installed && !!codexAuth?.authenticated
+  const opencodeUsable =
+    !!opencodeStatus?.installed && !!opencodeAuth?.authenticated
+  const cursorUsable = !!cursorStatus?.installed && !!cursorAuth?.authenticated
+  const piUsable = !!piStatus?.installed && !!piAuth?.authenticated
+  const commandcodeUsable =
+    !!commandcodeStatus?.installed && !!commandcodeAuth?.authenticated
+  const grokUsable = !!grokStatus?.installed && !!grokAuth?.authenticated
+  const kimiUsable = !!kimiStatus?.installed && !!kimiAuth?.authenticated
   const installedBackendOptions = useMemo(
     () =>
       backendOptions.filter(option =>
         option.value === 'claude'
-          ? cliStatus?.installed
+          ? claudeUsable
           : option.value === 'codex'
-            ? codexStatus?.installed
+            ? codexUsable
             : option.value === 'opencode'
-              ? opencodeStatus?.installed
+              ? opencodeUsable
               : option.value === 'cursor'
-                ? cursorStatus?.installed
+                ? cursorUsable
                 : option.value === 'pi'
-                  ? piStatus?.installed
+                  ? piUsable
                   : option.value === 'commandcode'
-                    ? commandcodeStatus?.installed
+                    ? commandcodeUsable
                     : option.value === 'grok'
-                      ? grokStatus?.installed
+                      ? grokUsable
                       : option.value === 'kimi'
-                        ? kimiStatus?.installed
+                        ? kimiUsable
                         : false
       ),
     [
-      cliStatus?.installed,
-      codexStatus?.installed,
-      opencodeStatus?.installed,
-      cursorStatus?.installed,
-      piStatus?.installed,
-      commandcodeStatus?.installed,
-      grokStatus?.installed,
-      kimiStatus?.installed,
+      claudeUsable,
+      codexUsable,
+      opencodeUsable,
+      cursorUsable,
+      piUsable,
+      commandcodeUsable,
+      grokUsable,
+      kimiUsable,
     ]
   )
 
   const effectiveBackend = useMemo(() => {
-    const installed: Record<string, boolean | undefined> = {
-      claude: claudeInstalled,
-      codex: codexInstalled,
-      opencode: opencodeInstalled,
-      cursor: cursorInstalled,
-      pi: piInstalled,
-      commandcode: commandcodeInstalled,
-      grok: grokInstalled,
-      kimi: kimiInstalled,
+    const usable: Record<string, boolean | undefined> = {
+      claude: claudeUsable,
+      codex: codexUsable,
+      opencode: opencodeUsable,
+      cursor: cursorUsable,
+      pi: piUsable,
+      commandcode: commandcodeUsable,
+      grok: grokUsable,
+      kimi: kimiUsable,
     }
-    if (installed[stored]) return stored
+    if (usable[stored]) return stored
     const first = installedBackendOptions[0]
     return first?.value ?? stored
   }, [
     stored,
-    claudeInstalled,
-    codexInstalled,
-    opencodeInstalled,
-    cursorInstalled,
-    piInstalled,
-    commandcodeInstalled,
-    grokInstalled,
-    kimiInstalled,
+    claudeUsable,
+    codexUsable,
+    opencodeUsable,
+    cursorUsable,
+    piUsable,
+    commandcodeUsable,
+    grokUsable,
+    kimiUsable,
     installedBackendOptions,
   ])
 

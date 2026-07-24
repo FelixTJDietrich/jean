@@ -30,10 +30,12 @@ import type {
 import type { QueryClient } from '@tanstack/react-query'
 import { GIT_ALLOWED_TOOLS } from './useMessageHandlers'
 import {
+  handleCliAuthError,
   isLoginSlashCommand,
   openBackendLoginModal,
 } from '@/lib/cli-auth'
 import { isBackendAutoSteerEnabled } from '@/lib/backend-auto-steer'
+import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 
 interface UseMessageSendingParams {
   activeSessionId: string | null | undefined
@@ -109,6 +111,10 @@ export function useMessageSending({
   clearInputDraft,
   clearChatInputState,
 }: UseMessageSendingParams) {
+  // Installed + authenticated backends only — block send when not logged in.
+  const { installedBackends, isLoading: backendsLoading } =
+    useInstalledBackends()
+
   // Helper to resolve custom CLI profile name for the active provider.
   // Claude: custom_cli_profiles; Codex: custom_codex_providers (same wire field).
   const resolveCustomProfile = useCallback(
@@ -341,6 +347,20 @@ export function useMessageSending({
             )
           }
         })
+        return
+      }
+
+      // Block using a model for a backend the user isn't logged into.
+      // Wait for status/auth to resolve so we don't flash false blocks on load.
+      if (
+        !backendsLoading &&
+        !installedBackends.includes(selectedBackendRef.current)
+      ) {
+        const unauthenticatedBackend = selectedBackendRef.current
+        handleCliAuthError(
+          `${unauthenticatedBackend} is not authenticated`,
+          unauthenticatedBackend
+        )
         return
       }
 
@@ -595,8 +615,10 @@ export function useMessageSending({
       activeSessionId,
       activeWorktreeId,
       activeWorktreePath,
+      backendsLoading,
       clearInputDraft,
       clearChatInputState,
+      installedBackends,
       markAtBottom,
       sendMessageNow,
       sessionsData,

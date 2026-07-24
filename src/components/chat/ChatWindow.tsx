@@ -781,13 +781,14 @@ export function ChatWindow({
   const modelImpliedBackend: CliBackend | null = getModelImpliedBackend(
     session?.selected_model
   )
-  // Clamp to installed backends — prevents showing "Claude" when only Codex is installed
+  // Clamp to installed+authenticated backends — no model for backends the user
+  // isn't logged into (and no uninstalled ones either).
+  const preferredBackend: CliBackend = modelImpliedBackend ?? resolvedBackend
   const selectedBackend: CliBackend =
-    modelImpliedBackend ??
-    (installedBackends.length > 0 &&
-    !installedBackends.includes(resolvedBackend)
+    installedBackends.length > 0 &&
+    !installedBackends.includes(preferredBackend)
       ? (installedBackends[0] as CliBackend)
-      : resolvedBackend)
+      : preferredBackend
   const isCodexBackend = selectedBackend === 'codex'
   const isGrokBackend = selectedBackend === 'grok'
   const isCursorBackend = selectedBackend === 'cursor'
@@ -1984,10 +1985,21 @@ export function ChatWindow({
     [handlePlanDialogWorktreeApprove]
   )
 
-  // Opens a new session and sends the review fix message there
+  // Opens new session(s) and sends review fix message(s) there.
+  // Pass a string for one combined fix, or string[] to send each finding separately.
   const handleReviewFix = useCallback(
-    async (message: string, executionMode: 'plan' | 'yolo') => {
+    async (
+      messageOrMessages: string | string[],
+      executionMode: 'plan' | 'yolo'
+    ) => {
       if (!activeSessionId || !activeWorktreeId || !activeWorktreePath) return
+
+      const messages = (
+        Array.isArray(messageOrMessages)
+          ? messageOrMessages
+          : [messageOrMessages]
+      ).filter(message => message.trim().length > 0)
+      if (messages.length === 0) return
 
       // Mark the current session as no longer reviewing
       const store = useChatStore.getState()
@@ -1998,43 +2010,48 @@ export function ChatWindow({
         'code_review_backend',
         preferences?.default_backend
       )
-
-      // Create new session
-      let newSession: Session
-      try {
-        newSession = await createSession.mutateAsync({
-          worktreeId: activeWorktreeId,
-          worktreePath: activeWorktreePath,
-          backend: backend ?? undefined,
-        })
-      } catch (err) {
-        toast.error(`Failed to create session: ${err}`)
-        return
-      }
-
       const model =
         preferences?.magic_prompt_models?.code_review_model ??
         selectedModelRef.current
-      store.setExecutionMode(newSession.id, executionMode)
-      store.setLastSentMessage(newSession.id, message)
-      store.setError(newSession.id, null)
-      store.addSendingSession(newSession.id)
-      store.setSelectedModel(newSession.id, model)
-      if (backend) {
-        store.setSelectedBackend(newSession.id, backend)
-      }
-      store.setExecutingMode(newSession.id, executionMode)
 
-      sendMessage.mutate({
-        sessionId: newSession.id,
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        message,
-        model,
-        backend: backend ?? undefined,
-        executionMode,
-        thinkingLevel: selectedThinkingLevelRef.current,
-      })
+      // Create one session per message. Use mutateAsync in a loop so each
+      // session is fully created before the next (TanStack Query per-call
+      // onSuccess is unreliable across consecutive mutate() calls).
+      for (const message of messages) {
+        let newSession: Session
+        try {
+          newSession = await createSession.mutateAsync({
+            worktreeId: activeWorktreeId,
+            worktreePath: activeWorktreePath,
+            backend: backend ?? undefined,
+          })
+        } catch (err) {
+          toast.error(`Failed to create session: ${err}`)
+          continue
+        }
+
+        const nextStore = useChatStore.getState()
+        nextStore.setExecutionMode(newSession.id, executionMode)
+        nextStore.setLastSentMessage(newSession.id, message)
+        nextStore.setError(newSession.id, null)
+        nextStore.addSendingSession(newSession.id)
+        nextStore.setSelectedModel(newSession.id, model)
+        if (backend) {
+          nextStore.setSelectedBackend(newSession.id, backend)
+        }
+        nextStore.setExecutingMode(newSession.id, executionMode)
+
+        sendMessage.mutate({
+          sessionId: newSession.id,
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          message,
+          model,
+          backend: backend ?? undefined,
+          executionMode,
+          thinkingLevel: selectedThinkingLevelRef.current,
+        })
+      }
     },
     [
       activeSessionId,
