@@ -296,13 +296,16 @@ export function MainWindow() {
     return `${project.name} › ${worktree.name}${branchSuffix}`
   }, [project, worktree, isMobile])
 
-  // Compute polling info - null if no worktree or data not loaded
+  // Compute polling info - null if no worktree or data not loaded.
+  // Must use the worktree's own base_branch (e.g. v4.x), not the project
+  // default (next/main), or status shows false behind counts and huge diffs.
   const pollingInfo: WorktreePollingInfo | null = useMemo(() => {
     if (!worktree || !project) return null
     return {
       worktreeId: worktree.id,
       worktreePath: worktree.path,
-      baseBranch: project.default_branch ?? 'main',
+      baseBranch:
+        worktree.base_branch ?? project.default_branch ?? 'main',
       prNumber: worktree.pr_number,
       prUrl: worktree.pr_url,
     }

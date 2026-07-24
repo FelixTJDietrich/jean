@@ -718,6 +718,14 @@ export function resolvePlanContent(params: {
   messageContent?: string | null
   contentBlocks?: ContentBlock[]
 }): ResolvedPlanContent {
+  // Plan UI only exists when the backend emitted a real plan tool call.
+  // Never promote ordinary assistant narration (Grok/Claude YOLO status text
+  // between tools) into a synthetic Plan card — that hides text from the
+  // timeline and stuffs every response into "Plan".
+  if (!params.toolCalls.some(isPlanToolCall)) {
+    return { content: null, source: null }
+  }
+
   // Merge across split CodexPlan tools (turn-id vs item-id) so the richest
   // body/steps win instead of whichever tool was inserted first.
   const input =
@@ -741,8 +749,8 @@ export function resolvePlanContent(params: {
     return { content: extractedFromText, source: 'message_text' }
   }
 
-  // Prefer full assistant text over thin checklist/status when no structured
-  // plan body was persisted — YOLO/new-worktree handoff needs the prose.
+  // Prefer full assistant text over thin checklist/status when a plan tool
+  // exists but only has thin steps/explanation — YOLO/new-worktree handoff.
   const fullAssistantText = collectPlanTextCandidates(params)
     .map(text => text.trim())
     .filter(Boolean)

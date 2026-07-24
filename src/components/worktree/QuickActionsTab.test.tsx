@@ -19,6 +19,16 @@ vi.mock('@/services/preferences', () => ({
   usePatchPreferences: () => ({ mutate: mocks.patchPreferences }),
 }))
 
+vi.mock('@/services/projects', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/services/projects')>()
+  return {
+    ...actual,
+    // Remotes for the selected base are loaded inside the tab; tests pass
+    // remotes via props as the fallback and leave this empty.
+    useProjectRemotes: () => ({ data: undefined }),
+  }
+})
+
 const sampleBranches = ['develop', 'main', 'release/1.0', 'v4.x']
 
 function renderTab(props: Partial<Parameters<typeof QuickActionsTab>[0]> = {}) {
@@ -246,11 +256,24 @@ describe('QuickActionsTab', () => {
       expect(onBaseSession).toHaveBeenCalled()
     })
 
-    it('falls back to the generic action when the default branch is unknown', () => {
-      renderTab({ remotes: twoRemotes, defaultBranch: undefined })
+    it('falls back to the generic action when no base branch can be resolved', () => {
+      renderTab({
+        remotes: twoRemotes,
+        defaultBranch: undefined,
+        branches: [],
+      })
 
       expect(screen.getByText('New Worktree')).toBeInTheDocument()
       expect(screen.queryByText('origin/main')).not.toBeInTheDocument()
+    })
+
+    it('uses the first available branch when the project default is unknown', () => {
+      renderTab({ remotes: twoRemotes, defaultBranch: undefined })
+
+      // sampleBranches[0] is develop — multi-remote cards still appear.
+      expect(screen.getByText('origin/develop')).toBeInTheDocument()
+      expect(screen.getByText('fork/develop')).toBeInTheDocument()
+      expect(screen.queryByText('New Worktree')).not.toBeInTheDocument()
     })
   })
 })

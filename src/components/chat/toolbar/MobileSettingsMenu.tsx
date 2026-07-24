@@ -98,6 +98,7 @@ import {
   type PackageScript,
 } from '@/services/projects'
 import { useGitHubPRs } from '@/services/github'
+import { resolveStackedOnPr } from '@/components/chat/worktree-branch-badge'
 import { chatQueryKeys } from '@/services/chat'
 import { getResumeCommand } from '@/components/chat/session-card-utils'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
@@ -298,10 +299,13 @@ export function MobileSettingsMenu({
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open', {
     enabled: menuOpen && !!project?.path,
   })
-  const stackedOnPR =
+  const stackedOnPR = resolveStackedOnPr(
     worktree?.base_branch && worktree.base_branch !== project?.default_branch
-      ? openPRs?.find(pr => pr.headRefName === worktree.base_branch)
-      : undefined
+      ? worktree.base_branch
+      : null,
+    openPRs,
+    project?.default_branch
+  )
   const hasOpenSection = !!worktreeId || ports.length > 0
 
   const openBackendModelPicker = () => {
@@ -840,7 +844,8 @@ export function MobileSettingsMenu({
                 >
                   <GitPullRequestArrow className="h-4 w-4 text-muted-foreground" />
                   <span className="truncate">
-                    Stacked on #{stackedOnPR.number} {stackedOnPR.title}
+                    Stacked on #{stackedOnPR.number}
+                    {stackedOnPR.title ? ` ${stackedOnPR.title}` : ''}
                   </span>
                 </DropdownMenuItem>
               )}

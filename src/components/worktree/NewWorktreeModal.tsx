@@ -269,6 +269,7 @@ export function NewWorktreeModal() {
                 projectId={data.selectedProjectId}
                 jeanConfig={data.jeanConfig}
                 remotes={data.remotes}
+                projectPath={data.selectedProject?.path}
                 defaultBranch={defaultBranch}
                 branches={data.branches}
                 isLoadingBranches={data.isLoadingBranches}

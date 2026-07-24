@@ -203,6 +203,44 @@ describe('resolvePlanContent', () => {
       source: 'message_text',
     })
   })
+
+  it('does not promote ordinary YOLO narration into a Plan card without a plan tool', () => {
+    const narration =
+      "I'll find the mobile search/type filter layout and make the search full-width with the type selector stacked below it. Using Tailwind to stack the search and category filter on mobile. Checking existing tests, then applying the layout change."
+
+    expect(
+      resolvePlanContent({
+        toolCalls: [
+          {
+            id: 'bash-1',
+            name: 'Bash',
+            input: { command: 'rg mobile search' },
+          },
+          {
+            id: 'grep-1',
+            name: 'Grep',
+            input: { pattern: 'input-sticky' },
+          },
+        ],
+        messageContent: narration,
+        contentBlocks: [
+          { type: 'tool_use', tool_call_id: 'bash-1' },
+          { type: 'text', text: narration },
+          { type: 'tool_use', tool_call_id: 'grep-1' },
+        ],
+      })
+    ).toEqual({ content: null, source: null })
+  })
+
+  it('returns null for empty tool lists even when assistant text looks plan-like', () => {
+    expect(
+      resolvePlanContent({
+        toolCalls: [],
+        messageContent:
+          'Plan:\n- Do the thing\n- Add tests\n- Verify handoff quality for YOLO',
+      })
+    ).toEqual({ content: null, source: null })
+  })
 })
 
 describe('isDuplicatePlanTextBlock', () => {

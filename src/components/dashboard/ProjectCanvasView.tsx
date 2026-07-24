@@ -119,6 +119,7 @@ import { PlanDialog } from '@/components/chat/PlanDialog'
 import { SessionChatModal } from '@/components/chat/SessionChatModal'
 import {
   getStackedBaseBranch,
+  resolveStackedOnPr,
   shouldShowWorktreeBranchBadge,
 } from '@/components/chat/worktree-branch-badge'
 
@@ -475,9 +476,11 @@ function WorktreeSectionHeader({
     defaultBranch,
     worktree.base_remote
   )
-  const stackedOnPR = stackedBaseBranch
-    ? openPRs?.find(pr => pr.headRefName === stackedBaseBranch)
-    : undefined
+  const stackedOnPR = resolveStackedOnPr(
+    stackedBaseBranch,
+    openPRs,
+    defaultBranch
+  )
   const isBase = isBaseSession(worktree)
   const { data: gitStatus } = useGitStatus(worktree.id)
 

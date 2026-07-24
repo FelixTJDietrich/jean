@@ -33,6 +33,7 @@ import { useProjectsStore } from '@/store/projects-store'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
 import {
   normalizeRunScripts,
+  useProjectRemotes,
   type JeanConfig,
   type ProjectRemote,
 } from '@/services/projects'
@@ -44,8 +45,14 @@ export interface QuickActionsTabProps {
   isCreating: boolean
   projectId: string | null
   jeanConfig: JeanConfig | null | undefined
-  /** Git remotes of the project, origin first. */
+  /**
+   * Fallback remotes (usually for the default branch). When `projectPath` is
+   * set, remotes are re-queried for the *selected* base branch so multi-remote
+   * cards only offer remotes that actually have that branch.
+   */
   remotes?: ProjectRemote[]
+  /** Absolute path of the project repo (for remotes-with-branch lookup). */
+  projectPath?: string | null
   /** Project default branch, used as the base branch on every remote. */
   defaultBranch?: string
   /** Remote (or local fallback) branches available as base for new worktrees. */
@@ -77,6 +84,7 @@ export function QuickActionsTab({
   projectId,
   jeanConfig,
   remotes,
+  projectPath,
   defaultBranch,
   branches = [],
   isLoadingBranches = false,
@@ -126,10 +134,24 @@ export function QuickActionsTab({
     })
   }, [defaultBranch, branches])
 
+  const effectiveBaseBranch =
+    selectedBaseBranch || defaultBranch || undefined
+
+  // Remotes that actually have the *selected* base branch fetched. Parent may
+  // pass default-branch remotes as a fallback while this query loads.
+  const { data: remotesForSelectedBase } = useProjectRemotes(
+    projectPath,
+    effectiveBaseBranch
+  )
+  const activeRemotes =
+    remotesForSelectedBase && remotesForSelectedBase.length > 0
+      ? remotesForSelectedBase
+      : (remotes ?? [])
+
   // With several remotes (e.g. upstream + fork) the single "New Worktree"
   // action is ambiguous, so offer one explicit start point per remote instead.
   const remoteOptions =
-    defaultBranch && remotes && remotes.length > 1 ? remotes : []
+    effectiveBaseBranch && activeRemotes.length > 1 ? activeRemotes : []
   const hasRemoteOptions = remoteOptions.length > 0
   const remoteNameSet = useMemo(
     () => new Set(remoteOptions.map(r => r.name)),
@@ -176,9 +198,6 @@ export function QuickActionsTab({
         : [...favoriteKeys, key],
     })
   }
-
-  const effectiveBaseBranch =
-    selectedBaseBranch || defaultBranch || undefined
 
   const handleRunClick = () => {
     if (!projectId) return

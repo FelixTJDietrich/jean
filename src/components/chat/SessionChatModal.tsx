@@ -125,7 +125,10 @@ import {
   MODAL_TERMINAL_PRIMARY_ROW_CLASS,
   MODAL_TERMINAL_SECONDARY_ROW_CLASS,
 } from './modal-terminal-layout'
-import { getStackedBaseBranch } from './worktree-branch-badge'
+import {
+  getStackedBaseBranch,
+  resolveStackedOnPr,
+} from './worktree-branch-badge'
 
 /** Track whether any waiting tabs are off-screen to the left or right */
 function useOffScreenWaiting(
@@ -362,9 +365,11 @@ export function SessionChatModal({
     worktree?.base_remote
   )
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open')
-  const stackedOnPR = stackedBaseBranch
-    ? openPRs?.find(pr => pr.headRefName === stackedBaseBranch)
-    : undefined
+  const stackedOnPR = resolveStackedOnPr(
+    stackedBaseBranch,
+    openPRs,
+    project?.default_branch
+  )
   const isBase = worktree ? isBaseSession(worktree) : false
   const { data: gitStatus } = useGitStatus(worktreeId)
   const behindCount =

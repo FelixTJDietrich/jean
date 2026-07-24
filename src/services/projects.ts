@@ -868,8 +868,10 @@ function handleWorktreeReady(
   const { setActiveWorktree, registerWorktreePath } = useChatStore.getState()
   registerWorktreePath(worktree.id, worktree.path)
 
-  // Fire-and-forget: detect and link PR if not already linked
-  if (!worktree.pr_url) {
+  // Fire-and-forget: detect and link PR if not already linked.
+  // Check pr_number (not only pr_url): PR checkouts set the number before the
+  // URL is filled, and re-running detection by branch can attach the wrong fork PR.
+  if (!worktree.pr_number && !worktree.pr_url) {
     invoke<DetectPrResponse | null>('detect_and_link_pr', {
       worktreeId: worktree.id,
       worktreePath: worktree.path,
