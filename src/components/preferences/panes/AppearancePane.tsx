@@ -561,7 +561,7 @@ export const AppearancePane: React.FC = () => {
             description="How to edit files when viewing them in Jean"
           >
             <Select
-              value={preferences?.file_edit_mode ?? 'external'}
+              value={preferences?.file_edit_mode ?? 'inline'}
               onValueChange={value =>
                 handleFileEditModeChange(value as FileEditMode)
               }

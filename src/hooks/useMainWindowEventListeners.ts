@@ -338,6 +338,13 @@ function executeKeybindingAction(
       setLeftSidebarVisible(!leftSidebarVisible)
       break
     }
+    case 'toggle_file_browser': {
+      logger.debug('Keybinding: toggle_file_browser')
+      const { fileBrowserVisible, setFileBrowserVisible } =
+        useUIStore.getState()
+      setFileBrowserVisible(!fileBrowserVisible)
+      break
+    }
     case 'open_preferences':
       logger.debug('Keybinding: open_preferences')
       commandContext.openPreferences()
@@ -992,6 +999,13 @@ export function useMainWindowEventListeners() {
           const { leftSidebarVisible, setLeftSidebarVisible } =
             useUIStore.getState()
           setLeftSidebarVisible(!leftSidebarVisible)
+        }),
+
+        listenLocal('menu-toggle-file-browser', () => {
+          logger.debug('Toggle file browser menu event received')
+          const { fileBrowserVisible, setFileBrowserVisible } =
+            useUIStore.getState()
+          setFileBrowserVisible(!fileBrowserVisible)
         }),
 
         listenLocal('menu-toggle-right-sidebar', () => {

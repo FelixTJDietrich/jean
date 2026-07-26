@@ -67,6 +67,10 @@ export interface UIState {
   left_sidebar_size?: number
   /** Left sidebar visibility, defaults to false */
   left_sidebar_visible?: boolean
+  /** File browser sidebar width in pixels, defaults to 280 */
+  file_browser_size?: number
+  /** File browser sidebar visibility, defaults to false */
+  file_browser_visible?: boolean
   /** Active session ID per worktree (for restoring open tabs) */
   active_session_ids: Record<string, string>
   /** Unsent chat textarea content per session */
@@ -152,6 +156,8 @@ export const defaultUIState: UIState = {
   expanded_folder_ids: [],
   left_sidebar_size: 250,
   left_sidebar_visible: false,
+  file_browser_size: 280,
+  file_browser_visible: false,
   active_session_ids: {},
   input_drafts: {},
   pending_images: {},

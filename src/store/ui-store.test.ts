@@ -58,6 +58,24 @@ describe('UIStore', () => {
     expect(useUIStore.getState().leftSidebarVisible).toBe(true)
   })
 
+  it('toggles file browser visibility', () => {
+    useUIStore.setState({ fileBrowserVisible: false })
+    const { toggleFileBrowser } = useUIStore.getState()
+
+    toggleFileBrowser()
+    expect(useUIStore.getState().fileBrowserVisible).toBe(true)
+
+    toggleFileBrowser()
+    expect(useUIStore.getState().fileBrowserVisible).toBe(false)
+  })
+
+  it('sets viewing file path for global file modal', () => {
+    useUIStore.getState().setViewingFilePath('/tmp/foo.ts')
+    expect(useUIStore.getState().viewingFilePath).toBe('/tmp/foo.ts')
+    useUIStore.getState().setViewingFilePath(null)
+    expect(useUIStore.getState().viewingFilePath).toBeNull()
+  })
+
   it('toggles preferences dialog', () => {
     const { togglePreferences } = useUIStore.getState()
 

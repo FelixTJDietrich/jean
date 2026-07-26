@@ -144,6 +144,8 @@ export function useUIStatePersistence() {
     const {
       leftSidebarSize,
       leftSidebarVisible,
+      fileBrowserSize,
+      fileBrowserVisible,
       sessionTerminalIds,
       sessionPrimarySurface,
     } = useUIStore.getState()
@@ -192,6 +194,8 @@ export function useUIStatePersistence() {
       expanded_folder_ids: Array.from(expandedFolderIds),
       left_sidebar_size: leftSidebarSize,
       left_sidebar_visible: leftSidebarVisible,
+      file_browser_size: fileBrowserSize,
+      file_browser_visible: fileBrowserVisible,
       active_session_ids: activeSessionIds,
       input_drafts: inputDrafts,
       pending_images: serializePendingImages(pendingImages),
@@ -325,6 +329,22 @@ export function useUIStatePersistence() {
         visible: uiState.left_sidebar_visible,
       })
       useUIStore.getState().setLeftSidebarVisible(uiState.left_sidebar_visible)
+    }
+
+    // Restore file browser size (must be at least 150px to be valid)
+    if (uiState.file_browser_size != null && uiState.file_browser_size >= 150) {
+      logger.debug('Restoring file browser size', {
+        size: uiState.file_browser_size,
+      })
+      useUIStore.getState().setFileBrowserSize(uiState.file_browser_size)
+    }
+
+    // Restore file browser visibility
+    if (uiState.file_browser_visible !== undefined) {
+      logger.debug('Restoring file browser visibility', {
+        visible: uiState.file_browser_visible,
+      })
+      useUIStore.getState().setFileBrowserVisible(uiState.file_browser_visible)
     }
 
     // Restore active project first (selectProject clears selectedWorktreeId)
@@ -998,6 +1018,8 @@ export function useUIStatePersistence() {
       useProjectsStore.getState().githubDashboardFavoriteProjectIds
     let prevLeftSidebarSize = useUIStore.getState().leftSidebarSize
     let prevLeftSidebarVisible = useUIStore.getState().leftSidebarVisible
+    let prevFileBrowserSize = useUIStore.getState().fileBrowserSize
+    let prevFileBrowserVisible = useUIStore.getState().fileBrowserVisible
     let prevSessionTerminalIds = useUIStore.getState().sessionTerminalIds
     let prevSessionPrimarySurface = useUIStore.getState().sessionPrimarySurface
     let prevWorktreeId = useChatStore.getState().activeWorktreeId
@@ -1079,6 +1101,10 @@ export function useUIStatePersistence() {
       const sizeChanged = state.leftSidebarSize !== prevLeftSidebarSize
       const visibilityChanged =
         state.leftSidebarVisible !== prevLeftSidebarVisible
+      const fileBrowserSizeChanged =
+        state.fileBrowserSize !== prevFileBrowserSize
+      const fileBrowserVisibilityChanged =
+        state.fileBrowserVisible !== prevFileBrowserVisible
       const sessionTerminalIdsChanged =
         state.sessionTerminalIds !== prevSessionTerminalIds
       const sessionPrimarySurfaceChanged =
@@ -1087,11 +1113,15 @@ export function useUIStatePersistence() {
       if (
         sizeChanged ||
         visibilityChanged ||
+        fileBrowserSizeChanged ||
+        fileBrowserVisibilityChanged ||
         sessionTerminalIdsChanged ||
         sessionPrimarySurfaceChanged
       ) {
         prevLeftSidebarSize = state.leftSidebarSize
         prevLeftSidebarVisible = state.leftSidebarVisible
+        prevFileBrowserSize = state.fileBrowserSize
+        prevFileBrowserVisible = state.fileBrowserVisible
         prevSessionTerminalIds = state.sessionTerminalIds
         prevSessionPrimarySurface = state.sessionPrimarySurface
         const currentState = getCurrentUIState()

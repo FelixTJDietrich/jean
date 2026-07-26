@@ -84,6 +84,12 @@ export type CliLoginModalType =
 interface UIState {
   leftSidebarVisible: boolean
   leftSidebarSize: number // Width in pixels, persisted across sessions
+  /** File browser (worktree explorer) visibility */
+  fileBrowserVisible: boolean
+  /** File browser width in pixels, persisted across sessions */
+  fileBrowserSize: number
+  /** Absolute path of file open in the global FileContentModal (null = closed) */
+  viewingFilePath: string | null
   rightSidebarVisible: boolean
   commandPaletteOpen: boolean
   preferencesOpen: boolean
@@ -189,6 +195,10 @@ interface UIState {
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
   setLeftSidebarSize: (size: number) => void
+  toggleFileBrowser: () => void
+  setFileBrowserVisible: (visible: boolean) => void
+  setFileBrowserSize: (size: number) => void
+  setViewingFilePath: (path: string | null) => void
   toggleRightSidebar: () => void
   setRightSidebarVisible: (visible: boolean) => void
   toggleCommandPalette: () => void
@@ -305,6 +315,9 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       leftSidebarVisible: false,
       leftSidebarSize: 250, // Default width in pixels
+      fileBrowserVisible: false,
+      fileBrowserSize: 280,
+      viewingFilePath: null,
       rightSidebarVisible: false,
       commandPaletteOpen: false,
       preferencesOpen: false,
@@ -396,6 +409,39 @@ export const useUIStore = create<UIState>()(
             state.leftSidebarSize === size ? state : { leftSidebarSize: size },
           undefined,
           'setLeftSidebarSize'
+        ),
+
+      toggleFileBrowser: () =>
+        set(
+          state => ({ fileBrowserVisible: !state.fileBrowserVisible }),
+          undefined,
+          'toggleFileBrowser'
+        ),
+
+      setFileBrowserVisible: visible =>
+        set(
+          state =>
+            state.fileBrowserVisible === visible
+              ? state
+              : { fileBrowserVisible: visible },
+          undefined,
+          'setFileBrowserVisible'
+        ),
+
+      setFileBrowserSize: size =>
+        set(
+          state =>
+            state.fileBrowserSize === size ? state : { fileBrowserSize: size },
+          undefined,
+          'setFileBrowserSize'
+        ),
+
+      setViewingFilePath: path =>
+        set(
+          state =>
+            state.viewingFilePath === path ? state : { viewingFilePath: path },
+          undefined,
+          'setViewingFilePath'
         ),
 
       setRightSidebarVisible: visible =>

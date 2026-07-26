@@ -626,7 +626,7 @@ fn default_syntax_theme_light() -> String {
 }
 
 fn default_file_edit_mode() -> String {
-    "external".to_string() // Default to external editor (VS Code, etc.)
+    "inline".to_string() // Default to Jean's CodeMirror inline editor
 }
 
 fn default_parallel_execution_prompt_enabled() -> bool {
@@ -2922,6 +2922,14 @@ pub struct UIState {
     #[serde(default)]
     pub left_sidebar_visible: Option<bool>,
 
+    /// File browser sidebar width in pixels, defaults to 280
+    #[serde(default)]
+    pub file_browser_size: Option<f64>,
+
+    /// File browser sidebar visibility, defaults to false
+    #[serde(default)]
+    pub file_browser_visible: Option<bool>,
+
     /// Active session ID per worktree (for restoring open tabs)
     #[serde(default)]
     pub active_session_ids: std::collections::HashMap<String, String>,
@@ -3124,6 +3132,8 @@ impl Default for UIState {
             expanded_folder_ids: Vec::new(),
             left_sidebar_size: None,
             left_sidebar_visible: None,
+            file_browser_size: None,
+            file_browser_visible: None,
             active_session_ids: std::collections::HashMap::new(),
             input_drafts: std::collections::HashMap::new(),
             pending_images: std::collections::HashMap::new(),

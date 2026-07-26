@@ -2381,7 +2381,7 @@ export const defaultPreferences: AppPreferences = {
   magic_prompt_backends: DEFAULT_MAGIC_PROMPT_BACKENDS,
   magic_prompt_efforts: DEFAULT_MAGIC_PROMPT_EFFORTS,
   magic_prompt_modes: DEFAULT_MAGIC_PROMPT_MODES,
-  file_edit_mode: 'external',
+  file_edit_mode: 'inline',
   ai_language: '', // Default: empty (Claude's default behavior)
   allow_web_tools_in_plan_mode: true, // Default: enabled
   waiting_sound: 'none',

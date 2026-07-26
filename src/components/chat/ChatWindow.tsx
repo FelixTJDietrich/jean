@@ -114,7 +114,6 @@ import { normalizeTodosForDisplay } from './tool-call-utils'
 import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
-import { FileContentModal } from './FileContentModal'
 import { FilePreview } from './FilePreview'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
@@ -1237,8 +1236,8 @@ export function ChatWindow({
   // Drag and drop images into chat input
   const { isDragging } = useDragAndDropImages(activeSessionId)
 
-  // State for file content modal (opened by clicking filenames in tool calls)
-  const [viewingFilePath, setViewingFilePath] = useState<string | null>(null)
+  // File content modal is global (MainWindow) so the file browser can open it too
+  const setViewingFilePath = useUIStore(state => state.setViewingFilePath)
 
   // State for git diff modal (opened by clicking diff stats)
   const [diffRequest, setDiffRequest] = useState<DiffRequest | null>(null)
@@ -3729,12 +3728,6 @@ export function ChatWindow({
             )}
           </ResizablePanelGroup>
         )}
-
-        {/* File content modal for viewing files from tool calls */}
-        <FileContentModal
-          filePath={viewingFilePath}
-          onClose={() => setViewingFilePath(null)}
-        />
 
         {/* Git diff modal for viewing diffs */}
         <Suspense fallback={null}>

@@ -4,6 +4,7 @@ import { isClientMacOS } from '@/lib/platform'
 export type KeybindingAction =
   | 'focus_chat_input'
   | 'toggle_left_sidebar'
+  | 'toggle_file_browser'
   | 'open_preferences'
   | 'open_commit_modal'
   | 'open_git_diff'
@@ -65,6 +66,7 @@ export interface KeybindingDefinition {
 export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   focus_chat_input: 'mod+l',
   toggle_left_sidebar: 'mod+b',
+  toggle_file_browser: 'mod+shift+b',
   open_preferences: 'mod+comma',
   open_commit_modal: 'mod+shift+c',
   open_git_diff: 'mod+g',
@@ -121,6 +123,13 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     label: 'Toggle left sidebar',
     description: 'Show or hide the projects sidebar',
     default_shortcut: 'mod+b',
+    category: 'navigation',
+  },
+  {
+    action: 'toggle_file_browser',
+    label: 'Toggle file browser',
+    description: 'Show or hide the worktree file browser',
+    default_shortcut: 'mod+shift+b',
     category: 'navigation',
   },
   {

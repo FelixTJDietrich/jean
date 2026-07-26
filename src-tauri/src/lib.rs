@@ -93,6 +93,11 @@ fn create_app_menu(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error
         .build()?;
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&MenuItemBuilder::with_id("toggle-left-sidebar", "Toggle Left Sidebar").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id("toggle-file-browser", "Toggle File Browser")
+                .accelerator("CmdOrCtrl+Shift+B")
+                .build(app)?,
+        )
         .item(&MenuItemBuilder::with_id("toggle-right-sidebar", "Toggle Right Sidebar").build(app)?)
         .separator()
         .item(
@@ -139,6 +144,7 @@ fn install_menu_events(app: &tauri::App) {
             "check-updates" => Some("menu-check-updates"),
             "preferences" => Some("menu-preferences"),
             "toggle-left-sidebar" => Some("menu-toggle-left-sidebar"),
+            "toggle-file-browser" => Some("menu-toggle-file-browser"),
             "toggle-right-sidebar" => Some("menu-toggle-right-sidebar"),
             "toggle-terminal" => Some("menu-toggle-terminal"),
             "toggle-browser" => Some("menu-toggle-browser"),
