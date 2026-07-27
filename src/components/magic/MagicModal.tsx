@@ -125,6 +125,7 @@ import {
   startCodeReviewsSequentially,
 } from '@/lib/code-review-configs'
 import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
+import { resolveMcpConfigForSend } from '@/services/mcp'
 
 type MagicOption =
   | 'save-context'
@@ -852,6 +853,17 @@ export function MagicModal() {
       const loadingToastId = toast.loading(`Starting ${errorLabel}...`)
 
       try {
+        // Resolve MCP the same way ChatWindow does so Jean MCP and other
+        // enabled servers are available on the first automation turn.
+        const { mcpConfig, enabledServers } = await resolveMcpConfigForSend({
+          worktreePath,
+          backend,
+          projectEnabled: project?.enabled_mcp_servers,
+          globalEnabled: preferences?.default_enabled_mcp_servers,
+          knownServers:
+            project?.known_mcp_servers ?? preferences?.known_mcp_servers,
+        })
+
         const session = await invoke<Session>('create_session', {
           worktreeId,
           worktreePath,
@@ -870,6 +882,7 @@ export function MagicModal() {
         store.setLastSentMessage(session.id, prompt)
         store.setError(session.id, null)
         store.clearInputDraft(session.id)
+        store.setEnabledMcpServers(session.id, enabledServers)
 
         // Prefer open-session-modal so the new session tab is selected even
         // when a worktree chat modal is already open.
@@ -915,6 +928,7 @@ export function MagicModal() {
             worktreePath,
             sessionId: session.id,
             selectedExecutionMode: executionMode,
+            enabledMcpServers: enabledServers,
           }),
         ])
 
@@ -937,6 +951,7 @@ export function MagicModal() {
             provider && provider !== '__anthropic__' ? provider : undefined,
           chromeEnabled: preferences?.chrome_enabled ?? false,
           aiLanguage: preferences?.ai_language,
+          mcpConfig,
         })
 
         queryClient.invalidateQueries({
@@ -952,6 +967,8 @@ export function MagicModal() {
     [
       preferences,
       project?.default_backend,
+      project?.enabled_mcp_servers,
+      project?.known_mcp_servers,
       queryClient,
       resolvePromptSessionWorktree,
     ]
@@ -1735,11 +1752,28 @@ ${resolveInstructions}`
               setExecutionMode(newSession.id, 'yolo')
               setExecutingMode(newSession.id, 'yolo')
               clearInputDraft(newSession.id)
+
+              const {
+                mcpConfig: prConflictMcpConfig,
+                enabledServers: prConflictEnabledMcp,
+              } = await resolveMcpConfigForSend({
+                worktreePath: worktree.path,
+                backend: resolvedBackend as CliBackend,
+                projectEnabled: project?.enabled_mcp_servers,
+                globalEnabled: preferences?.default_enabled_mcp_servers,
+                knownServers:
+                  project?.known_mcp_servers ?? preferences?.known_mcp_servers,
+              })
+              useChatStore
+                .getState()
+                .setEnabledMcpServers(newSession.id, prConflictEnabledMcp)
+
               invoke('update_session_state', {
                 worktreeId: selectedWorktreeId,
                 worktreePath: worktree.path,
                 sessionId: newSession.id,
                 selectedExecutionMode: 'yolo',
+                enabledMcpServers: prConflictEnabledMcp,
               }).catch(() => undefined)
 
               await invoke('send_chat_message', {
@@ -1758,6 +1792,7 @@ ${resolveInstructions}`
                     : undefined,
                 chromeEnabled: preferences?.chrome_enabled ?? false,
                 aiLanguage: preferences?.ai_language,
+                mcpConfig: prConflictMcpConfig,
               })
 
               queryClient.invalidateQueries({
@@ -1917,11 +1952,28 @@ ${resolveInstructions}`
             setExecutionMode(newSession.id, 'yolo')
             setExecutingMode(newSession.id, 'yolo')
             clearInputDraft(newSession.id)
+
+            const {
+              mcpConfig: conflictMcpConfig,
+              enabledServers: conflictEnabledMcp,
+            } = await resolveMcpConfigForSend({
+              worktreePath: worktree.path,
+              backend: resolvedBackend as CliBackend,
+              projectEnabled: project?.enabled_mcp_servers,
+              globalEnabled: preferences?.default_enabled_mcp_servers,
+              knownServers:
+                project?.known_mcp_servers ?? preferences?.known_mcp_servers,
+            })
+            useChatStore
+              .getState()
+              .setEnabledMcpServers(newSession.id, conflictEnabledMcp)
+
             invoke('update_session_state', {
               worktreeId: selectedWorktreeId,
               worktreePath: worktree.path,
               sessionId: newSession.id,
               selectedExecutionMode: 'yolo',
+              enabledMcpServers: conflictEnabledMcp,
             }).catch(() => undefined)
 
             await invoke('send_chat_message', {
@@ -1940,6 +1992,7 @@ ${resolveInstructions}`
                   : undefined,
               chromeEnabled: preferences?.chrome_enabled ?? false,
               aiLanguage: preferences?.ai_language,
+              mcpConfig: conflictMcpConfig,
             })
 
             queryClient.invalidateQueries({

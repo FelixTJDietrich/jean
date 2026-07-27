@@ -28,6 +28,12 @@ import type {
   ReviewResponse,
   StoredReviewResults,
 } from '@/types/projects'
+import { DEFAULT_MAGIC_PROMPT_MODES } from '@/types/preferences'
+import { usePreferences } from '@/services/preferences'
+import {
+  codeReviewConfigKey,
+  resolveCodeReviewFixMode,
+} from '@/lib/code-review-configs'
 import { cn } from '@/lib/utils'
 import { isNativeApp } from '@/lib/environment'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -236,6 +242,7 @@ export function ReviewResultsPanel({
   const activeRowRefs = useRef<Record<number, HTMLDivElement | null>>({})
   const isMobile = useIsMobile()
   const showKeyboardHints = isNativeApp() && !isMobile
+  const { data: preferences } = usePreferences()
 
   const storedReviewResults = useChatStore(
     state => state.reviewResults[sessionId]
@@ -265,6 +272,24 @@ export function ReviewResultsPanel({
     (storedReviewResults && !('reviews' in storedReviewResults)
       ? storedReviewResults
       : undefined)
+  // Prefer the selected reviewer's fix_mode; fall back to global then plan.
+  const fixExecutionMode = useMemo(() => {
+    const globalFallback =
+      preferences?.magic_prompt_modes?.code_review_fix_mode ??
+      DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode
+    const configs = preferences?.magic_code_review_configs
+    if (!configs?.length) return resolveCodeReviewFixMode(null, globalFallback)
+
+    const matching =
+      (effectiveReviewKey
+        ? configs.find(c => codeReviewConfigKey(c) === effectiveReviewKey)
+        : undefined) ?? configs[0]
+    return resolveCodeReviewFixMode(matching, globalFallback)
+  }, [
+    effectiveReviewKey,
+    preferences?.magic_code_review_configs,
+    preferences?.magic_prompt_modes?.code_review_fix_mode,
+  ])
   const fixedReviewFindings = useChatStore(
     state => state.fixedReviewFindings[sessionId]
   )
@@ -377,11 +402,14 @@ export function ReviewResultsPanel({
     setIsSending(true)
     try {
       markSelectedFixed(selectedFindings.map(f => f.originalIndex))
-      onSendFix(formatCombinedFindingsMessage(selectedFindings), 'plan')
+      onSendFix(
+        formatCombinedFindingsMessage(selectedFindings),
+        fixExecutionMode
+      )
     } finally {
       setIsSending(false)
     }
-  }, [getSelectedFindings, markSelectedFixed, onSendFix])
+  }, [fixExecutionMode, getSelectedFindings, markSelectedFixed, onSendFix])
 
   const handleSendSeparately = useCallback(() => {
     if (!onSendFix) return
@@ -393,12 +421,12 @@ export function ReviewResultsPanel({
       markSelectedFixed(selectedFindings.map(f => f.originalIndex))
       onSendFix(
         selectedFindings.map(({ finding }) => formatFindingMessage(finding)),
-        'plan'
+        fixExecutionMode
       )
     } finally {
       setIsSending(false)
     }
-  }, [getSelectedFindings, markSelectedFixed, onSendFix])
+  }, [fixExecutionMode, getSelectedFindings, markSelectedFixed, onSendFix])
 
   const handlePanelKeyDown = useCallback(
     (event: React.KeyboardEvent) => {

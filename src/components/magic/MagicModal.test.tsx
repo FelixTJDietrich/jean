@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
     setLastSentMessage: vi.fn(),
     setError: vi.fn(),
     clearInputDraft: vi.fn(),
+    setEnabledMcpServers: vi.fn(),
     toastSuccess: vi.fn(),
     toastError: vi.fn(),
     toastLoading: vi.fn(() => 'toast-1'),
@@ -137,6 +138,7 @@ vi.mock('@/store/chat-store', () => ({
         setLastSentMessage: mocks.setLastSentMessage,
         setError: mocks.setError,
         clearInputDraft: mocks.clearInputDraft,
+        setEnabledMcpServers: mocks.setEnabledMcpServers,
         copySessionSettings: vi.fn(),
       }),
     }
@@ -500,6 +502,20 @@ describe('MagicModal manual PR link', () => {
     window.addEventListener('open-session-modal', openSessionModal)
 
     mocks.invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_mcp_servers') {
+        return Promise.resolve([
+          {
+            name: 'jean',
+            backend: 'claude',
+            disabled: false,
+            config: {
+              type: 'stdio',
+              command: 'jean',
+              args: ['--jean-mcp-stdio'],
+            },
+          },
+        ])
+      }
       if (command === 'create_session') {
         return Promise.resolve({
           id: 'automation-bugs-session',
@@ -548,6 +564,19 @@ describe('MagicModal manual PR link', () => {
     expect(sendCall?.[1].message).toContain('project-1')
     expect(sendCall?.[1].message).toContain('list_github_issues')
     expect(sendCall?.[1].message).toContain('start_autoinvestigating')
+    // Auto-discovered Jean MCP must be on the first automation turn
+    expect(sendCall?.[1].mcpConfig).toContain('jean')
+    expect(mocks.setEnabledMcpServers).toHaveBeenCalledWith(
+      'automation-bugs-session',
+      expect.arrayContaining(['claude:jean'])
+    )
+    expect(mocks.invokeMock).toHaveBeenCalledWith(
+      'update_session_state',
+      expect.objectContaining({
+        sessionId: 'automation-bugs-session',
+        enabledMcpServers: expect.arrayContaining(['claude:jean']),
+      })
+    )
     expect(mocks.setActiveSession).toHaveBeenCalledWith(
       'wt-1',
       'automation-bugs-session'

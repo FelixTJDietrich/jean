@@ -394,7 +394,8 @@ const PROMPT_SECTIONS: PromptSection[] = [
         providerKey: 'code_review_provider',
         backendKey: 'code_review_backend',
         label: 'Code Review',
-        description: 'Prompt for AI-powered code review of your changes.',
+        description:
+          'Prompt for AI-powered code review of your changes. Each reviewer row has its own Mode for sessions created when sending that reviewer’s findings to chat.',
         variables: [
           {
             name: '{branch_info}',
@@ -717,6 +718,7 @@ function makeCodeReviewConfig(
     reasoning_effort:
       getMagicPromptModelReasoning(catalog, backend, model, null, [])
         ?.default ?? null,
+    fix_mode: DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode,
   }
 }
 
@@ -1223,6 +1225,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
             model,
             reasoning_effort:
               getReviewReasoning({ backend, model })?.default ?? null,
+            fix_mode: DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode,
           },
         ])
         return
@@ -2011,6 +2014,9 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                                 reasoning_effort:
                                   getReviewReasoning({ backend, model })
                                     ?.default ?? null,
+                                fix_mode:
+                                  config.fix_mode ??
+                                  DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode,
                               })
                             }
                           }}
@@ -2109,6 +2115,35 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                                 {level.label}
                               </SelectItem>
                             ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          Mode
+                        </span>
+                        <Select
+                          value={
+                            config.fix_mode ??
+                            DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode
+                          }
+                          onValueChange={mode =>
+                            updateCodeReviewConfig(index, {
+                              ...config,
+                              fix_mode: mode as MagicPromptExecutionMode,
+                            })
+                          }
+                        >
+                          <SelectTrigger
+                            aria-label={`Review ${index + 1} mode`}
+                            size="sm"
+                            className="w-full min-w-0 text-xs"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="plan">Plan</SelectItem>
+                            <SelectItem value="yolo">Yolo</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>

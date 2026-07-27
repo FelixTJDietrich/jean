@@ -3051,12 +3051,19 @@ pub async fn send_chat_message(
     let thread_allowed_tools = allowed_tools_for_cli.clone();
     let thread_parallel_prompt = parallel_execution_prompt.clone();
     let thread_ai_language = ai_language.clone();
-    let thread_mcp_config = if effective_backend == Backend::Claude {
-        super::jean_mcp::merge_into_mcp_config(&app, &session_id, mcp_config.as_deref())
-            .await
-            .or_else(|| mcp_config.clone())
-    } else {
-        mcp_config.clone()
+    // Always inject Jean MCP for backends that honor runtime mcp_config.
+    // Claude uses --mcp-config/--strict-mcp-config; Grok/Cursor use the same
+    // JSON to decide which servers (including jean) stay enabled for the turn.
+    // Without this, fire-and-forget magic sends that omit frontend mcpConfig
+    // would leave Jean MCP disabled (especially Grok, which disables all
+    // discovered servers when the enabled set is empty).
+    let thread_mcp_config = match effective_backend {
+        Backend::Claude | Backend::Grok | Backend::Cursor => {
+            super::jean_mcp::merge_into_mcp_config(&app, &session_id, mcp_config.as_deref())
+                .await
+                .or_else(|| mcp_config.clone())
+        }
+        _ => mcp_config.clone(),
     };
     let thread_custom_profile = custom_profile_name.clone();
     let thread_codex_provider = if effective_backend == Backend::Codex {
