@@ -2861,12 +2861,23 @@ pub async fn send_chat_message(
         previous_custom_profile.as_deref(),
         custom_profile_name.as_deref(),
     );
+    // On provider switch, always start a fresh native session for the *target*
+    // backend. The previous provider's history is injected via handoff; resuming
+    // an old OpenCode/Codex/etc. session would omit that Jean-local context.
+    let clear_target_resume = backend_handoff || profile_handoff;
     let message_for_backend = if backend_handoff || profile_handoff {
-        let history = run_log::load_session_messages_window(&app, &session_id, Some(20), None)
-            .map(|loaded| super::handoff::format_handoff_history(&loaded.messages, 30_000))
-            .unwrap_or_default();
+        let history = super::handoff::build_handoff_history_text(
+            &app,
+            &session_id,
+            previous_metadata.as_ref(),
+        );
 
-        if let Some(previous_backend) = previous_backend.as_ref().filter(|_| !history.is_empty()) {
+        if history.trim().is_empty() {
+            log::warn!(
+                "[SendChat] provider-switch handoff requested but history empty session={session_id} previous={previous_backend:?} current={effective_backend:?}"
+            );
+            message.clone()
+        } else if let Some(previous_backend) = previous_backend.as_ref() {
             let template = crate::load_preferences(app.clone())
                 .await
                 .ok()
@@ -2889,7 +2900,8 @@ pub async fn send_chat_message(
                 )
             };
             log::info!(
-                "[SendChat] injecting hidden provider-switch handoff session={session_id} previous={previous_backend:?} current={effective_backend:?}"
+                "[SendChat] injecting hidden provider-switch handoff session={session_id} previous={previous_backend:?} current={effective_backend:?} history_chars={}",
+                history.chars().count()
             );
             super::handoff::prepend_hidden_handoff(&message, &handoff_prompt)
         } else {
@@ -2898,18 +2910,53 @@ pub async fn send_chat_message(
     } else {
         message.clone()
     };
-    let claude_session_id = if claude_profile_changed {
+    let claude_session_id = if claude_profile_changed
+        || (clear_target_resume && effective_backend == Backend::Claude)
+    {
         None
     } else {
         claude_session_id
     };
-    let codex_thread_id = if codex_profile_changed {
-        log::info!(
-            "[SendChat] Codex provider changed session={session_id}; starting new thread"
-        );
+    let codex_thread_id = if codex_profile_changed
+        || (clear_target_resume && effective_backend == Backend::Codex)
+    {
+        if codex_profile_changed || clear_target_resume {
+            log::info!(
+                "[SendChat] Codex starting new thread session={session_id} (profile_changed={codex_profile_changed} handoff={clear_target_resume})"
+            );
+        }
         None
     } else {
         codex_thread_id
+    };
+    let opencode_session_id =
+        if clear_target_resume && effective_backend == Backend::Opencode {
+            log::info!(
+                "[SendChat] OpenCode starting new session for provider handoff session={session_id}"
+            );
+            None
+        } else {
+            opencode_session_id
+        };
+    let cursor_chat_id = if clear_target_resume && effective_backend == Backend::Cursor {
+        None
+    } else {
+        cursor_chat_id
+    };
+    let pi_session_id = if clear_target_resume && effective_backend == Backend::Pi {
+        None
+    } else {
+        pi_session_id
+    };
+    let grok_session_id = if clear_target_resume && effective_backend == Backend::Grok {
+        None
+    } else {
+        grok_session_id
+    };
+    let kimi_session_id = if clear_target_resume && effective_backend == Backend::Kimi {
+        None
+    } else {
+        kimi_session_id
     };
 
     // Cursor CLI doesn't support thinking/effort levels

@@ -1324,9 +1324,12 @@ function App() {
                 }
               }
 
+              // All backends need snapshot dedupe: Grok/Pi/Kimi re-emit tool
+              // updates and resume tails from the start of the run log. Without
+              // this, web reconnect while a turn is running doubles the stream.
               hydrateRunningSnapshot(session.session_id, lastMsg, {
                 allowWhileSending: true,
-                dedupeReplayedOutput: sessionSnapshot?.backend === 'claude',
+                dedupeReplayedOutput: true,
               })
 
               queryClient.setQueryData<Session>(

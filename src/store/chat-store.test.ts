@@ -707,6 +707,37 @@ describe('ChatStore', () => {
         useChatStore.getState().streamingReplayContentBlocks['session-1']
       ).toBeUndefined()
     })
+
+    it('keeps snapshot dedupe when a tool is re-emitted after already being consumed', () => {
+      // Grok ACP emits tool_use/tool_block again on tool_call_update. The
+      // second emission must not abandon remaining snapshot dedupe.
+      const store = useChatStore.getState()
+
+      store.addTextBlock('session-1', 'Before tool. ')
+      store.addToolBlock('session-1', 'tool-1')
+      store.addTextBlock('session-1', 'After tool.')
+      store.setStreamingReplayContentBlocks('session-1', replayBlocks)
+
+      expect(store.consumeStreamingReplayText('session-1', 'Before tool. ')).toBe(
+        ''
+      )
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      // Re-emitted tool_block for the same id (already past in the cursor).
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      expect(store.consumeStreamingReplayText('session-1', 'After tool.')).toBe(
+        ''
+      )
+      expect(
+        useChatStore.getState().getStreamingContentBlocks('session-1')
+      ).toEqual(replayBlocks)
+      expect(
+        useChatStore.getState().streamingReplayContentBlocks['session-1']
+      ).toBeUndefined()
+    })
   })
 
   describe('execution mode', () => {

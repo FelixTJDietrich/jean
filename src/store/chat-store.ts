@@ -1826,6 +1826,22 @@ export const useChatStore = create<ChatUIState>()(
           return true
         }
 
+        // Grok (and similar ACP backends) re-emit tool_use/tool_block on every
+        // tool_call_update for the same id. After the first emission advances
+        // past that tool in the snapshot cursor, a second emission used to
+        // clear remaining replay blocks — which then re-applied every later
+        // text/tool from the WS buffer and duplicated the in-flight response
+        // on web reconnect. If the tool is already in the hydrated timeline,
+        // treat the re-emit as a no-op and keep deduping the rest.
+        const liveBlocks = get().streamingContentBlocks[sessionId] ?? []
+        const alreadyHydrated = liveBlocks.some(
+          block =>
+            block.type === 'tool_use' && block.tool_call_id === toolCallId
+        )
+        if (alreadyHydrated) {
+          return true
+        }
+
         get().clearStreamingReplayContentBlocks(sessionId)
         return false
       },

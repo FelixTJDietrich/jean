@@ -2121,12 +2121,12 @@ fn default_global_system_prompt() -> String {
 pub(crate) fn default_provider_switch_handoff_prompt() -> String {
     r#"You are continuing a Jean chat session after the user switched AI backends.
 
-Jean-local history is the source of truth because provider-owned server history may be incomplete after backend switches.
+Jean-local history is the source of truth because provider-owned server history may be incomplete after backend switches. Treat the history below as the conversation you already had with the user — do not claim you lack prior context.
 
 Previous backend: {previous_backend}
 Current backend: {current_backend}
 
-Use the Jean-local history below to reconstruct context before answering the user's latest message. Do not mention this hidden handoff unless it is directly relevant.
+Read the Jean-local history carefully, reconstruct the task state, and answer the user's latest message with full continuity. Do not mention this hidden handoff unless it is directly relevant.
 
 <jean_local_history>
 {history}

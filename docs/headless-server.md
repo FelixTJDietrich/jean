@@ -5,6 +5,15 @@ GTK, or display-server dependency. `jean-core` owns shared state, commands,
 events, persistence, projects, chat backends, terminals, background work, and
 the HTTP/WebSocket protocol. `src-server` is the standalone server adapter.
 
+## Agent browser (AI + manual login)
+
+jean-server has no embedded WebView. For an AI-controlled browser where you log
+in manually once and agents reuse cookies, use a persistent Chromium profile
+driven by Playwright MCP (or similar). See:
+
+- `docs/developer/server-agent-browser.md` — architecture and roadmap
+- jean-docs: **Agent Browser on Jean Server** workflow
+
 ## Start locally
 
 When running a debug binary directly, build the browser bundle first. Jean

@@ -1335,22 +1335,86 @@ pub fn load_session_messages_window(
         if run.renders_assistant_message()
             || cancelled_artifact_run_indices.borrow().contains(run_index)
         {
-            let lines = read_run_log(app, session_id, &run.run_id)?;
+            // One corrupt/missing run log must not abort the whole history load —
+            // provider-switch handoff and UI history both depend on partial success.
+            let lines = match read_run_log(app, session_id, &run.run_id) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    log::warn!(
+                        "[LoadMessages] session={session_id} run={} failed to read log: {e}",
+                        run.run_id
+                    );
+                    let mut placeholder = ChatMessage {
+                        id: run
+                            .assistant_message_id
+                            .clone()
+                            .unwrap_or_else(|| format!("missing-{}", run.run_id)),
+                        session_id: session_id.to_string(),
+                        role: MessageRole::Assistant,
+                        content: "*Assistant response unavailable (run log missing or unreadable).*".to_string(),
+                        timestamp: run.ended_at.unwrap_or(run.started_at),
+                        tool_calls: vec![],
+                        content_blocks: vec![],
+                        cancelled: run.cancelled,
+                        plan_approved: false,
+                        model: run.model.clone(),
+                        execution_mode: run.execution_mode.clone(),
+                        thinking_level: run.thinking_level.clone(),
+                        effort_level: run.effort_level.clone(),
+                        recovered: run.recovered,
+                        usage: run.usage.clone(),
+                    };
+                    if run.status == RunStatus::Running {
+                        placeholder.id = format!("running-{}", run.run_id);
+                    }
+                    messages.push(placeholder);
+                    continue;
+                }
+            };
 
             // Parse JSONL content — route by backend.
             // Per-run model is authoritative when present. Only fall back to
             // session-level metadata.backend for legacy runs with no model stored.
             let use_codex_parser = run_uses_codex_history_parser(&metadata.backend, run);
-            let mut assistant_msg = if use_codex_parser {
-                super::codex::parse_codex_run_to_message(&lines, run)?
+            let parse_result = if use_codex_parser {
+                super::codex::parse_codex_run_to_message(&lines, run)
             } else if run_uses_pi_history_parser(&metadata.backend, run) {
-                super::pi::parse_pi_run_to_message(&lines, run)?
+                super::pi::parse_pi_run_to_message(&lines, run)
             } else if run_uses_grok_history_parser(&metadata.backend, run) {
-                super::grok::parse_grok_run_to_message(&lines, run)?
+                super::grok::parse_grok_run_to_message(&lines, run)
             } else if run_uses_kimi_history_parser(&metadata.backend, run) {
-                super::kimi::parse_kimi_run_to_message(&lines, run)?
+                super::kimi::parse_kimi_run_to_message(&lines, run)
             } else {
-                parse_run_to_message(&lines, run)?
+                parse_run_to_message(&lines, run)
+            };
+            let mut assistant_msg = match parse_result {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!(
+                        "[LoadMessages] session={session_id} run={} failed to parse log: {e}",
+                        run.run_id
+                    );
+                    ChatMessage {
+                        id: run
+                            .assistant_message_id
+                            .clone()
+                            .unwrap_or_else(|| format!("unparsed-{}", run.run_id)),
+                        session_id: session_id.to_string(),
+                        role: MessageRole::Assistant,
+                        content: "*Assistant response unavailable (run log parse failed).*".to_string(),
+                        timestamp: run.ended_at.unwrap_or(run.started_at),
+                        tool_calls: vec![],
+                        content_blocks: vec![],
+                        cancelled: run.cancelled,
+                        plan_approved: false,
+                        model: run.model.clone(),
+                        execution_mode: run.execution_mode.clone(),
+                        thinking_level: run.thinking_level.clone(),
+                        effort_level: run.effort_level.clone(),
+                        recovered: run.recovered,
+                        usage: run.usage.clone(),
+                    }
+                }
             };
             let is_cursor_run = run
                 .model
