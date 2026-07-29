@@ -51,10 +51,14 @@ const WSL_PATH_VALUE_FLAGS: &[&str] = &["--add-dir", "--append-system-prompt-fil
 
 #[cfg(any(windows, test))]
 fn looks_like_windows_path(value: &str) -> bool {
-    // UNC (`\\..`) or drive path (`C:\..`). Anything else is left untouched so
-    // non-path values are never mangled.
+    // UNC (`\\..`) or drive path (`C:\..` / `C:/..`). Anything else is left
+    // untouched so non-path values (models, inline `--settings` JSON) are never
+    // mangled.
     value.starts_with("\\\\")
-        || (value.len() >= 3 && value.as_bytes()[0].is_ascii_alphabetic() && &value[1..3] == ":\\")
+        || (value.len() >= 3
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value.as_bytes()[1] == b':'
+            && matches!(value.as_bytes()[2], b'\\' | b'/'))
 }
 
 /// Translate Windows-form path values that follow known path flags into WSL
@@ -110,11 +114,16 @@ fn wslify_path_args(args: &[String]) -> Vec<String> {
 /// session is SIGHUP-reaped at teardown — before adoption ever applies — which
 /// is exactly why `setsid` (own session, no controlling terminal) is required.
 ///
-/// The inner session records its own pid to `pid_path` and then `exec`s Claude,
-/// so the reported pid is Claude's stable Linux pid — NOT `$!` of `setsid`,
-/// which is a short-lived parent that forks and exits (reading it yields a dead
-/// or zero pid and wedges recovery). The outer launcher waits for the pid file,
-/// prints the pid for Jean, then exits.
+/// The inner session records its own pid (`echo $$`) to `pid_path`, then runs
+/// Claude under that same session shell. The reported pid is the session-leader
+/// shell — NOT `$!` of `setsid`, which is a short-lived forking parent that
+/// yields a dead or zero pid and wedges recovery. Keeping the shell as leader
+/// also lets `kill_process_tree` reap the whole pipeline (cat + claude).
+///
+/// Stdin must be a pipe (`cat … | claude`), not file redirection: Claude CLI
+/// with `--print` does not accept stdin from `< file` (same constraint as the
+/// Unix spawn path). The outer launcher waits for the pid file, prints the pid
+/// for Jean, then exits.
 #[cfg(any(windows, test))]
 fn build_wsl_claude_script(
     cli_path: &str,
@@ -124,8 +133,13 @@ fn build_wsl_claude_script(
     pid_path: &str,
     env_vars: &[(&str, &str)],
 ) -> String {
-    // Inner command: record pid, then become Claude via `exec` so the pid holds.
-    let mut inner = format!("echo $$ > {}; exec ", wsl_shell_quote(pid_path));
+    // Inner command: record the session-leader pid, then pipe input into Claude.
+    // (Claude --print requires a pipe; plain `< file` redirection fails.)
+    let mut inner = format!(
+        "echo $$ > {}; cat {} | ",
+        wsl_shell_quote(pid_path),
+        wsl_shell_quote(input_path)
+    );
     if !env_vars.is_empty() {
         inner.push_str("env ");
         inner.push_str(
@@ -142,11 +156,7 @@ fn build_wsl_claude_script(
         inner.push(' ');
         inner.push_str(&wsl_shell_quote(arg));
     }
-    inner.push_str(&format!(
-        " < {} >> {} 2>&1",
-        wsl_shell_quote(input_path),
-        wsl_shell_quote(output_path)
-    ));
+    inner.push_str(&format!(" >> {} 2>&1", wsl_shell_quote(output_path)));
 
     // Outer launcher: detach the session, wait for the pid to land (≤2s), print
     // it, then exit — after which `wsl.exe` exits and Claude keeps running.
@@ -575,9 +585,18 @@ pub fn spawn_detached_claude(
         let _ = std::fs::remove_file(&pid_file);
 
         // Claude runs in its own session (setsid) and no longer needs wsl.exe.
-        // The launcher exits on its own after printing the pid; dropping the
-        // Child just releases Jean's handles.
-        drop(child);
+        // Wait for the short-lived launcher so handles are reaped cleanly; a
+        // non-zero exit after a valid pid is logged but not fatal (Claude may
+        // already be running under wslhost.exe).
+        match child.wait() {
+            Ok(status) if !status.success() => {
+                log::warn!(
+                    "WSL launcher exited with status {status} after reporting pid {pid}"
+                );
+            }
+            Err(e) => log::warn!("Failed to wait for WSL launcher: {e}"),
+            _ => {}
+        }
 
         log::debug!("Detached Claude CLI running in WSL with pid {pid}");
         Ok(pid)
@@ -734,6 +753,19 @@ mod tests {
     }
 
     #[test]
+    fn test_wslify_path_args_translates_forward_slash_drive_paths() {
+        let args = vec![
+            "--add-dir".to_string(),
+            "C:/Users/foo/proj".to_string(),
+            "--settings".to_string(),
+            r"C:\Users\foo\.claude\settings.json".to_string(),
+        ];
+        let out = wslify_path_args(&args);
+        assert_eq!(out[1], "/mnt/c/Users/foo/proj");
+        assert_eq!(out[3], "/mnt/c/Users/foo/.claude/settings.json");
+    }
+
+    #[test]
     fn test_wslify_path_args_leaves_inline_settings_json_unchanged() {
         let args = vec![
             "--settings".to_string(),
@@ -757,11 +789,13 @@ mod tests {
         // New session so Claude survives wsl.exe exiting, detached from stdin.
         assert!(script.starts_with("setsid sh -c "));
         assert!(script.contains("</dev/null &"));
-        // Inner command records the pid then becomes Claude via exec. (Inner
-        // single quotes are re-escaped by the outer `sh -c '...'` wrap, so match
-        // on the unquoted fragments that survive escaping.)
+        // Inner command records the session-leader pid, then pipes input into
+        // Claude. (Inner single quotes are re-escaped by the outer `sh -c '...'`
+        // wrap, so match on the unquoted fragments that survive escaping.)
         assert!(script.contains("echo $$ >"));
-        assert!(script.contains("exec env JEAN_MCP_TOKEN="));
+        assert!(script.contains("cat "));
+        assert!(script.contains(" | "));
+        assert!(script.contains("env JEAN_MCP_TOKEN="));
         assert!(script.contains("secret"));
         assert!(script.contains("/usr/bin/claude"));
         assert!(script.contains("--print"));
@@ -769,10 +803,25 @@ mod tests {
         assert!(script.contains("input.jsonl"));
         assert!(script.contains("output.jsonl"));
         assert!(script.contains("2>&1"));
+        // Must not use file redirection for Claude stdin (CLI --print rejects it).
+        assert!(!script.contains(" < '/mnt/c/tmp/input.jsonl'"));
         // Launcher waits for the pid file (outer, unescaped), then prints it.
         assert!(script.contains("while [ ! -s '/mnt/c/tmp/output.pid' ]"));
         assert!(script.contains("cat '/mnt/c/tmp/output.pid'"));
         // Never rely on `$!` of setsid (a short-lived forking parent).
         assert!(!script.contains("echo $!"));
+        // Do not exec-over the session shell: the shell must stay as leader so
+        // the cat|claude pipeline remains killable as one process group.
+        assert!(!script.contains("exec "));
+    }
+
+    #[test]
+    fn test_looks_like_windows_path_accepts_slash_and_backslash() {
+        assert!(looks_like_windows_path(r"C:\Users\foo"));
+        assert!(looks_like_windows_path("C:/Users/foo"));
+        assert!(looks_like_windows_path(r"\\wsl.localhost\Ubuntu\home\u"));
+        assert!(!looks_like_windows_path("/home/u"));
+        assert!(!looks_like_windows_path(r#"{"permissions":{}}"#));
+        assert!(!looks_like_windows_path("claude-opus-4-8[1m]"));
     }
 }
