@@ -148,14 +148,39 @@ describe('ToolCallInline', () => {
     expect(screen.queryByText(/unhandled tool/i)).not.toBeInTheDocument()
   })
 
-  it('renders meaningful success output from a non-Codex tool', () => {
+  it('renders bash/shell stdout in the expanded tool body (issue #572)', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'tool-bash-with-output',
+          name: 'Bash',
+          input: { command: 'cd /tmp; ls -la' },
+          output:
+            'exit: 0\ntotal 8\ndrwxr-xr-x 2 root root 4096 Jul 1 12:00 .\n',
+        }}
+      />
+    )
+
+    // Collapsed row still shows the command
+    expect(screen.getByText('Bash')).toBeInTheDocument()
+    expect(screen.getByText('cd /tmp; ls -la')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button'))
+
+    // Expanded body must surface the actual command return, not only `$ command`
+    expect(screen.getByText('Output:')).toBeInTheDocument()
+    expect(screen.getByText(/total 8/)).toBeInTheDocument()
+    expect(screen.getByText(/\$ cd \/tmp; ls -la/)).toBeInTheDocument()
+  })
+
+  it('renders shell_command stdout the same way as Bash', () => {
     render(
       <ToolCallInline
         toolCall={{
           id: 'tool-commandcode-shell-success',
           name: 'shell_command',
           input: { command: 'deploy' },
-          output: 'success',
+          output: 'deployed revision abc123\n',
         }}
       />
     )
@@ -163,7 +188,37 @@ describe('ToolCallInline', () => {
     fireEvent.click(screen.getByRole('button'))
 
     expect(screen.getByText('Output:')).toBeInTheDocument()
-    expect(screen.getByText(/^success$/)).toBeInTheDocument()
+    expect(screen.getByText(/deployed revision abc123/)).toBeInTheDocument()
+  })
+
+  it.each([
+    'Bash',
+    'shell_command',
+    'run_terminal_command',
+    'Shell',
+    'shell',
+    'execute',
+  ])('renders %s without a variant through the Bash renderer', name => {
+    const output = `stdout from ${name}`
+    const { unmount } = render(
+      <ToolCallInline
+        toolCall={{
+          id: `tool-${name}`,
+          name,
+          input: { command: 'printf hello' },
+          output,
+        }}
+      />
+    )
+
+    expect(screen.getByText('Bash')).toBeInTheDocument()
+    expect(screen.getByText('printf hello')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText(output)).toBeInTheDocument()
+    expect(screen.getAllByText('Output:')).toHaveLength(1)
+    unmount()
   })
 
   it('renders additional Command Code snake_case tools without the unhandled fallback', () => {
