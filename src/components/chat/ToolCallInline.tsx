@@ -83,6 +83,168 @@ function firstStringField(
   return undefined
 }
 
+/**
+ * Strip MCP / client prefixes from a Jean tool name and return the bare registry name.
+ * Handles: jean_get_current_context, jean-dev_list_projects, mcp:jean:list_worktrees,
+ * mcp__jean__create_session, mcp__jean-dev__get_current_context.
+ */
+export function extractJeanMcpBareToolName(name: string): string | null {
+  const trimmed = name.trim()
+  if (!trimmed) return null
+
+  if (trimmed.startsWith('mcp__')) {
+    // mcp__jean__tool or mcp__jean-dev__tool (tool may contain underscores)
+    const rest = trimmed.slice('mcp__'.length)
+    const serverSep = rest.indexOf('__')
+    if (serverSep > 0) {
+      const server = rest.slice(0, serverSep)
+      const tool = rest.slice(serverSep + 2)
+      if (
+        (server === 'jean' ||
+          server === 'jean-dev' ||
+          server.startsWith('jean')) &&
+        tool
+      ) {
+        return tool
+      }
+    }
+    return null
+  }
+
+  if (trimmed.startsWith('mcp:')) {
+    // mcp:jean:tool or mcp:jean-dev:tool
+    const parts = trimmed.split(':')
+    if (parts.length >= 3) {
+      const server = parts[1] ?? ''
+      const tool = parts.slice(2).join(':')
+      if (
+        (server === 'jean' ||
+          server === 'jean-dev' ||
+          server.startsWith('jean')) &&
+        tool
+      ) {
+        return tool
+      }
+    }
+    return null
+  }
+
+  // Client-side prefix: jean_get_current_context / jean-dev_list_projects
+  for (const prefix of ['jean-dev_', 'jean_']) {
+    if (trimmed.startsWith(prefix)) {
+      const bare = trimmed.slice(prefix.length)
+      if (bare) return bare
+    }
+  }
+
+  return null
+}
+
+export function isJeanMcpToolName(name: string): boolean {
+  return extractJeanMcpBareToolName(name) != null
+}
+
+/** True for tools that should not get the "(unhandled tool)" suffix. */
+function isRecognizedExternalTool(name: string): boolean {
+  return (
+    name.startsWith('mcp__') ||
+    name.startsWith('mcp:') ||
+    isJeanMcpToolName(name)
+  )
+}
+
+/** Title-case a snake_case / kebab-case tool id for display. */
+function humanizeSnakeCase(name: string): string {
+  return name
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ')
+}
+
+/** Friendly label for a Jean MCP tool call. */
+export function formatJeanMcpToolLabel(name: string): string {
+  const bare = extractJeanMcpBareToolName(name) ?? name
+  return `Jean: ${humanizeSnakeCase(bare)}`
+}
+
+/** Detail line for Jean MCP tools from common argument fields. */
+export function formatJeanMcpToolDetail(
+  input: Record<string, unknown>
+): string | undefined {
+  const parts: string[] = []
+  const backend = firstStringField(input, ['backend'])
+  const projectId = firstStringField(input, ['projectId', 'project_id'])
+  const worktreeId = firstStringField(input, ['worktreeId', 'worktree_id'])
+  const sessionId = firstStringField(input, ['sessionId', 'session_id'])
+  const path = firstStringField(input, ['path'])
+  const name = firstStringField(input, ['name', 'customName', 'custom_name'])
+  const branch = firstStringField(input, [
+    'baseBranch',
+    'base_branch',
+    'branchName',
+    'branch_name',
+  ])
+  const model = firstStringField(input, ['model'])
+  const message = firstStringField(input, ['message'])
+
+  if (backend) parts.push(backend)
+  if (name) parts.push(name)
+  if (branch) parts.push(branch)
+  if (model) parts.push(model)
+  if (path) parts.push(path)
+  if (message)
+    parts.push(message.length > 40 ? `${message.slice(0, 40)}…` : message)
+  // Short id suffixes only when nothing more descriptive is available
+  if (parts.length === 0) {
+    if (worktreeId) parts.push(`worktree ${worktreeId.slice(0, 8)}`)
+    else if (projectId) parts.push(`project ${projectId.slice(0, 8)}`)
+    else if (sessionId) parts.push(`session ${sessionId.slice(0, 8)}`)
+  }
+  return parts.length > 0 ? parts.join(' · ') : undefined
+}
+
+/**
+ * Unwrap meta tool wrappers (e.g. Grok/MCP bridge `use_tool`) that nest the
+ * real tool name + args under tool_name / tool_input.
+ */
+function unwrapMetaToolCall(
+  name: string,
+  input: Record<string, unknown>
+): { name: string; input: Record<string, unknown> } | null {
+  const isMeta =
+    name === 'use_tool' ||
+    name === 'useTool' ||
+    name === 'UseTool' ||
+    name === 'call_tool' ||
+    name === 'callTool' ||
+    name === 'CallTool'
+  if (!isMeta) return null
+
+  const nestedName = firstStringField(input, [
+    'tool_name',
+    'toolName',
+    'name',
+    'tool',
+  ])
+  if (!nestedName) return null
+
+  const rawNested =
+    input.tool_input ??
+    input.toolInput ??
+    input.arguments ??
+    input.args ??
+    input.input ??
+    input.parameters
+
+  let nestedInput: Record<string, unknown> = {}
+  if (rawNested && typeof rawNested === 'object' && !Array.isArray(rawNested)) {
+    nestedInput = rawNested as Record<string, unknown>
+  }
+
+  return { name: nestedName, input: nestedInput }
+}
+
 function formatCodexWebSearchDetail(
   input: Record<string, unknown>
 ): string | undefined {
@@ -463,7 +625,7 @@ export function StackedGroup({
     if (item.type === 'thinking') {
       thinkingCount++
     } else {
-      const name = getToolSummaryName(item.tool.name)
+      const name = getToolSummaryName(item.tool)
       toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1)
     }
   }
@@ -769,6 +931,13 @@ export function normalizeToolCallForDisplay(
   name: string,
   input: Record<string, unknown>
 ): { name: string; input: Record<string, unknown> } {
+  // Unwrap meta wrappers (use_tool / call_tool) before other normalization so
+  // Jean MCP and other nested tools get the right renderer.
+  const unwrapped = unwrapMetaToolCall(name, input)
+  if (unwrapped) {
+    return normalizeToolCallForDisplay(unwrapped.name, unwrapped.input)
+  }
+
   const variant = typeof input.variant === 'string' ? input.variant : undefined
   const normalizedName = (() => {
     switch (variant) {
@@ -900,8 +1069,8 @@ export function normalizeToolCallForDisplay(
   }
 }
 
-function getToolSummaryName(name: string): string {
-  switch (name) {
+function getToolSummaryName(toolCall: ToolCall): string {
+  switch (toolCall.name) {
     case 'CodexWebSearch':
       return 'Web Search'
     case 'CodexImageGeneration':
@@ -910,8 +1079,16 @@ function getToolSummaryName(name: string): string {
       return 'Image View'
     case 'CodexContextCompaction':
       return 'Context Compaction'
-    default:
-      return normalizeToolCallForDisplay(name, {}).name
+    default: {
+      const normalized = normalizeToolCallForDisplay(
+        toolCall.name,
+        (toolCall.input ?? {}) as Record<string, unknown>
+      ).name
+      if (isJeanMcpToolName(normalized) || isJeanMcpToolName(toolCall.name)) {
+        return formatJeanMcpToolLabel(normalized)
+      }
+      return normalized
+    }
   }
 }
 
@@ -1612,23 +1789,43 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     default: {
-      const isMcpTool =
-        normalized.name.startsWith('mcp__') ||
-        normalized.name.startsWith('mcp:')
+      const jeanBare = extractJeanMcpBareToolName(normalized.name)
+      if (jeanBare) {
+        const detail = formatJeanMcpToolDetail(input)
+        const expanded = toolCall.output?.trim()
+          ? toolCall.output
+          : Object.keys(input).length > 0
+            ? JSON.stringify(input, null, 2)
+            : 'No details available'
+        return {
+          icon: <Bot className="h-4 w-4 shrink-0" />,
+          label: formatJeanMcpToolLabel(normalized.name),
+          detail,
+          expandedContent: expanded,
+        }
+      }
+
+      const isKnownExternal = isRecognizedExternalTool(normalized.name)
       // Surface something useful even for tools without a dedicated renderer.
-      const detail = firstStringField(input, [
-        'query',
-        'command',
-        'path',
-        'file_path',
-        'filePath',
-        'url',
-        'pattern',
-        'description',
-        'prompt',
-        'title',
-        'name',
-      ])
+      const detail =
+        firstStringField(input, [
+          'query',
+          'command',
+          'path',
+          'file_path',
+          'filePath',
+          'url',
+          'pattern',
+          'description',
+          'prompt',
+          'title',
+          'name',
+          'tool_name',
+          'toolName',
+          'backend',
+          'projectId',
+          'worktreeId',
+        ]) ?? formatJeanMcpToolDetail(input)
       const expanded = toolCall.output?.trim()
         ? toolCall.output
         : Object.keys(input).length > 0
@@ -1636,7 +1833,7 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
           : 'No details available'
       return {
         icon: <Terminal className="h-4 w-4 shrink-0" />,
-        label: isMcpTool
+        label: isKnownExternal
           ? normalized.name
           : `${normalized.name} (unhandled tool)`,
         detail,
