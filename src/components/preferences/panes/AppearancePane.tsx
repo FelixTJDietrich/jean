@@ -369,7 +369,7 @@ export const AppearancePane: React.FC = () => {
 
           <InlineField
             label="Finished session animation"
-            description="Soft glow and bell animation on the finished-sessions badge in the title bar"
+            description="Bell animation on the finished-sessions badge in the title bar"
           >
             <Switch
               aria-label="Finished session animation"

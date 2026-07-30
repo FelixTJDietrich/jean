@@ -431,7 +431,7 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <div className={cn(animationEnabled && 'finished-session-glow')}>
+        <div>
           <button
             type="button"
             onClick={handleTriggerClick}

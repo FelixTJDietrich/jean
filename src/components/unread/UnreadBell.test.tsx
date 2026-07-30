@@ -206,10 +206,12 @@ describe('UnreadBell', () => {
     ).toBeInTheDocument()
   })
 
-  it('uses a soft glow animation on the finished-sessions badge by default', () => {
+  it('uses a bell ring animation on the finished-sessions badge by default', () => {
     const { container } = renderWithQueryClient(<UnreadBell title="Jean" />)
 
-    expect(container.querySelector('.finished-session-glow')).toBeTruthy()
+    const bell = container.querySelector('svg')
+    expect(bell?.getAttribute('class') ?? '').toContain('bell-ring')
+    expect(container.querySelector('.finished-session-glow')).toBeNull()
     expect(container.querySelector('.card-border-spin')).toBeNull()
   })
 
@@ -217,6 +219,8 @@ describe('UnreadBell', () => {
     finishedSessionAnimationEnabled = false
     const { container } = renderWithQueryClient(<UnreadBell title="Jean" />)
 
+    const bell = container.querySelector('svg')
+    expect(bell?.getAttribute('class') ?? '').not.toContain('bell-ring')
     expect(container.querySelector('.finished-session-glow')).toBeNull()
     expect(container.querySelector('.card-border-spin')).toBeNull()
     expect(

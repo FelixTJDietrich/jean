@@ -556,7 +556,7 @@ const sectionEntries: PreferenceSearchEntry[] = [
       'terminal color',
       'finished session animation',
       'finished sessions badge',
-      'session glow',
+      'session bell',
     ],
     anchorId: 'pref-appearance-section-theme',
     fallbackAnchorId: 'pref-pane-appearance',
