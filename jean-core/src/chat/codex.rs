@@ -6078,6 +6078,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6135,6 +6136,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6189,6 +6191,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6248,6 +6251,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6309,6 +6313,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6380,6 +6385,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6499,6 +6505,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6556,6 +6563,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6618,6 +6626,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6661,6 +6670,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
@@ -6818,6 +6828,7 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            checkpoint_id: None,
         };
 
         let message = parse_codex_run_to_message(&lines, &run).expect("message");
