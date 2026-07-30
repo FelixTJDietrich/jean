@@ -232,6 +232,9 @@ browser terminals can find tools installed by shell setup scripts (for example
 - Bind to `0.0.0.0` inside the container, but keep token auth enabled.
 - Mount Jean's app-data directory as a volume so projects, preferences, and sessions persist.
 - Put TLS/auth in front of the container for internet exposure.
+- For Tailscale access from a browser, prefer `tailscale serve` (HTTPS) in front
+  of `127.0.0.1` rather than plain `http://100.x.y.z` — browsers block the
+  clipboard API and other secure-context features on non-localhost HTTP.
 
 Example command:
 
