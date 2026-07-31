@@ -44,6 +44,7 @@ import {
   resolveTerminalTheme,
   type ResolvedTerminalTheme,
 } from '@/lib/terminal-theme'
+import { isArrowGestureActive } from '@/lib/terminal-arrow-gesture'
 
 type TerminalRenderer = 'xterm' | 'ghostty-web'
 type EmbeddedTerminal = XtermTerminal | GhosttyWebTerminal
@@ -266,6 +267,12 @@ function attachTouchScroll(instance: PersistentTerminal): (() => void) | null {
   }
 
   const onTouchMove = (event: TouchEvent): void => {
+    // Yield to the Termius-style long-press arrow gesture when active.
+    if (isArrowGestureActive(instance.terminalId)) {
+      lastY = null
+      remainder = 0
+      return
+    }
     if (lastY === null || event.touches.length !== 1) return
     const y = event.touches[0]?.clientY
     if (y === undefined) return
@@ -614,6 +621,15 @@ function queueTerminalInput(terminalId: string, data: string): void {
     INPUT_FLUSH_DELAY_MS
   )
   inputBuffers.set(terminalId, buffer)
+}
+
+/**
+ * Inject input into a terminal PTY (extra-keys bar, image drop, tests).
+ * Uses the same coalescing path as xterm onData.
+ */
+export function writeTerminalInput(terminalId: string, data: string): void {
+  if (!data) return
+  queueTerminalInput(terminalId, data)
 }
 
 function queueTerminalOutput(instance: PersistentTerminal, data: string): void {
