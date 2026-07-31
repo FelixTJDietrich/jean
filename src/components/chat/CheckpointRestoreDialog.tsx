@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Loader2, RotateCcw, Sparkles } from 'lucide-react'
+import {
+  AlertTriangle,
+  ChevronLeft,
+  Loader2,
+  RotateCcw,
+  Sparkles,
+  X,
+} from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -34,11 +41,11 @@ import type {
 function pathStatusLabel(status: RestorePathStatus): string {
   switch (status) {
     case 'clean':
-      return 'Clean'
+      return 'Safe'
     case 'conflictedLaterActivity':
-      return 'Later turn'
+      return 'Edited later'
     case 'conflictedWorkingTree':
-      return 'Edited after'
+      return 'Changed after'
     case 'binaryOrUnreadable':
       return 'Binary'
     default:
@@ -170,34 +177,34 @@ export function CheckpointRestoreDialog({
     switch (pendingApproval) {
       case 'cleanOnly':
         return {
-          title: 'Approve restore?',
-          body: `Restore ${restoreAnalysis?.cleanCount ?? 0} clean file(s) to the pre-turn snapshot. Conflicted files will be left unchanged.`,
-          confirmLabel: 'Approve restore',
+          title: 'Approve safe undo?',
+          body: `Revert ${restoreAnalysis?.cleanCount ?? 0} safe file(s) to how they looked before this turn. Files edited later stay unchanged.`,
+          confirmLabel: 'Yes, undo safe files',
           destructive: false,
         }
       case 'allTurnFiles':
         return {
-          title: 'Approve force restore?',
-          body: `Restore all ${restoreAnalysis?.turnPaths.length ?? 0} file(s) this turn changed. Later edits on those paths (including other sessions) will be overwritten.`,
-          confirmLabel: 'Approve force restore',
+          title: 'Approve undoing all turn files?',
+          body: `Revert all ${restoreAnalysis?.turnPaths.length ?? 0} file(s) this turn changed. Later edits on those paths (including other sessions) will be overwritten.`,
+          confirmLabel: 'Yes, undo all turn files',
           destructive: true,
         }
       case 'full':
         return {
-          title: 'Approve full worktree restore?',
+          title: 'Approve full project reset?',
           body: 'Reset the entire worktree to the state before this AI turn. All later uncommitted changes will be lost (including other sessions\' work on this worktree and files created after the checkpoint).',
-          confirmLabel: 'Approve full restore',
+          confirmLabel: 'Yes, reset entire project',
           destructive: true,
         }
       case 'applyAi':
         return {
-          title: 'Approve AI restore?',
+          title: 'Approve smart AI undo?',
           body: `Apply AI proposals for ${selectedAiCount} selected path(s)${
             aiProposal && aiProposal.cleanPaths.length > 0
-              ? ` and restore ${aiProposal.cleanPaths.length} clean file(s)`
+              ? ` and exactly undo ${aiProposal.cleanPaths.length} safe file(s)`
               : ''
-          }. Review the proposal carefully before approving.`,
-          confirmLabel: 'Approve AI restore',
+          }. Spot-check the proposal — AI merges can be wrong.`,
+          confirmLabel: 'Yes, apply smart undo',
           destructive: false,
         }
       default:
@@ -315,12 +322,21 @@ export function CheckpointRestoreDialog({
   }, [])
 
   const showApproval = pendingApproval != null && approvalCopy != null
+  const busy = restoring || proposing
+  const cleanCount = restoreAnalysis?.cleanCount ?? 0
+  const conflictCount = restoreAnalysis?.conflictCount ?? 0
+  const turnCount = restoreAnalysis?.turnPaths.length ?? 0
+
+  const closeDialog = useCallback(() => {
+    if (busy) return
+    onOpenChange(false)
+  }, [busy, onOpenChange])
 
   return (
     <AlertDialog
       open={open && !!checkpoint}
       onOpenChange={next => {
-        if (!next && !restoring && !proposing) onOpenChange(false)
+        if (!next && !busy) onOpenChange(false)
       }}
     >
       <AlertDialogContent
@@ -335,14 +351,29 @@ export function CheckpointRestoreDialog({
           'sm:p-0'
         )}
       >
-        <AlertDialogHeader className="shrink-0 space-y-2 border-b border-border px-4 pb-3 pt-4 text-left sm:px-6 sm:pt-5">
-          <AlertDialogTitle className="pr-2 text-base sm:text-lg">
-            {showApproval
-              ? approvalCopy.title
-              : aiProposal
-                ? 'Review AI restore proposal'
-                : 'Restore this agent turn?'}
-          </AlertDialogTitle>
+        <AlertDialogHeader className="relative shrink-0 space-y-2 border-b border-border px-4 pb-3 pt-4 text-left sm:px-6 sm:pt-5">
+          <div className="flex items-start gap-2 pr-8">
+            <AlertDialogTitle className="min-w-0 flex-1 text-base sm:text-lg">
+              {showApproval
+                ? approvalCopy.title
+                : aiProposal
+                  ? 'Review AI restore proposal'
+                  : 'Undo this agent turn'}
+            </AlertDialogTitle>
+            <button
+              type="button"
+              aria-label="Close"
+              disabled={busy}
+              onClick={closeDialog}
+              className="absolute right-3 top-3 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 sm:right-4 sm:top-4"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {/* Keep a cancel for a11y / Esc; visually hidden (X is the control). */}
+          <AlertDialogCancel className="sr-only" disabled={busy}>
+            Close
+          </AlertDialogCancel>
           <RestoreRiskHint />
         </AlertDialogHeader>
 
@@ -380,19 +411,19 @@ export function CheckpointRestoreDialog({
               !showApproval && (
                 <>
                   <p>
-                    Turn touched{' '}
+                    This turn changed{' '}
                     <span className="font-medium text-foreground">
-                      {restoreAnalysis.turnPaths.length}
+                      {turnCount}
                     </span>{' '}
                     file(s):{' '}
                     <span className="text-green-600 dark:text-green-400">
-                      {restoreAnalysis.cleanCount} clean
+                      {cleanCount} safe to undo
                     </span>
-                    {restoreAnalysis.conflictCount > 0 && (
+                    {conflictCount > 0 && (
                       <>
                         ,{' '}
                         <span className="text-amber-600 dark:text-amber-400">
-                          {restoreAnalysis.conflictCount} conflicted
+                          {conflictCount} also edited later
                         </span>
                       </>
                     )}
@@ -400,9 +431,8 @@ export function CheckpointRestoreDialog({
                   </p>
                   {restoreAnalysis.overlappingSessionIds.length > 0 && (
                     <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-800 dark:text-amber-200">
-                      Other session(s) also edited overlapping files in this
-                      worktree. Prefer clean-only or AI-assisted restore instead
-                      of full worktree restore.
+                      Other session(s) edited some of the same files afterward.
+                      Prefer a safe undo or smart AI undo so their work is kept.
                     </p>
                   )}
                   {restoreAnalysis.paths.length > 0 && (
@@ -429,10 +459,9 @@ export function CheckpointRestoreDialog({
                       ))}
                     </ul>
                   )}
-                  <p className="text-xs">
-                    Choose a restore mode, then{' '}
-                    <strong className="text-foreground">Approve</strong> before
-                    any files are changed.
+                  <p className="text-xs text-muted-foreground">
+                    Pick how far to undo. You will confirm on the next step
+                    before any files change.
                   </p>
                 </>
               )}
@@ -444,11 +473,11 @@ export function CheckpointRestoreDialog({
                 )}
                 {aiProposal.cleanPaths.length > 0 && (
                   <p className="text-xs">
-                    Will also restore{' '}
+                    Also undoes{' '}
                     <span className="font-medium text-foreground">
                       {aiProposal.cleanPaths.length}
                     </span>{' '}
-                    clean file(s) deterministically.
+                    safe file(s) exactly (no AI).
                   </p>
                 )}
                 {aiProposal.files.length > 0 ? (
@@ -493,8 +522,8 @@ export function CheckpointRestoreDialog({
                   <p className="text-xs">No AI file proposals.</p>
                 )}
                 <p className="text-xs">
-                  Select paths, then request approval. Nothing is written until
-                  you approve.
+                  Uncheck anything you do not want changed, then continue to
+                  approve.
                 </p>
               </>
             )}
@@ -508,17 +537,7 @@ export function CheckpointRestoreDialog({
           )}
         >
           {showApproval ? (
-            <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-              <AlertDialogCancel
-                disabled={restoring}
-                className="m-0 w-full sm:w-auto"
-                onClick={e => {
-                  e.preventDefault()
-                  setPendingApproval(null)
-                }}
-              >
-                Back
-              </AlertDialogCancel>
+            <div className="flex w-full flex-col gap-2 sm:flex-row-reverse sm:flex-wrap">
               <AlertDialogAction
                 onClick={e => {
                   e.preventDefault()
@@ -526,7 +545,7 @@ export function CheckpointRestoreDialog({
                 }}
                 disabled={restoring}
                 className={cn(
-                  'm-0 w-full sm:w-auto',
+                  'm-0 h-auto min-h-10 w-full whitespace-normal py-2.5 sm:w-auto sm:min-w-[10rem]',
                   approvalCopy.destructive
                     ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
                     : undefined
@@ -541,105 +560,135 @@ export function CheckpointRestoreDialog({
                   approvalCopy.confirmLabel
                 )}
               </AlertDialogAction>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={restoring}
+                className="w-full sm:w-auto"
+                onClick={() => setPendingApproval(null)}
+              >
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back
+              </Button>
             </div>
           ) : aiProposal ? (
-            <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-              <AlertDialogCancel
-                disabled={restoring || proposing}
-                className="m-0 w-full sm:w-auto"
-                onClick={e => {
-                  e.preventDefault()
-                  setAiProposal(null)
-                  setSelectedProposalPaths(new Set())
-                  setPendingApproval(null)
-                }}
-              >
-                Back
-              </AlertDialogCancel>
+            <div className="flex w-full flex-col gap-2 sm:flex-row-reverse sm:flex-wrap">
               <Button
-                size="sm"
-                className="w-full sm:w-auto"
+                className="h-auto min-h-10 w-full whitespace-normal py-2.5 sm:w-auto"
                 disabled={
-                  restoring ||
-                  proposing ||
+                  busy ||
                   (selectedAiCount === 0 &&
                     aiProposal.cleanPaths.length === 0)
                 }
                 onClick={() => setPendingApproval('applyAi')}
               >
-                Request approval…
+                Continue to approve
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                className="w-full sm:w-auto"
+                onClick={() => {
+                  setAiProposal(null)
+                  setSelectedProposalPaths(new Set())
+                  setPendingApproval(null)
+                }}
+              >
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back
               </Button>
             </div>
           ) : (
             <div className="flex w-full flex-col gap-2">
-              <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-                <AlertDialogCancel
-                  disabled={restoring || proposing}
-                  className="m-0 w-full sm:w-auto"
-                >
-                  Cancel
-                </AlertDialogCancel>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="w-full sm:w-auto"
-                  disabled={
-                    restoring ||
-                    proposing ||
-                    analysisLoading ||
-                    !restoreAnalysis ||
-                    restoreAnalysis.cleanCount === 0
-                  }
-                  onClick={() => setPendingApproval('cleanOnly')}
-                >
-                  <RotateCcw className="mr-2 h-3.5 w-3.5" />
-                  Restore clean only
-                  {restoreAnalysis ? ` (${restoreAnalysis.cleanCount})` : ''}
-                </Button>
-                <Button
-                  size="sm"
-                  className="w-full sm:w-auto"
-                  disabled={
-                    restoring ||
-                    proposing ||
-                    analysisLoading ||
-                    !restoreAnalysis ||
-                    restoreAnalysis.conflictCount === 0
-                  }
-                  onClick={() => void handleProposeAiRestore()}
-                >
+              {/* Recommended / safe path first */}
+              <Button
+                type="button"
+                variant="default"
+                className="h-auto w-full flex-col items-stretch gap-0.5 whitespace-normal px-3 py-3 text-left"
+                disabled={
+                  busy || analysisLoading || !restoreAnalysis || cleanCount === 0
+                }
+                onClick={() => setPendingApproval('cleanOnly')}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold">
+                  <RotateCcw className="h-4 w-4 shrink-0" />
+                  Undo safe files only
+                  {restoreAnalysis ? ` (${cleanCount})` : ''}
+                </span>
+                <span className="pl-6 text-xs font-normal opacity-90">
+                  Best default. Only reverts files nothing edited after this
+                  turn. Leaves later work alone.
+                </span>
+              </Button>
+
+              <Button
+                type="button"
+                variant="secondary"
+                className="h-auto w-full flex-col items-stretch gap-0.5 whitespace-normal px-3 py-3 text-left"
+                disabled={
+                  busy ||
+                  analysisLoading ||
+                  !restoreAnalysis ||
+                  conflictCount === 0
+                }
+                onClick={() => void handleProposeAiRestore()}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold">
                   {proposing ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
-                    <Sparkles className="mr-2 h-3.5 w-3.5" />
+                    <Sparkles className="h-4 w-4 shrink-0" />
                   )}
-                  AI-assisted…
-                </Button>
-              </div>
-              <div className="flex w-full flex-col gap-2 border-t border-border pt-2 sm:flex-row sm:flex-wrap sm:justify-end">
+                  {proposing
+                    ? 'Preparing smart undo…'
+                    : `Smart undo with AI (${conflictCount} conflicted)`}
+                </span>
+                <span className="pl-6 text-xs font-normal opacity-90">
+                  Tries to remove this turn&apos;s edits while keeping later
+                  changes on the same files. You review before apply.
+                </span>
+              </Button>
+
+              <div className="space-y-2 border-t border-border pt-2">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Stronger options
+                </p>
                 <Button
-                  size="sm"
+                  type="button"
                   variant="outline"
-                  className="w-full sm:w-auto"
+                  className="h-auto w-full flex-col items-stretch gap-0.5 whitespace-normal px-3 py-3 text-left"
                   disabled={
-                    restoring ||
-                    proposing ||
+                    busy ||
                     analysisLoading ||
                     !restoreAnalysis ||
-                    restoreAnalysis.turnPaths.length === 0
+                    turnCount === 0
                   }
                   onClick={() => setPendingApproval('allTurnFiles')}
                 >
-                  Force restore all turn files
+                  <span className="text-sm font-semibold">
+                    Undo all files from this turn
+                    {restoreAnalysis ? ` (${turnCount})` : ''}
+                  </span>
+                  <span className="text-xs font-normal text-muted-foreground">
+                    Reverts every path this turn touched, even if another session
+                    edited them later. Can discard later work on those files.
+                  </span>
                 </Button>
                 <Button
-                  size="sm"
+                  type="button"
                   variant="ghost"
-                  className="w-full text-destructive hover:text-destructive sm:w-auto"
-                  disabled={restoring || proposing || analysisLoading}
+                  className="h-auto w-full flex-col items-stretch gap-0.5 whitespace-normal px-3 py-3 text-left text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={busy || analysisLoading}
                   onClick={() => setPendingApproval('full')}
                 >
-                  Full worktree restore…
+                  <span className="text-sm font-semibold">
+                    Reset entire project to before this turn
+                  </span>
+                  <span className="text-xs font-normal opacity-90">
+                    Nuclear option. Drops all later uncommitted changes in the
+                    worktree (any session).
+                  </span>
                 </Button>
               </div>
             </div>

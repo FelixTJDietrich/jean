@@ -8,6 +8,7 @@ import {
   Trash2,
   FileText,
   ChevronRight,
+  X,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -584,14 +585,25 @@ export function CheckpointsTabView({
       >
         <AlertDialogContent
           className={cn(
-            'flex w-[calc(100vw-1rem)] max-w-none flex-col gap-3 p-4',
+            'relative flex w-[calc(100vw-1rem)] max-w-none flex-col gap-3 p-4',
             'max-h-[min(92dvh,100%)]',
             'max-sm:top-auto max-sm:bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-sm:left-1/2 max-sm:translate-x-[-50%] max-sm:translate-y-0 max-sm:rounded-xl',
             'sm:max-w-lg sm:p-6'
           )}
         >
-          <AlertDialogHeader className="text-left">
-            <AlertDialogTitle>Approve file restore?</AlertDialogTitle>
+          <button
+            type="button"
+            aria-label="Close"
+            disabled={fileRestoring}
+            onClick={() => {
+              if (!fileRestoring) setFileRestoreTarget(null)
+            }}
+            className="absolute right-3 top-3 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 sm:right-4 sm:top-4"
+          >
+            <X className="h-4 w-4" />
+          </button>
+          <AlertDialogHeader className="pr-8 text-left">
+            <AlertDialogTitle>Undo this file?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3 text-sm text-muted-foreground">
                 <div className="flex gap-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-left text-xs leading-snug text-amber-950 dark:text-amber-100">
@@ -603,13 +615,13 @@ export function CheckpointsTabView({
                   </p>
                 </div>
                 <p>
-                  Restore{' '}
+                  Revert{' '}
                   <span className="font-mono text-foreground">
                     {fileRestoreTarget
                       ? getFilename(fileRestoreTarget)
                       : 'this file'}
                   </span>{' '}
-                  to the pre-turn checkpoint snapshot.
+                  to how it looked before this agent turn.
                 </p>
                 {fileRestoreTarget && (
                   <p className="break-all font-mono text-xs text-muted-foreground">
@@ -619,13 +631,7 @@ export function CheckpointsTabView({
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter className="flex-col-reverse gap-2 sm:flex-row">
-            <AlertDialogCancel
-              disabled={fileRestoring}
-              className="m-0 w-full sm:w-auto"
-            >
-              Cancel
-            </AlertDialogCancel>
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-row-reverse">
             <AlertDialogAction
               disabled={fileRestoring}
               className="m-0 w-full sm:w-auto"
@@ -640,9 +646,12 @@ export function CheckpointsTabView({
                   Restoring…
                 </>
               ) : (
-                'Approve restore'
+                'Yes, undo this file'
               )}
             </AlertDialogAction>
+            <AlertDialogCancel className="sr-only" disabled={fileRestoring}>
+              Close
+            </AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
