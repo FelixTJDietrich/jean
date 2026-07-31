@@ -17,6 +17,8 @@ import type {
   ReviewFinding,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { getProviderChangeBeforeMessage } from './message-settings-labels'
+import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { getAssistantDurationMs } from './time-utils'
 import {
   capturePrependScrollAnchor,
@@ -256,6 +258,19 @@ export const VirtualizedMessageList = memo(
         return map
       }, [messages])
 
+      // Pre-compute provider switches between consecutive user prompts
+      const providerChangeMap = useMemo(() => {
+        const map = new Map<
+          number,
+          ReturnType<typeof getProviderChangeBeforeMessage>
+        >()
+        for (let i = 0; i < messages.length; i++) {
+          const change = getProviderChangeBeforeMessage(messages, i)
+          if (change) map.set(i, change)
+        }
+        return map
+      }, [messages])
+
       // Load more messages when scrolling near the top.
       // First expands the in-memory window; once exhausted, requests an older
       // window from the backend (which prepends to `messages` async).
@@ -437,6 +452,7 @@ export const VirtualizedMessageList = memo(
               globalIndex,
               completedDurationMs
             )
+            const providerChange = providerChangeMap.get(globalIndex) ?? null
 
             return (
               <div
@@ -450,6 +466,9 @@ export const VirtualizedMessageList = memo(
                   globalIndex === messages.length - 1 && isSending ? '' : 'pb-4'
                 }
               >
+                {providerChange && (
+                  <ProviderChangeSeparator change={providerChange} />
+                )}
                 <MessageItem
                   message={message}
                   getMessages={getMessages}

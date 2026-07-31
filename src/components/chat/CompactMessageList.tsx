@@ -32,6 +32,8 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { getProviderChangeBeforeMessage } from './message-settings-labels'
+import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { EditedFilesDisplay } from './EditedFilesDisplay'
 import { AskUserQuestion } from './AskUserQuestion'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
@@ -718,6 +720,19 @@ export const CompactMessageList = memo(
         return map
       }, [messages])
 
+      // Pre-compute provider switches between consecutive user prompts
+      const providerChangeMap = useMemo(() => {
+        const map = new Map<
+          number,
+          ReturnType<typeof getProviderChangeBeforeMessage>
+        >()
+        for (let i = 0; i < messages.length; i++) {
+          const change = getProviderChangeBeforeMessage(messages, i)
+          if (change) map.set(i, change)
+        }
+        return map
+      }, [messages])
+
       const hasFollowUpFor = useCallback(
         (globalIndex: number) => hasFollowUpMap.get(globalIndex) ?? false,
         [hasFollowUpMap]
@@ -1045,6 +1060,8 @@ export const CompactMessageList = memo(
               const hasFollowUpMessage =
                 item.message.role === 'assistant' &&
                 hasFollowUpFor(item.globalIndex)
+              const providerChange =
+                providerChangeMap.get(item.globalIndex) ?? null
               return (
                 <div
                   key={item.message.id}
@@ -1057,6 +1074,9 @@ export const CompactMessageList = memo(
                     item.globalIndex === lastIndex && isSending ? '' : 'pb-4'
                   }
                 >
+                  {providerChange && (
+                    <ProviderChangeSeparator change={providerChange} />
+                  )}
                   {renderMessageItem(
                     { message: item.message, globalIndex: item.globalIndex },
                     {
