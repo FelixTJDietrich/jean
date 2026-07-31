@@ -148,7 +148,7 @@ describe('TerminalArrowGesture', () => {
     surface.remove()
   })
 
-  it('repeats the arrow key while the direction is held', () => {
+  it('repeats slowly at gear 0 so one step is deliberate', () => {
     const surface = document.createElement('div')
     document.body.appendChild(surface)
     const surfaceRef = { current: surface }
@@ -162,23 +162,72 @@ describe('TerminalArrowGesture', () => {
       vi.advanceTimersByTime(ARROW_GESTURE_LONG_PRESS_MS)
     })
 
+    // Short pull (~35px) → gear 0
     act(() => {
-      fireTouch(surface, 'touchmove', 100, 30)
+      fireTouch(surface, 'touchmove', 100, 65)
     })
 
     expect(writeTerminalInput).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('terminal-arrow-gesture-pad')).toHaveAttribute(
+      'data-gear',
+      '0'
+    )
+    expect(screen.getByTestId('terminal-arrow-gear-meter')).toHaveAttribute(
+      'data-gear',
+      '0'
+    )
+
+    // Gear 0 first-repeat delay is 650ms — still one key before that.
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    expect(writeTerminalInput).toHaveBeenCalledTimes(1)
 
     act(() => {
-      vi.advanceTimersByTime(200)
+      vi.advanceTimersByTime(300)
+    })
+    expect(writeTerminalInput.mock.calls.length).toBeGreaterThan(1)
+
+    act(() => {
+      fireTouch(surface, 'touchend', 100, 65)
     })
 
-    expect(writeTerminalInput.mock.calls.length).toBeGreaterThan(1)
-    expect(
-      writeTerminalInput.mock.calls.every(call => call[1] === '\x1b[A')
-    ).toBe(true)
+    surface.remove()
+  })
+
+  it('shows higher gear indicators when pulled farther', () => {
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const surfaceRef = { current: surface }
+
+    render(
+      <TerminalArrowGesture terminalId="term-1" surfaceRef={surfaceRef} />
+    )
+
+    fireTouch(surface, 'touchstart', 100, 100)
+    act(() => {
+      vi.advanceTimersByTime(ARROW_GESTURE_LONG_PRESS_MS)
+    })
+
+    // Far pull → gear 2
+    act(() => {
+      fireTouch(surface, 'touchmove', 100, -40)
+    })
+
+    const pad = screen.getByTestId('terminal-arrow-gesture-pad')
+    expect(pad).toHaveAttribute('data-gear', '2')
+    expect(pad).toHaveAttribute('data-direction', 'up')
+    expect(screen.getByTestId('terminal-arrow-active-up')).toHaveAttribute(
+      'data-gear',
+      '2'
+    )
+    expect(screen.getByTestId('terminal-arrow-gear-meter')).toHaveAttribute(
+      'data-gear',
+      '2'
+    )
 
     act(() => {
-      fireTouch(surface, 'touchend', 100, 30)
+      fireTouch(surface, 'touchend', 100, -40)
     })
 
     surface.remove()

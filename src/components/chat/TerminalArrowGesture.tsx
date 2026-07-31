@@ -2,10 +2,18 @@ import {
   useEffect,
   useRef,
   useState,
-  type ReactNode,
   type RefObject,
 } from 'react'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   focusTerminal,
@@ -18,8 +26,10 @@ import {
   ARROW_KEY_SEQUENCES,
   arrowRepeatIntervalMs,
   resolveArrowDirection,
+  resolveArrowSpeedGear,
   setArrowGestureActive,
   type ArrowDirection,
+  type ArrowSpeedGear,
 } from '@/lib/terminal-arrow-gesture'
 
 interface TerminalArrowGestureProps {
@@ -30,11 +40,25 @@ interface TerminalArrowGestureProps {
 }
 
 /** Pad size in CSS px — keep in sync with the rendered box. */
-export const ARROW_GESTURE_PAD_SIZE = 88
+export const ARROW_GESTURE_PAD_SIZE = 96
+
+const DIRECTION_ICONS = {
+  up: ArrowUp,
+  down: ArrowDown,
+  left: ArrowLeft,
+  right: ArrowRight,
+} as const
+
+const DIRECTION_CHEVRONS = {
+  up: ChevronUp,
+  down: ChevronDown,
+  left: ChevronLeft,
+  right: ChevronRight,
+} as const
 
 /**
  * Termius-style motion pad: long-press the terminal, drag up/down/left/right
- * to send arrow keys (history / cursor). Hold further for faster repeat.
+ * to send arrow keys (history / cursor). Pull farther for 3 speed gears.
  *
  * Render this as a flex sibling *above* the terminal surface so the pad sits
  * in its own chrome row and never covers emulator text.
@@ -46,12 +70,16 @@ export function TerminalArrowGesture({
 }: TerminalArrowGestureProps) {
   const [active, setActive] = useState(false)
   const [direction, setDirection] = useState<ArrowDirection | null>(null)
+  const [gear, setGear] = useState<ArrowSpeedGear>(0)
   const activeRef = useRef(false)
   const originRef = useRef<{ x: number; y: number } | null>(null)
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const repeatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const directionRef = useRef<ArrowDirection | null>(null)
   const distanceRef = useRef(0)
+  const gearRef = useRef<ArrowSpeedGear>(0)
+  /** True until the first auto-repeat after entering a direction. */
+  const awaitingFirstRepeatRef = useRef(false)
 
   useEffect(() => {
     if (!enabled) return
@@ -79,15 +107,15 @@ export function TerminalArrowGesture({
     /** Start (or restart) auto-repeat. Interval is re-read each tick for gears. */
     const scheduleRepeat = () => {
       clearRepeatTimer()
-      const tick = () => {
+      const isFirst = awaitingFirstRepeatRef.current
+      const interval = arrowRepeatIntervalMs(distanceRef.current, isFirst)
+      repeatTimerRef.current = setTimeout(() => {
         const dir = directionRef.current
         if (!activeRef.current || !dir) return
+        awaitingFirstRepeatRef.current = false
         sendArrow(dir)
-        const interval = arrowRepeatIntervalMs(distanceRef.current)
-        repeatTimerRef.current = setTimeout(tick, interval)
-      }
-      const interval = arrowRepeatIntervalMs(distanceRef.current)
-      repeatTimerRef.current = setTimeout(tick, interval)
+        scheduleRepeat()
+      }, interval)
     }
 
     const activate = (x: number, y: number) => {
@@ -97,7 +125,10 @@ export function TerminalArrowGesture({
       originRef.current = { x, y }
       directionRef.current = null
       distanceRef.current = 0
+      gearRef.current = 0
+      awaitingFirstRepeatRef.current = false
       setDirection(null)
+      setGear(0)
       setActive(true)
       focusTerminal(terminalId)
     }
@@ -110,7 +141,10 @@ export function TerminalArrowGesture({
       originRef.current = null
       directionRef.current = null
       distanceRef.current = 0
+      gearRef.current = 0
+      awaitingFirstRepeatRef.current = false
       setDirection(null)
+      setGear(0)
       setActive(false)
     }
 
@@ -123,20 +157,32 @@ export function TerminalArrowGesture({
       const distance = Math.hypot(dx, dy)
       distanceRef.current = distance
 
-      const next = resolveArrowDirection(dx, dy, ARROW_GESTURE_DEADZONE_PX)
-      const prev = directionRef.current
+      const nextDir = resolveArrowDirection(dx, dy, ARROW_GESTURE_DEADZONE_PX)
+      const nextGear = nextDir
+        ? resolveArrowSpeedGear(distance)
+        : (0 as ArrowSpeedGear)
+      const prevDir = directionRef.current
+      const prevGear = gearRef.current
 
-      if (next !== prev) {
-        directionRef.current = next
-        setDirection(next)
-        if (next) {
-          sendArrow(next)
+      if (nextGear !== prevGear) {
+        gearRef.current = nextGear
+        setGear(nextGear)
+      }
+
+      if (nextDir !== prevDir) {
+        directionRef.current = nextDir
+        setDirection(nextDir)
+        if (nextDir) {
+          // One deliberate step immediately; auto-repeat follows gear timing.
+          sendArrow(nextDir)
+          awaitingFirstRepeatRef.current = true
           scheduleRepeat()
         } else {
           clearRepeatTimer()
+          awaitingFirstRepeatRef.current = false
         }
       }
-      // Same direction: distanceRef already updated; next tick picks new gear.
+      // Same direction: distance/gear refs update; next tick picks new interval.
     }
 
     const onTouchStart = (event: TouchEvent) => {
@@ -225,6 +271,8 @@ export function TerminalArrowGesture({
   return (
     <div
       data-testid="terminal-arrow-gesture-pad"
+      data-gear={gear}
+      data-direction={direction ?? ''}
       role="presentation"
       aria-hidden
       className="pointer-events-none flex shrink-0 justify-end px-2 pt-1.5 pb-0.5"
@@ -240,13 +288,29 @@ export function TerminalArrowGesture({
         }}
       >
         <PadCell />
-        <PadCell active={direction === 'up'} icon={<ArrowUp />} />
+        <PadCell
+          direction="up"
+          active={direction === 'up'}
+          gear={direction === 'up' ? gear : 0}
+        />
         <PadCell />
-        <PadCell active={direction === 'left'} icon={<ArrowLeft />} />
-        <PadCell center />
-        <PadCell active={direction === 'right'} icon={<ArrowRight />} />
+        <PadCell
+          direction="left"
+          active={direction === 'left'}
+          gear={direction === 'left' ? gear : 0}
+        />
+        <PadCell center gear={direction ? gear : 0} hasDirection={!!direction} />
+        <PadCell
+          direction="right"
+          active={direction === 'right'}
+          gear={direction === 'right' ? gear : 0}
+        />
         <PadCell />
-        <PadCell active={direction === 'down'} icon={<ArrowDown />} />
+        <PadCell
+          direction="down"
+          active={direction === 'down'}
+          gear={direction === 'down' ? gear : 0}
+        />
         <PadCell />
       </div>
     </div>
@@ -255,35 +319,94 @@ export function TerminalArrowGesture({
 
 function PadCell({
   active,
-  icon,
+  direction,
+  gear = 0,
   center,
+  hasDirection,
 }: {
   active?: boolean
-  icon?: ReactNode
+  direction?: ArrowDirection
+  gear?: ArrowSpeedGear
   center?: boolean
+  hasDirection?: boolean
 }) {
+  if (center) {
+    // Three-step pull meter: fills 1 / 2 / 3 segments as you pull farther.
+    return (
+      <div className="flex items-center justify-center">
+        <div
+          className="flex gap-0.5"
+          data-testid="terminal-arrow-gear-meter"
+          data-gear={hasDirection ? gear : -1}
+        >
+          {([0, 1, 2] as const).map(level => (
+            <span
+              key={level}
+              className={cn(
+                'size-1.5 rounded-full transition-colors',
+                hasDirection && gear >= level
+                  ? level === 0
+                    ? 'bg-primary/70'
+                    : level === 1
+                      ? 'bg-primary/85'
+                      : 'bg-primary'
+                  : 'bg-muted-foreground/30'
+              )}
+            />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!direction) {
+    return <div className="flex items-center justify-center" />
+  }
+
+  const Icon = DIRECTION_ICONS[direction]
+  const Chevron = DIRECTION_CHEVRONS[direction]
+  // Gear 0 = single arrow; gear 1–2 stack extra chevrons so pull depth is visible.
+  const chevronCount = active ? gear : 0
+
   return (
     <div
       className={cn(
-        'flex items-center justify-center',
-        center && 'rounded-full',
-        active && 'text-primary',
-        !active && icon && 'text-muted-foreground/80',
-        active && 'scale-110'
+        'flex items-center justify-center transition-transform',
+        active && 'text-primary scale-105',
+        !active && 'text-muted-foreground/75'
       )}
+      data-testid={active ? `terminal-arrow-active-${direction}` : undefined}
+      data-gear={active ? gear : undefined}
     >
-      {icon ? (
-        <span
-          className={cn(
-            'flex size-7 items-center justify-center rounded-md transition-transform',
-            active && 'bg-primary/20'
-          )}
-        >
-          <span className="[&>svg]:size-4">{icon}</span>
-        </span>
-      ) : center ? (
-        <span className="size-1.5 rounded-full bg-muted-foreground/40" />
-      ) : null}
+      <span
+        className={cn(
+          'flex flex-col items-center justify-center rounded-md transition-colors',
+          direction === 'left' || direction === 'right'
+            ? 'flex-row'
+            : 'flex-col',
+          active && 'bg-primary/15 px-0.5 py-0.5'
+        )}
+      >
+        {active && chevronCount >= 2 && (
+          <Chevron
+            className={cn(
+              'size-2.5 opacity-70',
+              (direction === 'down' || direction === 'right') && 'order-last'
+            )}
+            strokeWidth={2.5}
+          />
+        )}
+        {active && chevronCount >= 1 && (
+          <Chevron
+            className={cn(
+              'size-3 opacity-85',
+              (direction === 'down' || direction === 'right') && 'order-last'
+            )}
+            strokeWidth={2.5}
+          />
+        )}
+        <Icon className="size-4" strokeWidth={active ? 2.5 : 2} />
+      </span>
     </div>
   )
 }

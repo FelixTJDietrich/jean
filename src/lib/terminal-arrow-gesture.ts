@@ -1,10 +1,13 @@
 /**
  * Termius-style long-press + drag arrow-key gesture helpers.
  * Long-press the terminal, drag in a direction → CSI arrow sequences.
- * Farther drag → faster repeat (3 speed gears).
+ * Pull farther from the press origin → faster repeat (3 speed gears).
  */
 
 export type ArrowDirection = 'up' | 'down' | 'left' | 'right'
+
+/** Speed gear 0 (slowest / closest) … 2 (fastest / farthest pull). */
+export type ArrowSpeedGear = 0 | 1 | 2
 
 export const ARROW_KEY_SEQUENCES: Record<ArrowDirection, string> = {
   up: '\x1b[A',
@@ -20,13 +23,26 @@ export const ARROW_GESTURE_LONG_PRESS_MS = 400
 export const ARROW_GESTURE_CANCEL_MOVE_PX = 12
 
 /** Deadzone around the origin before a direction registers. */
-export const ARROW_GESTURE_DEADZONE_PX = 18
+export const ARROW_GESTURE_DEADZONE_PX = 24
 
-/** Distance thresholds for speed gears (px from origin). */
-export const ARROW_GESTURE_GEAR_DISTANCES = [0, 48, 96] as const
+/**
+ * Distance thresholds (px from press origin) for gears 0 / 1 / 2.
+ * Index i is the minimum distance to reach gear i.
+ * Gear 0 starts as soon as the deadzone is cleared.
+ */
+export const ARROW_GESTURE_GEAR_DISTANCES = [0, 56, 112] as const
 
-/** Repeat intervals per gear (ms) — faster when farther from origin. */
-export const ARROW_GESTURE_GEAR_INTERVALS_MS = [140, 75, 40] as const
+/**
+ * Auto-repeat interval per gear (ms).
+ * Gear 0 is deliberately slow so a short pull steps once at a time.
+ */
+export const ARROW_GESTURE_GEAR_INTERVALS_MS = [520, 240, 100] as const
+
+/**
+ * Extra delay before the first auto-repeat at gear 0, so one intentional
+ * step doesn't immediately become a stream.
+ */
+export const ARROW_GESTURE_GEAR0_INITIAL_REPEAT_DELAY_MS = 650
 
 const activeGestures = new Set<string>()
 
@@ -61,18 +77,28 @@ export function resolveArrowDirection(
 export function resolveArrowSpeedGear(
   distancePx: number,
   gearDistances: readonly number[] = ARROW_GESTURE_GEAR_DISTANCES
-): number {
-  let gear = 0
+): ArrowSpeedGear {
+  let gear: ArrowSpeedGear = 0
   for (let i = 1; i < gearDistances.length; i++) {
-    if (distancePx >= gearDistances[i]!) gear = i
+    if (distancePx >= gearDistances[i]!) gear = i as ArrowSpeedGear
   }
   return gear
 }
 
+/**
+ * Delay until the next auto-repeat tick.
+ * @param isFirstRepeat - true for the pause after the initial keypress
+ *   (gear 0 waits longer so a short pull is one deliberate step).
+ */
 export function arrowRepeatIntervalMs(
   distancePx: number,
+  isFirstRepeat = false,
   gearIntervals: readonly number[] = ARROW_GESTURE_GEAR_INTERVALS_MS
 ): number {
   const gear = resolveArrowSpeedGear(distancePx)
-  return gearIntervals[gear] ?? gearIntervals[gearIntervals.length - 1]!
+  const base = gearIntervals[gear] ?? gearIntervals[gearIntervals.length - 1]!
+  if (isFirstRepeat && gear === 0) {
+    return ARROW_GESTURE_GEAR0_INITIAL_REPEAT_DELAY_MS
+  }
+  return base
 }
