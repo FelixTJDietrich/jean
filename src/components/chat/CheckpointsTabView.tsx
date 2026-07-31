@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
+  AlertTriangle,
   History,
   Loader2,
   RotateCcw,
@@ -47,10 +48,10 @@ import {
   deleteAiCheckpoint,
   getAiCheckpointDiff,
   listAiCheckpoints,
-  restoreAiCheckpoint,
   restoreAiCheckpointFile,
 } from '@/services/checkpoints'
 import { MemoizedFileDiff, getStatusColor } from './MemoizedFileDiff'
+import { CheckpointRestoreDialog } from './CheckpointRestoreDialog'
 import type { AiCheckpoint } from '@/types/checkpoints'
 import type { GitDiff } from '@/types/git-diff'
 
@@ -120,11 +121,12 @@ export function CheckpointsTabView({
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [selectedFileIndex, setSelectedFileIndex] = useState(0)
-  const [restoreAllTarget, setRestoreAllTarget] = useState<AiCheckpoint | null>(
+  const [restoreTarget, setRestoreTarget] = useState<AiCheckpoint | null>(null)
+  const [restoringFile, setRestoringFile] = useState<string | null>(null)
+  const [fileRestoreTarget, setFileRestoreTarget] = useState<string | null>(
     null
   )
-  const [restoring, setRestoring] = useState(false)
-  const [restoringFile, setRestoringFile] = useState<string | null>(null)
+  const [fileRestoring, setFileRestoring] = useState(false)
 
   const resolvedThemeType = useMemo((): 'dark' | 'light' => {
     if (theme === 'system') {
@@ -233,42 +235,39 @@ export function CheckpointsTabView({
         ]
       : null
 
-  const handleRestoreAll = useCallback(async () => {
-    if (!restoreAllTarget) return
-    setRestoring(true)
+  const openRestoreDialog = useCallback((checkpoint: AiCheckpoint) => {
+    setRestoreTarget(checkpoint)
+  }, [])
+
+  const handleRestoreDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) setRestoreTarget(null)
+  }, [])
+
+  const handleRestored = useCallback(async () => {
+    if (selected) await loadDiff(selected)
+  }, [selected, loadDiff])
+
+  const handleApproveFileRestore = useCallback(async () => {
+    if (!selected || !fileRestoreTarget) return
+    setFileRestoring(true)
+    setRestoringFile(fileRestoreTarget)
     try {
-      await restoreAiCheckpoint(worktreeId, restoreAllTarget.id)
-      toast.success('Project restored to checkpoint')
+      await restoreAiCheckpointFile(
+        worktreeId,
+        selected.id,
+        fileRestoreTarget
+      )
+      toast.success(`Restored ${getFilename(fileRestoreTarget)}`)
       triggerImmediateGitPoll()
-      await queryClient.invalidateQueries({
-        queryKey: checkpointQueryKeys.worktree(worktreeId),
-      })
-      await loadDiff(restoreAllTarget)
+      await loadDiff(selected)
+      setFileRestoreTarget(null)
     } catch (e) {
       toast.error(`Restore failed: ${e}`)
     } finally {
-      setRestoring(false)
-      setRestoreAllTarget(null)
+      setFileRestoring(false)
+      setRestoringFile(null)
     }
-  }, [restoreAllTarget, worktreeId, queryClient, loadDiff])
-
-  const handleRestoreFile = useCallback(
-    async (filePath: string) => {
-      if (!selected) return
-      setRestoringFile(filePath)
-      try {
-        await restoreAiCheckpointFile(worktreeId, selected.id, filePath)
-        toast.success(`Restored ${getFilename(filePath)}`)
-        triggerImmediateGitPoll()
-        await loadDiff(selected)
-      } catch (e) {
-        toast.error(`Restore failed: ${e}`)
-      } finally {
-        setRestoringFile(null)
-      }
-    },
-    [selected, worktreeId, loadDiff]
-  )
+  }, [selected, fileRestoreTarget, worktreeId, loadDiff])
 
   const handleDelete = useCallback(
     async (checkpoint: AiCheckpoint) => {
@@ -419,14 +418,15 @@ export function CheckpointsTabView({
                       size="sm"
                       variant="outline"
                       className="h-7 gap-1.5 text-xs"
-                      onClick={() => setRestoreAllTarget(selected)}
+                      onClick={() => openRestoreDialog(selected)}
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
-                      Restore all
+                      Restore turn
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    Reset the entire worktree to this checkpoint
+                    Undo this turn&apos;s files; detects overlap with other
+                    sessions
                   </TooltipContent>
                 </Tooltip>
                 <Tooltip>
@@ -506,9 +506,12 @@ export function CheckpointsTabView({
                             <button
                               type="button"
                               className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-                              disabled={restoringFile === file.fileName}
+                              disabled={
+                                fileRestoring ||
+                                restoringFile === file.fileName
+                              }
                               onClick={() =>
-                                void handleRestoreFile(file.fileName)
+                                setFileRestoreTarget(file.fileName)
                               }
                               aria-label={`Restore ${file.fileName}`}
                             >
@@ -520,7 +523,8 @@ export function CheckpointsTabView({
                             </button>
                           </TooltipTrigger>
                           <TooltipContent>
-                            Restore this file from checkpoint
+                            Restore this file from checkpoint (requires
+                            approval)
                           </TooltipContent>
                         </Tooltip>
                       </div>
@@ -564,41 +568,79 @@ export function CheckpointsTabView({
         </ResizablePanel>
       </ResizablePanelGroup>
 
+      <CheckpointRestoreDialog
+        open={!!restoreTarget}
+        worktreeId={worktreeId}
+        checkpoint={restoreTarget}
+        onOpenChange={handleRestoreDialogOpenChange}
+        onRestored={() => void handleRestored()}
+      />
+
       <AlertDialog
-        open={!!restoreAllTarget}
-        onOpenChange={open => !open && setRestoreAllTarget(null)}
+        open={!!fileRestoreTarget}
+        onOpenChange={open => {
+          if (!open && !fileRestoring) setFileRestoreTarget(null)
+        }}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Restore entire project?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This resets the worktree to the state before this AI turn. All
-              later uncommitted changes will be lost (including files created
-              after the checkpoint).
-              {restoreAllTarget?.userMessagePreview && (
-                <span className="mt-2 block font-medium text-foreground">
-                  “{restoreAllTarget.userMessagePreview}”
-                </span>
-              )}
+        <AlertDialogContent
+          className={cn(
+            'flex w-[calc(100vw-1rem)] max-w-none flex-col gap-3 p-4',
+            'max-h-[min(92dvh,100%)]',
+            'max-sm:top-auto max-sm:bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-sm:left-1/2 max-sm:translate-x-[-50%] max-sm:translate-y-0 max-sm:rounded-xl',
+            'sm:max-w-lg sm:p-6'
+          )}
+        >
+          <AlertDialogHeader className="text-left">
+            <AlertDialogTitle>Approve file restore?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <div className="flex gap-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-left text-xs leading-snug text-amber-950 dark:text-amber-100">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <p>
+                    Restore can make mistakes — this overwrites the current
+                    working-tree content for this path. Prefer a git commit
+                    first if you may need the current version.
+                  </p>
+                </div>
+                <p>
+                  Restore{' '}
+                  <span className="font-mono text-foreground">
+                    {fileRestoreTarget
+                      ? getFilename(fileRestoreTarget)
+                      : 'this file'}
+                  </span>{' '}
+                  to the pre-turn checkpoint snapshot.
+                </p>
+                {fileRestoreTarget && (
+                  <p className="break-all font-mono text-xs text-muted-foreground">
+                    {fileRestoreTarget}
+                  </p>
+                )}
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={restoring}>Cancel</AlertDialogCancel>
+          <AlertDialogFooter className="flex-col-reverse gap-2 sm:flex-row">
+            <AlertDialogCancel
+              disabled={fileRestoring}
+              className="m-0 w-full sm:w-auto"
+            >
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
+              disabled={fileRestoring}
+              className="m-0 w-full sm:w-auto"
               onClick={e => {
                 e.preventDefault()
-                void handleRestoreAll()
+                void handleApproveFileRestore()
               }}
-              disabled={restoring}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {restoring ? (
+              {fileRestoring ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Restoring…
                 </>
               ) : (
-                'Restore all'
+                'Approve restore'
               )}
             </AlertDialogAction>
           </AlertDialogFooter>

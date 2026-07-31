@@ -1,6 +1,5 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { diffLines } from 'diff'
-import { History } from 'lucide-react'
 import type { ToolCall, ChatMessage } from '@/types/chat'
 import { Badge } from '@/components/ui/badge'
 import { getFilename } from '@/lib/path-utils'
@@ -11,6 +10,7 @@ import {
 } from '@/components/ui/tooltip'
 import { MessageDiffModal } from './MessageDiffModal'
 import type { EditTool } from './MessageDiffModal'
+import { CheckpointTurnRestoreButton } from './CheckpointTurnRestoreButton'
 
 function isEditTool(
   toolCall: ToolCall
@@ -82,6 +82,7 @@ function codexDiffToPatch(
 interface EditedFilesDisplayProps {
   toolCalls: ToolCall[] | undefined
   worktreePath?: string
+  worktreeId?: string | null
   /**
    * Stable accessor for the full session message list. Used to compute
    * "subsequent edits" lazily when the user opens a diff. Passing a stable
@@ -91,23 +92,19 @@ interface EditedFilesDisplayProps {
    */
   getMessages?: () => ChatMessage[]
   messageIndex?: number
+  /** User message that started this agent turn — enables per-prompt restore. */
+  userMessageId?: string | null
 }
 
 export const EditedFilesDisplay = memo(function EditedFilesDisplay({
   toolCalls,
   worktreePath,
+  worktreeId,
   getMessages,
   messageIndex,
+  userMessageId,
 }: EditedFilesDisplayProps) {
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
-
-  const openCheckpoints = useCallback(() => {
-    window.dispatchEvent(
-      new CustomEvent('open-git-diff', {
-        detail: { type: 'checkpoints' },
-      })
-    )
-  }, [])
 
   const editTools = useMemo(
     () => (toolCalls ?? []).filter(isEditTool),
@@ -223,22 +220,14 @@ export const EditedFilesDisplay = memo(function EditedFilesDisplay({
         )
       })}
 
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={openCheckpoints}
-            aria-label="Open AI checkpoints"
-            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <History className="h-3 w-3" />
-            Checkpoints
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>
-          Browse AI checkpoints — view and restore pre-turn snapshots
-        </TooltipContent>
-      </Tooltip>
+      {userMessageId && (
+        <CheckpointTurnRestoreButton
+          userMessageId={userMessageId}
+          worktreeId={worktreeId}
+          hasFileEdits
+          variant="inline"
+        />
+      )}
 
       {selectedFilePath && (
         <MessageDiffModal

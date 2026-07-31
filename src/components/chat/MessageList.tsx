@@ -14,6 +14,7 @@ interface MessageListProps {
   lastPlanMessageIndex: number
   sessionId: string
   worktreePath: string
+  worktreeId?: string | null
   approveShortcut: string
   approveShortcutYolo?: string
   approveShortcutClearContext?: string
@@ -59,6 +60,7 @@ export const MessageList = memo(function MessageList({
   lastPlanMessageIndex,
   sessionId,
   worktreePath,
+  worktreeId = null,
   approveShortcut,
   approveShortcutYolo,
   approveShortcutClearContext,
@@ -131,6 +133,7 @@ export const MessageList = memo(function MessageList({
               hasFollowUpMessage={hasFollowUpMessage}
               sessionId={sessionId}
               worktreePath={worktreePath}
+              worktreeId={worktreeId}
               approveShortcut={approveShortcut}
               approveShortcutYolo={approveShortcutYolo}
               approveShortcutClearContext={approveShortcutClearContext}

@@ -3232,6 +3232,68 @@ pub async fn dispatch_command(
                     .await?;
             to_value(result)
         }
+        "analyze_ai_checkpoint_restore" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let checkpoint_id: String = field(&args, "checkpointId", "checkpoint_id")?;
+            let result = crate::projects::analyze_ai_checkpoint_restore(
+                app.clone(),
+                worktree_id,
+                checkpoint_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "restore_ai_checkpoint_turn" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let checkpoint_id: String = field(&args, "checkpointId", "checkpoint_id")?;
+            let mode: String = from_field_opt(&args, "mode")?.unwrap_or_else(|| "cleanOnly".into());
+            let result = crate::projects::restore_ai_checkpoint_turn(
+                app.clone(),
+                worktree_id,
+                checkpoint_id,
+                mode,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["git-status"]);
+            to_value(result)
+        }
+        "propose_ai_checkpoint_restore" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let checkpoint_id: String = field(&args, "checkpointId", "checkpoint_id")?;
+            let model: Option<String> = from_field_opt(&args, "model")?;
+            let reasoning_effort: Option<String> =
+                field_opt(&args, "reasoningEffort", "reasoning_effort")?;
+            let result = crate::projects::propose_ai_checkpoint_restore(
+                app.clone(),
+                worktree_id,
+                checkpoint_id,
+                model,
+                reasoning_effort,
+            )
+            .await?;
+            to_value(result)
+        }
+        "apply_ai_checkpoint_restore_proposal" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let checkpoint_id: String = field(&args, "checkpointId", "checkpoint_id")?;
+            let files: Vec<crate::projects::checkpoints::RestoreFileProposal> =
+                from_field(&args, "files")?;
+            let also_restore_clean_paths: Option<Vec<String>> = field_opt(
+                &args,
+                "alsoRestoreCleanPaths",
+                "also_restore_clean_paths",
+            )?;
+            let result = crate::projects::apply_ai_checkpoint_restore_proposal(
+                app.clone(),
+                worktree_id,
+                checkpoint_id,
+                files,
+                also_restore_clean_paths,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["git-status"]);
+            to_value(result)
+        }
         "git_stash" => {
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let result = crate::projects::git_stash(worktree_path).await?;

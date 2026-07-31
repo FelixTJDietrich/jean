@@ -62,6 +62,7 @@ interface CompactMessageListProps {
   lastPlanMessageIndex: number
   sessionId: string
   worktreePath: string
+  worktreeId?: string | null
   approveShortcut: string
   approveShortcutYolo?: string
   approveShortcutClearContext?: string
@@ -653,6 +654,7 @@ export const CompactMessageList = memo(
         lastPlanMessageIndex,
         sessionId,
         worktreePath,
+        worktreeId = null,
         approveShortcut,
         approveShortcutYolo,
         approveShortcutClearContext,
@@ -852,6 +854,7 @@ export const CompactMessageList = memo(
             hasFollowUpMessage={extra.hasFollowUpMessage}
             sessionId={sessionId}
             worktreePath={worktreePath}
+            worktreeId={worktreeId}
             approveShortcut={approveShortcut}
             approveShortcutYolo={approveShortcutYolo}
             approveShortcutClearContext={approveShortcutClearContext}
@@ -889,6 +892,7 @@ export const CompactMessageList = memo(
           lastPlanMessageIndex,
           sessionId,
           worktreePath,
+          worktreeId,
           approveShortcut,
           approveShortcutYolo,
           approveShortcutClearContext,
@@ -1200,6 +1204,7 @@ export const CompactMessageList = memo(
                       <EditedFilesDisplay
                         toolCalls={surfacedLatestToolCalls}
                         worktreePath={worktreePath}
+                        worktreeId={worktreeId}
                       />
                     )}
                   </div>

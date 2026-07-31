@@ -274,12 +274,14 @@ pub struct AppPreferences {
     pub has_seen_jean_config_wizard: bool, // Whether user has seen the jean.json setup wizard
     #[serde(default)]
     pub has_seen_jean_mcp_intro: bool, // Whether user has seen the Jean MCP server announcement
+    #[serde(default)]
+    pub has_seen_external_display_zoom_tip: bool, // Soft-text tip on 1× displays when zoom ≠ 100%
     #[serde(default = "default_chrome_enabled")]
     pub chrome_enabled: bool, // Enable browser automation via Chrome extension
     #[serde(default = "default_zoom_level")]
-    pub zoom_level: u32, // Desktop zoom level percentage (50-200, default 90)
+    pub zoom_level: u32, // Desktop zoom level percentage (50-200, default 100)
     #[serde(default = "default_zoom_level")]
-    pub mobile_zoom_level: u32, // Mobile zoom level percentage (50-200, default 90)
+    pub mobile_zoom_level: u32, // Mobile zoom level percentage (50-200, default 100)
     #[serde(default = "default_sync_zoom_levels")]
     pub sync_zoom_levels: bool, // Keep desktop and mobile zoom levels in sync
     #[serde(default)]
@@ -804,7 +806,7 @@ fn default_codex_max_agent_threads() -> u32 {
 }
 
 fn default_zoom_level() -> u32 {
-    90 // 90% = slightly smaller default
+    100 // 100% = sharpest default (esp. external 1× displays)
 }
 
 fn default_sync_zoom_levels() -> bool {
@@ -1138,7 +1140,7 @@ mod tests {
 
         let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
 
-        assert_eq!(prefs.mobile_zoom_level, 90);
+        assert_eq!(prefs.mobile_zoom_level, 100);
         assert!(prefs.sync_zoom_levels);
     }
 
@@ -1154,6 +1156,20 @@ mod tests {
 
         let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
         assert!(!prefs.has_seen_jean_mcp_intro);
+    }
+
+    #[test]
+    fn app_preferences_external_display_zoom_tip_unseen_for_existing_prefs() {
+        assert!(!AppPreferences::default().has_seen_external_display_zoom_tip);
+
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .remove("has_seen_external_display_zoom_tip");
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(!prefs.has_seen_external_display_zoom_tip);
     }
 
     #[test]
@@ -2851,6 +2867,7 @@ impl Default for AppPreferences {
             has_seen_feature_tour: false,
             has_seen_jean_config_wizard: false,
             has_seen_jean_mcp_intro: false,
+            has_seen_external_display_zoom_tip: false,
             chrome_enabled: default_chrome_enabled(),
             zoom_level: default_zoom_level(),
             mobile_zoom_level: default_zoom_level(),

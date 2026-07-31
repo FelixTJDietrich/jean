@@ -61,6 +61,8 @@ interface VirtualizedMessageListProps {
   sessionId: string
   /** Worktree path for resolving file mentions */
   worktreePath: string
+  /** Worktree id for checkpoint restore */
+  worktreeId?: string | null
   /** Keyboard shortcut for approve button */
   approveShortcut: string
   /** Keyboard shortcut for approve yolo button */
@@ -147,6 +149,7 @@ export const VirtualizedMessageList = memo(
         lastPlanMessageIndex,
         sessionId,
         worktreePath,
+        worktreeId = null,
         approveShortcut,
         approveShortcutYolo,
         approveShortcutClearContext,
@@ -456,6 +459,7 @@ export const VirtualizedMessageList = memo(
                   hasFollowUpMessage={hasFollowUpMessage}
                   sessionId={sessionId}
                   worktreePath={worktreePath}
+                  worktreeId={worktreeId}
                   approveShortcut={approveShortcut}
                   approveShortcutYolo={approveShortcutYolo}
                   approveShortcutClearContext={approveShortcutClearContext}

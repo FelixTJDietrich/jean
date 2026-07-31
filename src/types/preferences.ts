@@ -1390,9 +1390,11 @@ export interface AppPreferences {
   has_seen_feature_tour: boolean // Whether user has seen the feature tour onboarding
   has_seen_jean_config_wizard: boolean // Whether user has seen the jean.json setup wizard
   has_seen_jean_mcp_intro: boolean // Whether user has seen the Jean MCP server announcement
+  /** One-time tip: soft text on 1× displays when zoom ≠ 100% (default false = not dismissed) */
+  has_seen_external_display_zoom_tip?: boolean
   chrome_enabled: boolean // Enable browser automation via Chrome extension
-  zoom_level: number // Desktop zoom level percentage (50-200, default 90)
-  mobile_zoom_level?: number // Mobile zoom level percentage (50-200, default 90)
+  zoom_level: number // Desktop zoom level percentage (50-200, default 100)
+  mobile_zoom_level?: number // Mobile zoom level percentage (50-200, default 100)
   sync_zoom_levels?: boolean // Keep desktop and mobile zoom levels in sync (default true)
   custom_cli_profiles: CustomCliProfile[] // Custom CLI settings profiles (e.g., OpenRouter, MiniMax)
   default_provider: string | null // Default Claude provider profile name (null = Anthropic direct)
@@ -2233,7 +2235,7 @@ export function getOpenInDefaultLabel(
 export type FontSize = number
 
 export const FONT_SIZE_DEFAULT = 16
-export const ZOOM_LEVEL_DEFAULT = 90
+export const ZOOM_LEVEL_DEFAULT = 100
 
 export const uiFontScaleTicks = [
   { value: 12, label: '12px' },
@@ -2476,6 +2478,7 @@ export const defaultPreferences: AppPreferences = {
   has_seen_feature_tour: false, // Default: not seen
   has_seen_jean_config_wizard: false, // Default: not seen
   has_seen_jean_mcp_intro: false, // Default: not seen
+  has_seen_external_display_zoom_tip: false, // Default: show tip once on 1× + non-100% zoom
   chrome_enabled: true, // Default: enabled
   zoom_level: ZOOM_LEVEL_DEFAULT,
   mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
