@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as ClipboardModule from '@/lib/clipboard'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { TerminalExtraKeysBar } from './TerminalExtraKeysBar'
 
@@ -27,9 +28,7 @@ vi.mock('@/lib/terminal-instances', () => ({
 }))
 
 vi.mock('@/lib/clipboard', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/clipboard')>(
-    '@/lib/clipboard'
-  )
+  const actual = await vi.importActual<typeof ClipboardModule>('@/lib/clipboard')
   return {
     ...actual,
     copyToClipboard,
