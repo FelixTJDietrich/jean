@@ -1940,7 +1940,9 @@ mod tests {
         run_git(repo, &["init", "--initial-branch", "main"]);
         run_git(repo, &["config", "user.email", "test@example.com"]);
         run_git(repo, &["config", "user.name", "Test"]);
-        // Avoid "detected dubious ownership" in some CI sandboxes.
+        // Keep LF as-is so restore assertions match written content on Windows
+        // (global core.autocrlf=true would otherwise checkout as CRLF).
+        run_git(repo, &["config", "core.autocrlf", "false"]);
         run_git(repo, &["config", "core.safecrlf", "false"]);
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
         run_git(repo, &["add", "."]);
