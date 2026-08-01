@@ -613,7 +613,7 @@ pub fn list_checkpoints(app: &AppHandle, worktree_id: &str) -> Result<Vec<AiChec
     let mut store = load_store(app, worktree_id)?;
     store
         .checkpoints
-        .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        .sort_by_key(|b| std::cmp::Reverse(b.created_at));
     Ok(store.checkpoints)
 }
 
@@ -1504,7 +1504,8 @@ pub async fn restore_ai_checkpoint_turn(
 ) -> Result<RestoreTurnResult, String> {
     let mode = match mode.as_str() {
         "allTurnFiles" | "all_turn_files" | "all" => RestoreTurnMode::AllTurnFiles,
-        "cleanOnly" | "clean_only" | "clean" | _ => RestoreTurnMode::CleanOnly,
+        "cleanOnly" | "clean_only" | "clean" => RestoreTurnMode::CleanOnly,
+        _ => RestoreTurnMode::CleanOnly,
     };
     restore_checkpoint_turn(&app, &worktree_id, &checkpoint_id, mode)
 }
