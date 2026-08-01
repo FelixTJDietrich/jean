@@ -18,7 +18,8 @@ pub fn process_failed_recovery(kind: i32) -> &'static str {
     // Values from COREWEBVIEW2_PROCESS_FAILED_KIND_* (webview2-com-sys).
     match kind {
         0 => "browser", // BROWSER_PROCESS_EXITED
-        1 | 2 | 3 => "reload", // RENDER_PROCESS_EXITED / UNRESPONSIVE / FRAME_RENDER
+        // RENDER_PROCESS_EXITED / UNRESPONSIVE / FRAME_RENDER_PROCESS_EXITED
+        1..=3 => "reload",
         _ => "ignore",
     }
 }
@@ -56,12 +57,15 @@ pub fn install_process_failed_recovery(app: &tauri::App) {
         };
 
         let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
+            // ProcessFailedKind is a COM out-param getter (returns Result<()>).
             let kind = args
                 .as_ref()
                 .and_then(|args: &ICoreWebView2ProcessFailedEventArgs| {
-                    unsafe { args.ProcessFailedKind() }.ok()
+                    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                    unsafe { args.ProcessFailedKind(&mut kind) }
+                        .ok()
+                        .map(|_| kind.0)
                 })
-                .map(|COREWEBVIEW2_PROCESS_FAILED_KIND(value)| value)
                 .unwrap_or(-1);
 
             let recovery = process_failed_recovery(kind);
