@@ -199,7 +199,8 @@ export function TerminalArrowGesture({
         return
       }
 
-      const touch = event.touches[0]!
+      const touch = event.touches[0]
+      if (!touch) return
       clearLongPressTimer()
       originRef.current = { x: touch.clientX, y: touch.clientY }
 
@@ -224,7 +225,8 @@ export function TerminalArrowGesture({
         deactivate()
         return
       }
-      const touch = event.touches[0]!
+      const touch = event.touches[0]
+      if (!touch) return
 
       if (activeRef.current) {
         event.preventDefault()

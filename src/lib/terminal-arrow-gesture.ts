@@ -80,7 +80,10 @@ export function resolveArrowSpeedGear(
 ): ArrowSpeedGear {
   let gear: ArrowSpeedGear = 0
   for (let i = 1; i < gearDistances.length; i++) {
-    if (distancePx >= gearDistances[i]!) gear = i as ArrowSpeedGear
+    const threshold = gearDistances[i]
+    if (threshold !== undefined && distancePx >= threshold) {
+      gear = i as ArrowSpeedGear
+    }
   }
   return gear
 }
@@ -96,7 +99,10 @@ export function arrowRepeatIntervalMs(
   gearIntervals: readonly number[] = ARROW_GESTURE_GEAR_INTERVALS_MS
 ): number {
   const gear = resolveArrowSpeedGear(distancePx)
-  const base = gearIntervals[gear] ?? gearIntervals[gearIntervals.length - 1]!
+  const base =
+    gearIntervals[gear] ??
+    gearIntervals[gearIntervals.length - 1] ??
+    ARROW_GESTURE_GEAR_INTERVALS_MS[0]
   if (isFirstRepeat && gear === 0) {
     return ARROW_GESTURE_GEAR0_INITIAL_REPEAT_DELAY_MS
   }

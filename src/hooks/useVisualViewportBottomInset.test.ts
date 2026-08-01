@@ -5,7 +5,7 @@ import {
   useVisualViewportBottomInset,
 } from './useVisualViewportBottomInset'
 
-type FakeVisualViewport = {
+interface FakeVisualViewport {
   height: number
   offsetTop: number
   addEventListener: ReturnType<typeof vi.fn>
@@ -19,8 +19,12 @@ function installVisualViewport(height: number, offsetTop = 0): FakeVisualViewpor
     height,
     offsetTop,
     addEventListener: vi.fn((type: string, cb: EventListener) => {
-      if (!listeners.has(type)) listeners.set(type, new Set())
-      listeners.get(type)!.add(cb)
+      let set = listeners.get(type)
+      if (!set) {
+        set = new Set()
+        listeners.set(type, set)
+      }
+      set.add(cb)
     }),
     removeEventListener: vi.fn((type: string, cb: EventListener) => {
       listeners.get(type)?.delete(cb)
