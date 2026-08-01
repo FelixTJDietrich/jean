@@ -16,6 +16,23 @@ fn gh_command(gh: &Path, repo_path: &str) -> std::process::Command {
 static WORKTREE_CREATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 const WORKTREE_CREATE_ATTEMPTS: usize = 4;
 
+/// Strip Windows `\\?\` / `\\?\UNC\` verbatim prefixes from a path string.
+///
+/// `std::fs::canonicalize` on Windows returns extended-length paths. Git for
+/// Windows rejects those as `GIT_INDEX_FILE` values (lock creation fails with
+/// "Invalid argument"), so strip the prefix for any path we hand to git env vars
+/// or pass back as a string path for external tools.
+fn strip_windows_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    path
+}
+
 /// Resolve the git metadata directories for a working directory.
 ///
 /// Returns `(git_dir, git_common_dir)` as absolute, canonicalized paths.
@@ -49,6 +66,7 @@ pub fn resolve_git_dirs(working_dir: &Path) -> Option<(String, String)> {
         };
         std::fs::canonicalize(&abs)
             .ok()
+            .map(strip_windows_verbatim_prefix)
             .map(|p| p.to_string_lossy().into_owned())
     };
 

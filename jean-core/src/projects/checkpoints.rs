@@ -186,10 +186,22 @@ fn truncate_preview(message: &str) -> String {
 // Git helpers
 // ============================================================================
 
+fn git_index_env_path(index: &Path) -> std::path::PathBuf {
+    // Git for Windows rejects `\\?\` extended paths in GIT_INDEX_FILE.
+    let s = index.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    index.to_path_buf()
+}
+
 fn git_output(repo_path: &str, args: &[&str], index_file: Option<&Path>) -> Result<String, String> {
     let mut cmd = wsl_aware_command("git", Some(Path::new(repo_path)));
     if let Some(index) = index_file {
-        cmd.env("GIT_INDEX_FILE", index);
+        cmd.env("GIT_INDEX_FILE", git_index_env_path(index));
     }
     let output = cmd
         .args(args)
