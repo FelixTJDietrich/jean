@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import {
+  copyToClipboard,
+  normalizeClipboardForTerminal,
+  readFromClipboard,
+} from '@/lib/clipboard'
+import {
   focusTerminal,
+  getTerminalSelection,
   writeTerminalInput,
 } from '@/lib/terminal-instances'
 import {
@@ -18,9 +25,20 @@ interface TerminalExtraKeysBarProps {
   keyboardOpen?: boolean
 }
 
+function actionAriaLabel(action: TerminalExtraKeyAction): string {
+  if (action.type === 'toggle') return `Toggle ${action.label}`
+  if (action.type === 'clipboard') {
+    return action.action === 'copy'
+      ? 'Copy selected terminal text'
+      : 'Paste from clipboard'
+  }
+  return `Send ${action.label}`
+}
+
 /**
  * Termius-style special-keys strip for web access and mobile soft keyboards.
  * One-shot keys inject control sequences; Ctrl/Alt are sticky for the next char.
+ * Copy/paste use the system clipboard (mobile native paste often fails on xterm).
  */
 export function TerminalExtraKeysBar({
   terminalId,
@@ -83,8 +101,56 @@ export function TerminalExtraKeysBar({
     setStickyAlt(false)
   }, [terminalId])
 
+  const handleCopy = useCallback(async () => {
+    const selection = getTerminalSelection(terminalId).trimEnd()
+    if (!selection) {
+      toast.error('No text selected')
+      focusTerminal(terminalId)
+      return
+    }
+
+    try {
+      await copyToClipboard(selection)
+      toast.success('Copied')
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to copy selection'
+      )
+    } finally {
+      focusTerminal(terminalId)
+    }
+  }, [terminalId])
+
+  const handlePaste = useCallback(async () => {
+    try {
+      const raw = await readFromClipboard()
+      const text = normalizeClipboardForTerminal(raw)
+      if (!text) {
+        toast.error('Clipboard is empty')
+        return
+      }
+      writeTerminalInput(terminalId, text)
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to paste from clipboard'
+      )
+    } finally {
+      focusTerminal(terminalId)
+      clearSticky()
+    }
+  }, [terminalId, clearSticky])
+
   const handleKey = useCallback(
     (action: TerminalExtraKeyAction) => {
+      if (action.type === 'clipboard') {
+        if (action.action === 'copy') {
+          void handleCopy()
+        } else {
+          void handlePaste()
+        }
+        return
+      }
+
       if (action.type === 'toggle') {
         if (action.modifier === 'ctrl') {
           setStickyCtrl(prev => !prev)
@@ -110,7 +176,15 @@ export function TerminalExtraKeysBar({
       sendData(data)
       clearSticky()
     },
-    [terminalId, stickyCtrl, stickyAlt, sendData, clearSticky]
+    [
+      terminalId,
+      stickyCtrl,
+      stickyAlt,
+      sendData,
+      clearSticky,
+      handleCopy,
+      handlePaste,
+    ]
   )
 
   return (
@@ -142,11 +216,7 @@ export function TerminalExtraKeysBar({
             <button
               key={action.label}
               type="button"
-              aria-label={
-                action.type === 'toggle'
-                  ? `Toggle ${action.label}`
-                  : `Send ${action.label}`
-              }
+              aria-label={actionAriaLabel(action)}
               aria-pressed={action.type === 'toggle' ? isActive : undefined}
               className={cn(
                 'inline-flex h-8 min-w-[2.25rem] shrink-0 items-center justify-center rounded-full px-2.5',

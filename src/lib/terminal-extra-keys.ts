@@ -84,9 +84,12 @@ export function resolveStickyKeyData(
 export type TerminalExtraKeyAction =
   | { type: 'data'; data: string; label: string }
   | { type: 'toggle'; modifier: 'ctrl' | 'alt'; label: string }
+  | { type: 'clipboard'; action: 'copy' | 'paste'; label: string }
 
 /** Keys shown in the Termius-style bottom bar. */
 export const TERMINAL_EXTRA_KEYS: TerminalExtraKeyAction[] = [
+  { type: 'clipboard', action: 'paste', label: 'paste' },
+  { type: 'clipboard', action: 'copy', label: 'copy' },
   { type: 'data', data: '\x1b', label: 'esc' },
   { type: 'data', data: '\t', label: 'tab' },
   { type: 'toggle', modifier: 'ctrl', label: 'ctrl' },

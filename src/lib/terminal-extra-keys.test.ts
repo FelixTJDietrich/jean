@@ -86,9 +86,11 @@ describe('resolveStickyKeyData', () => {
 })
 
 describe('TERMINAL_EXTRA_KEYS', () => {
-  it('includes Termius-style essentials', () => {
+  it('includes Termius-style essentials plus clipboard actions', () => {
     const labels = TERMINAL_EXTRA_KEYS.map(k => k.label)
     expect(labels).toEqual([
+      'paste',
+      'copy',
       'esc',
       'tab',
       'ctrl',
@@ -101,6 +103,14 @@ describe('TERMINAL_EXTRA_KEYS', () => {
       '^\\',
       '^S',
       '^Z',
+    ])
+  })
+
+  it('defines clipboard actions for paste and copy', () => {
+    const clipboard = TERMINAL_EXTRA_KEYS.filter(k => k.type === 'clipboard')
+    expect(clipboard).toEqual([
+      { type: 'clipboard', action: 'paste', label: 'paste' },
+      { type: 'clipboard', action: 'copy', label: 'copy' },
     ])
   })
 

@@ -3064,6 +3064,10 @@ pub async fn dispatch_command(
             crate::chat::write_clipboard_text(text).await?;
             Ok(Value::Null)
         }
+        "read_clipboard_text" => {
+            let result = crate::chat::read_clipboard_text().await?;
+            to_value(result)
+        }
         "regenerate_session_name" => {
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;

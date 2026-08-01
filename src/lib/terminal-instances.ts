@@ -1200,6 +1200,19 @@ export function focusTerminal(terminalId: string): void {
 }
 
 /**
+ * Return currently selected terminal text, or empty string if none.
+ */
+export function getTerminalSelection(terminalId: string): string {
+  const instance = instances.get(terminalId)
+  if (!instance?.terminal) return ''
+  try {
+    return instance.terminal.getSelection() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Dispose a single terminal instance.
  * Cleans up event listeners, disposes xterm, removes from Map.
  * Does NOT stop PTY - caller should do that separately.

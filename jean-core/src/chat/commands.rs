@@ -6047,6 +6047,14 @@ pub async fn write_clipboard_text(_text: String) -> Result<(), String> {
     Err("Native clipboard access is only available in the desktop app".to_string())
 }
 
+/// Read text from the native system clipboard.
+///
+/// Same-machine fallback for terminal paste when the browser Clipboard API is
+/// unavailable. Remote jean-server has no host clipboard access.
+pub async fn read_clipboard_text() -> Result<String, String> {
+    Err("Native clipboard access is only available in the desktop app".to_string())
+}
+
 /// Save a dropped image file to the app data directory
 ///
 /// Takes a source file path (from Tauri's drag-drop event) and copies it
