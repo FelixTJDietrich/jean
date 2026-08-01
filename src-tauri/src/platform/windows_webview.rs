@@ -76,8 +76,9 @@ pub fn install_process_failed_recovery(app: &tauri::App) {
             match recovery {
                 "browser" => {
                     // Browser process is gone — only relaunch restores a live webview.
+                    // Clone for the main-thread closure; run_on_main_thread borrows self.
                     let app = app_handle.clone();
-                    let _ = app.run_on_main_thread(move || {
+                    let _ = app_handle.run_on_main_thread(move || {
                         log::error!("Restarting Jean after WebView2 browser process exit");
                         app.restart();
                     });
@@ -90,7 +91,7 @@ pub fn install_process_failed_recovery(app: &tauri::App) {
                     if !reloaded {
                         log::warn!("WebView2 Reload after process failure failed");
                         let app = app_handle.clone();
-                        let _ = app.run_on_main_thread(move || {
+                        let _ = app_handle.run_on_main_thread(move || {
                             log::error!("Restarting Jean after failed WebView2 Reload");
                             app.restart();
                         });
