@@ -1890,6 +1890,7 @@ pub fn commit_changes(repo_path: &str, message: &str, stage_all: bool) -> Result
 /// * `title` - Optional PR title (if None, gh will prompt or use default)
 /// * `body` - Optional PR body
 /// * `draft` - Whether to create as draft PR
+/// * `base_branch` - Optional base branch (when set, passed as `gh pr create --base`)
 ///
 /// Returns the PR URL on success
 pub fn open_pull_request(
@@ -1897,6 +1898,7 @@ pub fn open_pull_request(
     title: Option<&str>,
     body: Option<&str>,
     draft: bool,
+    base_branch: Option<&str>,
     gh_binary: &std::path::Path,
 ) -> Result<String, String> {
     log::trace!("Opening pull request from {repo_path}");
@@ -1919,6 +1921,11 @@ pub fn open_pull_request(
 
     // Build the gh pr create command
     let mut args = vec!["pr", "create", "--fill"];
+
+    if let Some(base) = base_branch.filter(|b| !b.trim().is_empty()) {
+        args.push("--base");
+        args.push(base);
+    }
 
     if let Some(t) = title {
         args.push("--title");

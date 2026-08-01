@@ -5441,15 +5441,27 @@ pub async fn open_pull_request(
 
     let worktree = data
         .find_worktree(&worktree_id)
-        .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
+        .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?
+        .clone();
+    let project = data
+        .find_project(&worktree.project_id)
+        .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    // Use the worktree path for the PR creation
+    let base_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
+
+    // Use the worktree path for the PR creation; open against the worktree base
+    // (not only the project default) so stacked branches target the right base.
     let gh = resolve_gh_binary(&app);
     let result = git::open_pull_request(
         &worktree.path,
         title.as_deref(),
         body.as_deref(),
         draft.unwrap_or(false),
+        Some(&base_branch),
         &gh,
     )?;
 
@@ -5851,13 +5863,17 @@ pub async fn get_pr_prompt(app: AppHandle, worktree_path: String) -> Result<Stri
         .find(|w| w.path == worktree_path)
         .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
 
-    // Find the project to get default_branch
+    // Prefer worktree base (stacked / non-default branch) over project default
     let project = data
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
-    let context = git::generate_pr_context(&worktree_path, target_branch)?;
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
+    let context = git::generate_pr_context(&worktree_path, &target_branch)?;
 
     let mut prompt = format!(
         r#"The user likes the state of the code and wants to open a PR.
@@ -5942,12 +5958,16 @@ pub async fn get_review_prompt(
         .find(|w| w.path == worktree_path)
         .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
 
-    // Find the project to get default_branch
+    // Prefer worktree base (stacked / non-default branch) over project default
     let project = data
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let current_branch = git::get_current_branch(&worktree_path)?;
 
     // Get the full git diff (origin/target...HEAD)
@@ -7593,12 +7613,18 @@ pub async fn create_pr_with_ai_content(
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
+    // Prefer the worktree's base (e.g. feature branch when stacked) over the
+    // project default so PRs open against the branch the worktree was created from.
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let current_branch = git::get_current_branch(&worktree_path)?;
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Check if we're on the target branch (can't create PR to same branch)
-    if current_branch == *target_branch {
+    if current_branch == target_branch {
         return Err(format!(
             "Cannot create PR: current branch '{current_branch}' is the same as target branch"
         ));
@@ -7771,7 +7797,7 @@ pub async fn create_pr_with_ai_content(
         &app,
         &worktree_path,
         &current_branch,
-        target_branch,
+        &target_branch,
         custom_prompt.as_deref(),
         model.as_deref(),
         &context_content,
@@ -7823,14 +7849,14 @@ pub async fn create_pr_with_ai_content(
     log::trace!("Generated PR title: {}", pr_content.title);
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
-    // Create the PR using gh CLI
-    log::trace!("Creating PR with gh CLI");
+    // Create the PR using gh CLI (base = worktree base branch when set)
+    log::trace!("Creating PR with gh CLI against base branch: {target_branch}");
     let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "create",
             "--base",
-            target_branch,
+            &target_branch,
             "--title",
             &pr_content.title,
             "--body",
@@ -9667,7 +9693,11 @@ fn generate_review(
         .map_err(|e| format!("Failed to parse review response: {e}"))
 }
 
-fn select_review_target_branch(
+/// Resolve the git/PR target branch for a worktree.
+///
+/// Priority: linked PR base → worktree `base_branch` (branch the worktree was
+/// created from) → project default. Empty strings are treated as missing.
+fn select_target_branch(
     linked_pr_base: Option<&str>,
     worktree_base: Option<&str>,
     project_default: &str,
@@ -9727,7 +9757,7 @@ pub async fn run_review_with_ai(
     } else {
         None
     };
-    let target_branch = select_review_target_branch(
+    let target_branch = select_target_branch(
         linked_pr_base.as_deref(),
         worktree_base.as_deref(),
         &project_default,
@@ -11502,12 +11532,17 @@ pub async fn merge_worktree_to_base(
         }
     }
 
-    // Perform the merge in main repo
+    // Merge into the worktree's base branch (not always the project default)
+    let base_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let merge_result = git::merge_branch_to_base(
         &project.path,
         &worktree.path,
         &worktree.branch,
-        &project.default_branch,
+        &base_branch,
         merge_type,
     );
 
@@ -13546,24 +13581,30 @@ mod tests {
     }
 
     #[test]
-    fn review_target_branch_prefers_linked_pr_base() {
+    fn target_branch_prefers_linked_pr_base() {
         assert_eq!(
-            select_review_target_branch(Some("v4.x"), Some("develop"), "next"),
+            select_target_branch(Some("v4.x"), Some("develop"), "next"),
             "v4.x"
         );
     }
 
     #[test]
-    fn review_target_branch_falls_back_to_worktree_base() {
+    fn target_branch_falls_back_to_worktree_base() {
         assert_eq!(
-            select_review_target_branch(None, Some("develop"), "next"),
+            select_target_branch(None, Some("develop"), "next"),
             "develop"
         );
     }
 
     #[test]
-    fn review_target_branch_falls_back_to_project_default() {
-        assert_eq!(select_review_target_branch(None, None, "next"), "next");
+    fn target_branch_falls_back_to_project_default() {
+        assert_eq!(select_target_branch(None, None, "next"), "next");
+    }
+
+    #[test]
+    fn target_branch_ignores_empty_worktree_base() {
+        assert_eq!(select_target_branch(None, Some("  "), "main"), "main");
+        assert_eq!(select_target_branch(None, Some(""), "main"), "main");
     }
 
     #[test]
