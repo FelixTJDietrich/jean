@@ -13,7 +13,9 @@ let mockIsMobile = false
 const mockSetZoom = vi.fn()
 const mockMutate = vi.fn()
 const mockOnScaleChanged = vi.fn()
-type ScaleChangedEvent = { payload: { scaleFactor: number } }
+interface ScaleChangedEvent {
+  payload: { scaleFactor: number }
+}
 let scaleChangedHandler: ((event: ScaleChangedEvent) => void) | null = null
 
 vi.mock('@/services/preferences', () => ({
@@ -52,7 +54,7 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }))
 
-import { useZoom } from './use-zoom'
+import { DISPLAY_SCALE_ZOOM_SETTLE_MS, useZoom } from './use-zoom'
 
 describe('useZoom', () => {
   beforeEach(() => {
@@ -70,6 +72,7 @@ describe('useZoom', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     document.documentElement.style.zoom = ''
     document.documentElement.style.fontSize = ''
     document.documentElement.style.removeProperty('--app-zoom')
@@ -160,6 +163,40 @@ describe('useZoom', () => {
     await waitFor(() => {
       expect(mockSetZoom.mock.calls).toEqual([[1], [0.9]])
     })
+  })
+
+  it('ignores delayed scale side-effects after the zoom bounce settles', async () => {
+    vi.useFakeTimers()
+    mockIsNativeApp = true
+    mockPreferences = { zoom_level: 90 }
+
+    renderHook(() => useZoom())
+
+    await vi.runAllTimersAsync()
+    expect(mockOnScaleChanged).toHaveBeenCalledOnce()
+    mockSetZoom.mockClear()
+
+    mockSetZoom.mockImplementation(async zoom => {
+      if (zoom === 0.9) {
+        // Side-effect after the bounce, still inside the settle window.
+        scaleChangedHandler?.({ payload: { scaleFactor: 1.75 } })
+      }
+    })
+
+    scaleChangedHandler?.({ payload: { scaleFactor: 2 } })
+    await vi.runAllTimersAsync()
+
+    expect(mockSetZoom.mock.calls).toEqual([[1], [0.9]])
+
+    // Settle window ends; absorbed scale must not re-fire.
+    await vi.advanceTimersByTimeAsync(DISPLAY_SCALE_ZOOM_SETTLE_MS)
+    scaleChangedHandler?.({ payload: { scaleFactor: 1.75 } })
+    expect(mockSetZoom).toHaveBeenCalledTimes(2)
+
+    // A real later monitor change still refreshes once.
+    scaleChangedHandler?.({ payload: { scaleFactor: 1 } })
+    await vi.runAllTimersAsync()
+    expect(mockSetZoom.mock.calls).toEqual([[1], [0.9], [1], [0.9]])
   })
 
   it('uses the separate mobile zoom when syncing is disabled', async () => {
