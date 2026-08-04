@@ -143,7 +143,7 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
   // Always use Jean's CodeMirror editor for in-app file viewing — same on
   // desktop and mobile. External editors stay available via "Open in Editor".
 
-  const loadFileContent = useCallback(async (path: string) => {
+  const loadFileContent = useCallback(async (path: string, signal: { cancelled: boolean }) => {
     setIsLoading(true)
     setError(null)
     setContent(null)
@@ -152,21 +152,23 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
 
     try {
       const fileContent = await invoke<string>('read_file_content', { path })
+      if (signal.cancelled) return
       setContent(fileContent)
       setEditedContent(fileContent)
       // Open in edit mode by default (matches mobile file browser)
       setIsEditing(true)
     } catch (err) {
+      if (signal.cancelled) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setIsLoading(false)
+      if (!signal.cancelled) setIsLoading(false)
     }
   }, [])
 
   // Load images through the backend so remote/web and paths outside project
   // roots (e.g. /tmp screenshots) work — convertProjectFileSrc only serves
   // known project/worktree directories.
-  const loadImageContent = useCallback(async (path: string) => {
+  const loadImageContent = useCallback(async (path: string, signal: { cancelled: boolean }) => {
     setIsLoading(true)
     setError(null)
     setImageError(false)
@@ -177,16 +179,19 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
       const result = await invoke<FileBase64Content>('read_file_base64', {
         path,
       })
+      if (signal.cancelled) return
       setImageSrc(`data:${result.mimeType};base64,${result.data}`)
     } catch (err) {
+      if (signal.cancelled) return
       setError(err instanceof Error ? err.message : String(err))
       setImageError(true)
     } finally {
-      setIsLoading(false)
+      if (!signal.cancelled) setIsLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    const signal = { cancelled: false }
     setImageError(false)
     setImageLoaded(false)
     setImageSrc(null)
@@ -196,15 +201,20 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
       setError(null)
       setIsLoading(false)
       setIsEditing(false)
-      return
+      return () => {
+        signal.cancelled = true
+      }
     }
     if (isImageFile(filePath)) {
       setContent(null)
       setEditedContent(null)
       setIsEditing(false)
-      void loadImageContent(filePath)
+      void loadImageContent(filePath, signal)
     } else {
-      void loadFileContent(filePath)
+      void loadFileContent(filePath, signal)
+    }
+    return () => {
+      signal.cancelled = true
     }
   }, [filePath, loadFileContent, loadImageContent])
 
