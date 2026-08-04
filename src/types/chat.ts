@@ -1169,8 +1169,8 @@ export function foldTodoWriteToolCalls(toolCalls: ToolCall[]): Todo[] {
     for (const item of incoming) {
       if (item.id) {
         const idx = next.findIndex(t => t.id === item.id)
-        if (idx >= 0) {
-          const prev = next[idx]!
+        const prev = idx >= 0 ? next[idx] : undefined
+        if (prev) {
           next[idx] = {
             ...prev,
             status: item.status,
