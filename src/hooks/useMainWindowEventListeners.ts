@@ -957,6 +957,25 @@ export function useMainWindowEventListeners() {
     const setupMenuListeners = async () => {
       logger.debug('Setting up menu event listeners')
       const unlisteners = await Promise.all([
+        listen<{ sessionId: string }>('terminal:working', event => {
+          const sessionId = event.payload?.sessionId
+          if (!sessionId) return
+          const store = useChatStore.getState()
+          store.addSendingSession(sessionId)
+          // Mirror chat turn start: clear waiting so the session shows as running.
+          store.setWaitingForInput(sessionId, false)
+        }),
+
+        listen<{ sessionId: string }>('terminal:attention', event => {
+          const sessionId = event.payload?.sessionId
+          if (!sessionId) return
+          const store = useChatStore.getState()
+          store.removeSendingSession(sessionId)
+          // Mirror chat:done waiting so canvas/list badges update before sessions
+          // cache invalidation lands (terminal sessions have no run transcript).
+          store.setWaitingForInput(sessionId, true)
+        }),
+
         listenLocal('menu-about', async () => {
           logger.debug('About menu event received')
           if (!isNativeApp()) return
