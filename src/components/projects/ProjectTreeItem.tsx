@@ -371,18 +371,11 @@ export function ProjectTreeItem({ project }: ProjectTreeItemProps) {
                 >
                   <span className="flex items-center gap-0.5">
                     <ArrowDownUp className="h-3 w-3" />
-                    {baseBranchBehindCount > 0 && (
-                      <span className="inline-flex items-center gap-0.5">
-                        <ArrowDown className="h-2.5 w-2.5" />
-                        {baseBranchBehindCount}
-                      </span>
-                    )}
-                    {baseBranchAheadCount > 0 && (
-                      <span className="inline-flex items-center gap-0.5">
-                        <ArrowUp className="h-2.5 w-2.5" />
-                        {baseBranchAheadCount}
-                      </span>
-                    )}
+                    {baseBranchBehindCount > 0 && baseBranchAheadCount > 0
+                      ? `${baseBranchBehindCount}/${baseBranchAheadCount}`
+                      : baseBranchBehindCount > 0
+                        ? baseBranchBehindCount
+                        : baseBranchAheadCount}
                   </span>
                 </button>
               </TooltipTrigger>

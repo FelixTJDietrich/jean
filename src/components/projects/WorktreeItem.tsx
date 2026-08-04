@@ -766,18 +766,11 @@ export function WorktreeItem({
                 >
                   <span className="flex items-center gap-0.5">
                     <ArrowDownUp className="h-3 w-3" />
-                    {behindCount > 0 && (
-                      <span className="inline-flex items-center gap-0.5">
-                        <ArrowDown className="h-2.5 w-2.5" />
-                        {behindCount}
-                      </span>
-                    )}
-                    {pushCount > 0 && (
-                      <span className="inline-flex items-center gap-0.5">
-                        <ArrowUp className="h-2.5 w-2.5" />
-                        {pushCount}
-                      </span>
-                    )}
+                    {behindCount > 0 && pushCount > 0
+                      ? `${behindCount}/${pushCount}`
+                      : behindCount > 0
+                        ? behindCount
+                        : pushCount}
                   </span>
                 </button>
               </TooltipTrigger>

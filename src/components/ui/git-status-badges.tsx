@@ -99,18 +99,11 @@ export function GitStatusBadges({
               className="inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-500 transition-colors hover:bg-violet-500/20"
             >
               <ArrowDownUp className="h-3 w-3" />
-              {behindCount > 0 && (
-                <span className="inline-flex items-center gap-0.5">
-                  <ArrowDown className="h-2.5 w-2.5" />
-                  {behindCount}
-                </span>
-              )}
-              {unpushedCount > 0 && (
-                <span className="inline-flex items-center gap-0.5">
-                  <ArrowUp className="h-2.5 w-2.5" />
-                  {unpushedCount}
-                </span>
-              )}
+              {behindCount > 0 && unpushedCount > 0
+                ? `${behindCount}/${unpushedCount}`
+                : behindCount > 0
+                  ? behindCount
+                  : unpushedCount}
             </button>
           </TooltipTrigger>
           <TooltipContent>{syncTooltip}</TooltipContent>
