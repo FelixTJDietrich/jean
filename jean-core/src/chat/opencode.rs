@@ -2405,10 +2405,10 @@ fn should_auto_approve_opencode_permissions(
     if turn_execution_mode == Some("yolo") {
         return true;
     }
-    match super::storage::load_metadata(app, jean_session_id) {
-        Ok(Some(meta)) if meta.selected_execution_mode.as_deref() == Some("yolo") => true,
-        _ => false,
-    }
+    matches!(
+        super::storage::load_metadata(app, jean_session_id),
+        Ok(Some(meta)) if meta.selected_execution_mode.as_deref() == Some("yolo")
+    )
 }
 
 /// Parse a `permission.asked` / `permission.v2.asked` properties object into a

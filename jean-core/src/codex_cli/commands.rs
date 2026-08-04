@@ -955,7 +955,7 @@ fn linux_sandbox_status_for_host_binary(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = binary_path;
-        return (None, None);
+        (None, None)
     }
     #[cfg(target_os = "linux")]
     {
