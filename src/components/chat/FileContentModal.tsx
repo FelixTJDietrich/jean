@@ -16,7 +16,7 @@ import {
   Save,
   ExternalLink,
 } from 'lucide-react'
-import { invoke, convertProjectFileSrc } from '@/lib/transport'
+import { invoke } from '@/lib/transport'
 import {
   Dialog,
   DialogContent,
@@ -104,6 +104,11 @@ function SyntaxHighlightedCode({
  * Modal dialog for viewing and editing file content
  * Supports syntax highlighting and inline editing based on preferences
  */
+interface FileBase64Content {
+  data: string
+  mimeType: string
+}
+
 export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
   const [content, setContent] = useState<string | null>(null)
   const [editedContent, setEditedContent] = useState<string | null>(null)
@@ -113,6 +118,8 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [imageError, setImageError] = useState(false)
   const [imageLoaded, setImageLoaded] = useState(false)
+  /** data: URL for images loaded via backend (works for /tmp and remote) */
+  const [imageSrc, setImageSrc] = useState<string | null>(null)
 
   const { theme } = useTheme()
   const { data: preferences } = usePreferences()
@@ -156,29 +163,56 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
     }
   }, [])
 
+  // Load images through the backend so remote/web and paths outside project
+  // roots (e.g. /tmp screenshots) work — convertProjectFileSrc only serves
+  // known project/worktree directories.
+  const loadImageContent = useCallback(async (path: string) => {
+    setIsLoading(true)
+    setError(null)
+    setImageError(false)
+    setImageLoaded(false)
+    setImageSrc(null)
+
+    try {
+      const result = await invoke<FileBase64Content>('read_file_base64', {
+        path,
+      })
+      setImageSrc(`data:${result.mimeType};base64,${result.data}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setImageError(true)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     setImageError(false)
     setImageLoaded(false)
-    if (filePath && !isImageFile(filePath)) {
-      void loadFileContent(filePath)
-    } else {
-      // Reset state when modal closes or for image files
+    setImageSrc(null)
+    if (!filePath) {
       setContent(null)
       setEditedContent(null)
       setError(null)
       setIsLoading(false)
       setIsEditing(false)
+      return
     }
-  }, [filePath, loadFileContent])
+    if (isImageFile(filePath)) {
+      setContent(null)
+      setEditedContent(null)
+      setIsEditing(false)
+      void loadImageContent(filePath)
+    } else {
+      void loadFileContent(filePath)
+    }
+  }, [filePath, loadFileContent, loadImageContent])
 
   const filename = filePath ? getFilename(filePath) : filePath
 
   const isImage = isImageFile(filename)
   const isMarkdown = isMarkdownFile(filename)
   const language = filePath ? getLanguageFromPath(filePath) : 'text'
-  // Worktree/project paths need the project-files endpoint in web access
-  // (convertFileSrc only serves Jean app-data files).
-  const imageSrc = filePath && isImage ? convertProjectFileSrc(filePath) : null
 
   // Check if content has been modified
   const hasChanges = isEditing && editedContent !== content
@@ -351,9 +385,9 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
           </div>
         ) : !isLoading && !error ? (
           <ScrollArea className="h-[calc(100dvh-7rem)] sm:h-[calc(85vh-6rem)] mt-2 px-4 pb-4 sm:px-0 sm:pb-0">
-            {isImage && imageSrc ? (
+            {isImage ? (
               <div className="flex flex-col items-center justify-center gap-3 p-4 min-h-[12rem]">
-                {!imageLoaded && !imageError && (
+                {!imageLoaded && !imageError && imageSrc && (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="h-5 w-5 animate-spin" />
                     Loading image…
@@ -363,10 +397,10 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
                   <div className="flex items-center gap-2 py-4 px-3 bg-destructive/10 text-destructive rounded-md max-w-full">
                     <AlertCircle className="h-4 w-4 shrink-0" />
                     <span className="text-sm break-words">
-                      Failed to load image
+                      {error ?? 'Failed to load image'}
                     </span>
                   </div>
-                ) : (
+                ) : imageSrc ? (
                   <img
                     src={imageSrc}
                     alt={filename ?? 'Image'}
@@ -380,7 +414,7 @@ export function FileContentModal({ filePath, onClose }: FileContentModalProps) {
                       setImageLoaded(false)
                     }}
                   />
-                )}
+                ) : null}
               </div>
             ) : content !== null ? (
               isMarkdown ? (

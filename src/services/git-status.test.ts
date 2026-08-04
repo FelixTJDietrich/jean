@@ -20,6 +20,7 @@ import {
   useAppFocusTracking,
   useWorktreePolling,
   performGitPull,
+  performGitSync,
   type WorktreePollingInfo,
 } from './git-status'
 
@@ -391,7 +392,7 @@ describe('git-status service', () => {
       const onMergeConflict = vi.fn()
       mockInvoke.mockRejectedValueOnce('Merge conflicts in:\nfile.txt')
 
-      await performGitPull({
+      const ok = await performGitPull({
         worktreeId: 'wt-123',
         worktreePath: '/path/to/repo',
         baseBranch: 'main',
@@ -399,6 +400,7 @@ describe('git-status service', () => {
         onMergeConflict,
       })
 
+      expect(ok).toBe(false)
       expect(onMergeConflict).not.toHaveBeenCalled()
       expect(mockToast.warning).toHaveBeenCalledWith(
         'Pull resulted in merge conflicts',
@@ -420,6 +422,72 @@ describe('git-status service', () => {
       warningOptions.action.onClick()
 
       expect(onMergeConflict).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('performGitSync', () => {
+    it('pulls then pushes when both are needed', async () => {
+      mockInvoke
+        .mockResolvedValueOnce('Already up to date.') // git_pull
+        .mockResolvedValueOnce(undefined) // trigger poll / status may not use invoke
+        .mockResolvedValueOnce({ fellBack: false }) // git_push
+
+      // performGitPull uses git_pull; triggerImmediateGitPoll may invoke; git_push uses git_push
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'git_pull') return 'Already up to date.'
+        if (cmd === 'git_push') return { fellBack: false, remote: 'origin' }
+        return undefined
+      })
+
+      await performGitSync({
+        needsPull: true,
+        needsPush: true,
+        pull: {
+          worktreeId: 'wt-123',
+          worktreePath: '/path/to/repo',
+          baseBranch: 'main',
+          projectId: 'proj-1',
+        },
+      })
+
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'git_pull',
+        expect.objectContaining({
+          worktreePath: '/path/to/repo',
+          baseBranch: 'main',
+        })
+      )
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'git_push',
+        expect.objectContaining({
+          worktreePath: '/path/to/repo',
+        })
+      )
+      expect(mockToast.success).toHaveBeenCalledWith(
+        'Synced with remote',
+        expect.anything()
+      )
+    })
+
+    it('skips push when pull fails', async () => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'git_pull') throw new Error('network error')
+        if (cmd === 'git_push') return { fellBack: false }
+        return undefined
+      })
+
+      await performGitSync({
+        needsPull: true,
+        needsPush: true,
+        pull: {
+          worktreeId: 'wt-123',
+          worktreePath: '/path/to/repo',
+          baseBranch: 'main',
+        },
+      })
+
+      expect(mockInvoke).toHaveBeenCalledWith('git_pull', expect.anything())
+      expect(mockInvoke).not.toHaveBeenCalledWith('git_push', expect.anything())
     })
   })
 

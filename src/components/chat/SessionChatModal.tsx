@@ -68,6 +68,7 @@ import {
   fetchWorktreesStatus,
   triggerImmediateGitPoll,
   performGitPull,
+  performGitSync,
 } from '@/services/git-status'
 import { isBaseSession } from '@/types/projects'
 import type { Session } from '@/types/chat'
@@ -898,6 +899,48 @@ export function SessionChatModal({
     [pickRemoteOrRun, worktree, worktreePath, project]
   )
 
+  const gitSyncButton = preferences?.git_sync_button ?? false
+
+  const handleSync = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+
+      const runSync = async (remote?: string) => {
+        await performGitSync({
+          needsPull: behindCount > 0,
+          needsPush: unpushedCount > 0,
+          pull: {
+            worktreeId,
+            worktreePath,
+            baseBranch: worktree?.base_branch ?? defaultBranch,
+            projectId: project?.id,
+            remote: worktree?.base_remote,
+          },
+          prNumber: worktree?.pr_number,
+          pushRemote: remote,
+        })
+      }
+
+      if (unpushedCount > 0 && pushNeedsRemotePicker(worktree?.pr_number)) {
+        pickRemoteOrRun(runSync)
+      } else {
+        void runSync()
+      }
+    },
+    [
+      behindCount,
+      unpushedCount,
+      worktreeId,
+      worktreePath,
+      worktree?.base_branch,
+      worktree?.base_remote,
+      worktree?.pr_number,
+      defaultBranch,
+      project?.id,
+      pickRemoteOrRun,
+    ]
+  )
+
   const handleUncommittedDiffClick = useCallback(() => {
     window.dispatchEvent(
       new CustomEvent('open-git-diff', { detail: { type: 'uncommitted' } })
@@ -1085,8 +1128,10 @@ export function SessionChatModal({
                   diffRemoved={isMobile ? 0 : uncommittedRemoved}
                   branchDiffAdded={isBase || isMobile ? 0 : branchDiffAdded}
                   branchDiffRemoved={isBase || isMobile ? 0 : branchDiffRemoved}
+                  syncMode={gitSyncButton}
                   onPull={handlePull}
                   onPush={handlePush}
+                  onSync={handleSync}
                   onDiffClick={handleUncommittedDiffClick}
                   onBranchDiffClick={handleBranchDiffClick}
                 />

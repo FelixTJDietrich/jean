@@ -1562,6 +1562,11 @@ pub async fn dispatch_command(
             let result = crate::chat::read_file_content(path).await?;
             to_value(result)
         }
+        "read_file_base64" => {
+            let path: String = from_field(&args, "path")?;
+            let result = crate::chat::read_file_base64(path).await?;
+            to_value(result)
+        }
         "read_plan_file" => {
             let path: String = from_field(&args, "path")?;
             let result = crate::chat::read_plan_file(path).await?;
