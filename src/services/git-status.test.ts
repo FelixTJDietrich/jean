@@ -426,13 +426,7 @@ describe('git-status service', () => {
   })
 
   describe('performGitSync', () => {
-    it('pulls then pushes when both are needed', async () => {
-      mockInvoke
-        .mockResolvedValueOnce('Already up to date.') // git_pull
-        .mockResolvedValueOnce(undefined) // trigger poll / status may not use invoke
-        .mockResolvedValueOnce({ fellBack: false }) // git_push
-
-      // performGitPull uses git_pull; triggerImmediateGitPoll may invoke; git_push uses git_push
+    it('pulls then pushes when both are needed with sync toasts', async () => {
       mockInvoke.mockImplementation(async (cmd: string) => {
         if (cmd === 'git_pull') return 'Already up to date.'
         if (cmd === 'git_push') return { fellBack: false, remote: 'origin' }
@@ -450,6 +444,7 @@ describe('git-status service', () => {
         },
       })
 
+      expect(mockToast.loading).toHaveBeenCalledWith('Syncing main...')
       expect(mockInvoke).toHaveBeenCalledWith(
         'git_pull',
         expect.objectContaining({
@@ -465,7 +460,36 @@ describe('git-status service', () => {
       )
       expect(mockToast.success).toHaveBeenCalledWith(
         'Synced with remote',
+        expect.objectContaining({ id: 'toast-1' })
+      )
+      // Should not show intermediate "Changes pulled" / "Pushing changes..."
+      expect(mockToast.success).not.toHaveBeenCalledWith(
+        'Changes pulled',
         expect.anything()
+      )
+      expect(mockToast.loading).not.toHaveBeenCalledWith('Pushing changes...')
+    })
+
+    it('uses sync toast for pull-only sync', async () => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'git_pull') return 'Already up to date.'
+        return undefined
+      })
+
+      await performGitSync({
+        needsPull: true,
+        needsPush: false,
+        pull: {
+          worktreeId: 'wt-123',
+          worktreePath: '/path/to/repo',
+          baseBranch: 'feature',
+        },
+      })
+
+      expect(mockToast.loading).toHaveBeenCalledWith('Syncing feature...')
+      expect(mockToast.success).toHaveBeenCalledWith(
+        'Synced with remote',
+        expect.objectContaining({ id: 'toast-1' })
       )
     })
 
@@ -486,6 +510,7 @@ describe('git-status service', () => {
         },
       })
 
+      expect(mockToast.loading).toHaveBeenCalledWith('Syncing main...')
       expect(mockInvoke).toHaveBeenCalledWith('git_pull', expect.anything())
       expect(mockInvoke).not.toHaveBeenCalledWith('git_push', expect.anything())
     })

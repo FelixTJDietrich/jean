@@ -199,6 +199,17 @@ export interface GitPullOptions {
   projectId?: string
   remote?: string
   onMergeConflict?: () => void
+  /** Reuse an existing toast id (e.g. from performGitSync) */
+  toastId?: string | number
+  /** Override the loading toast message */
+  loadingMessage?: string
+  /** Override the success toast message */
+  successMessage?: string
+  /**
+   * When true, leave the toast in loading state on success so the caller can
+   * continue a multi-step flow (e.g. push after pull during sync).
+   */
+  keepLoadingOnSuccess?: boolean
 }
 
 /**
@@ -221,6 +232,10 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
     projectId,
     remote,
     onMergeConflict,
+    toastId: existingToastId,
+    loadingMessage,
+    successMessage,
+    keepLoadingOnSuccess,
   } = opts
   const [{ toast }, { useChatStore }] = await Promise.all([
     import('sonner'),
@@ -233,13 +248,22 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
     setWorktreeLoading(worktreeId, 'commit')
   }
   const label = branchLabel || baseBranch
-  const toastId = toast.loading(`Pulling changes on ${label}...`)
+  const toastId =
+    existingToastId ??
+    toast.loading(loadingMessage ?? `Pulling changes on ${label}...`)
+  if (existingToastId && loadingMessage) {
+    toast.loading(loadingMessage, { id: existingToastId })
+  }
 
   try {
     await gitPull(worktreePath, baseBranch, remote)
     await triggerImmediateGitPoll()
     if (projectId) fetchWorktreesStatus(projectId)
-    toast.success('Changes pulled', { id: toastId })
+    if (keepLoadingOnSuccess) {
+      // Caller continues the flow (e.g. push after pull)
+    } else {
+      toast.success(successMessage ?? 'Changes pulled', { id: toastId })
+    }
     return true
   } catch (error) {
     const errorStr = String(error)
@@ -270,9 +294,19 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
         await gitStashPop(worktreePath)
         await triggerImmediateGitPoll()
         if (projectId) fetchWorktreesStatus(projectId)
-        toast.success('Pulled (auto-stashed and restored local changes)', {
-          id: toastId,
-        })
+        if (keepLoadingOnSuccess) {
+          toast.loading(loadingMessage ?? `Syncing ${label}...`, {
+            id: toastId,
+          })
+        } else {
+          toast.success(
+            successMessage ??
+              'Pulled (auto-stashed and restored local changes)',
+            {
+              id: toastId,
+            }
+          )
+        }
         return true
       } catch (stashError) {
         const stashErrStr = String(stashError)
@@ -357,6 +391,7 @@ export interface GitSyncOptions {
 
 /**
  * One-click git sync: pull (when behind) then push (when ahead).
+ * Uses a single "Syncing …" toast for the whole operation.
  * Skips push if pull was requested and failed.
  */
 export async function performGitSync(opts: GitSyncOptions): Promise<void> {
@@ -364,15 +399,23 @@ export async function performGitSync(opts: GitSyncOptions): Promise<void> {
 
   if (!needsPull && !needsPush) return
 
+  const [{ toast }] = await Promise.all([import('sonner')])
+  const label = pull.branchLabel || pull.baseBranch
+  const toastId = toast.loading(`Syncing ${label}...`)
+
   if (needsPull) {
-    const pulled = await performGitPull(pull)
+    const pulled = await performGitPull({
+      ...pull,
+      toastId,
+      loadingMessage: `Syncing ${label}...`,
+      successMessage: 'Synced with remote',
+      keepLoadingOnSuccess: needsPush,
+    })
     if (!pulled) return
   }
 
   if (!needsPush) return
 
-  const [{ toast }] = await Promise.all([import('sonner')])
-  const toastId = toast.loading('Pushing changes...')
   try {
     const result = await gitPush(pull.worktreePath, prNumber, pushRemote)
     await triggerImmediateGitPoll()
@@ -383,12 +426,10 @@ export async function performGitSync(opts: GitSyncOptions): Promise<void> {
         { id: toastId }
       )
     } else {
-      toast.success(needsPull ? 'Synced with remote' : 'Changes pushed', {
-        id: toastId,
-      })
+      toast.success('Synced with remote', { id: toastId })
     }
   } catch (error) {
-    toast.error(`Push failed: ${error}`, { id: toastId })
+    toast.error(`Sync failed: ${error}`, { id: toastId })
   }
 }
 
