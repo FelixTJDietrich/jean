@@ -54,6 +54,7 @@ import {
   reconnectNativeCliSession,
   canReconnectSession,
 } from '@/services/chat'
+import { resolveBackendCliPath } from '@/services/cli-binary'
 import { usePreferences } from '@/services/preferences'
 import {
   useWorktree,
@@ -663,27 +664,33 @@ export function SessionChatModal({
 
   const handleOpenInNativeClient = useCallback(
     (session: Session) => {
-      const input = buildNativeClientSessionInput(
-        session,
-        worktreeId,
-        worktreePath
-      )
-      if (!input) {
-        toast.error('No native resume command is available for this session')
-        return
-      }
+      void (async () => {
+        // Prefer Jean-managed / resolved absolute path so bare names like
+        // `grok` work when the CLI is not on PATH (default jean install).
+        const resolvedCommand = await resolveBackendCliPath(session.backend)
+        const input = buildNativeClientSessionInput(
+          session,
+          worktreeId,
+          worktreePath,
+          { resolvedCommand }
+        )
+        if (!input) {
+          toast.error('No native resume command is available for this session')
+          return
+        }
 
-      createSession.mutate(input, {
-        onSuccess: nativeSession => {
-          useChatStore
-            .getState()
-            .setSelectedBackend(nativeSession.id, input.backend)
-          void reconnectNativeCliSession(nativeSession, worktreeId, {
-            openModal: false,
-            showToast: false,
-          }).then(() => toast.success('Opened in native client'))
-        },
-      })
+        createSession.mutate(input, {
+          onSuccess: nativeSession => {
+            useChatStore
+              .getState()
+              .setSelectedBackend(nativeSession.id, input.backend)
+            void reconnectNativeCliSession(nativeSession, worktreeId, {
+              openModal: false,
+              showToast: false,
+            }).then(() => toast.success('Opened in native client'))
+          },
+        })
+      })()
     },
     [createSession, worktreeId, worktreePath]
   )
