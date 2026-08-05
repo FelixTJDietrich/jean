@@ -2690,6 +2690,10 @@ pub struct UIState {
     #[serde(default)]
     pub file_browser_visible: Option<bool>,
 
+    /// Whether the session chat is using the reduced-chrome zen layout
+    #[serde(default)]
+    pub zen_mode: Option<bool>,
+
     /// Active session ID per worktree (for restoring open tabs)
     #[serde(default)]
     pub active_session_ids: std::collections::HashMap<String, String>,
@@ -2901,6 +2905,7 @@ impl Default for UIState {
             left_sidebar_visible: None,
             file_browser_size: None,
             file_browser_visible: None,
+            zen_mode: None,
             active_session_ids: std::collections::HashMap::new(),
             input_drafts: std::collections::HashMap::new(),
             pending_images: std::collections::HashMap::new(),
