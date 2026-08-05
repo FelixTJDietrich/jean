@@ -230,7 +230,7 @@ pub struct AppPreferences {
     #[serde(default)]
     pub magic_models_auto_initialized: bool, // Whether magic prompt models were auto-set based on installed backends
     #[serde(default = "default_file_edit_mode")]
-    pub file_edit_mode: String, // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
+    pub file_edit_mode: String, // How to edit files: inline (Pierre) or external (VS Code, etc.)
     #[serde(default)]
     pub ai_language: String, // Preferred language for AI responses (empty = default)
     #[serde(default = "default_allow_web_tools_in_plan_mode")]
@@ -645,7 +645,7 @@ fn default_syntax_theme_light() -> String {
 }
 
 fn default_file_edit_mode() -> String {
-    "inline".to_string() // Default to Jean's CodeMirror inline editor
+    "inline".to_string() // Default to Jean's Pierre inline editor
 }
 
 fn default_parallel_execution_prompt_enabled() -> bool {
