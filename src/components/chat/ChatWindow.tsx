@@ -122,6 +122,7 @@ import { FilePreview } from './FilePreview'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
 import { ChatToolbar } from './ChatToolbar'
+import { SendCancelButton } from './toolbar/SendCancelButton'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
 import { ReviewMethodModal } from './ReviewMethodModal'
 import { QueuedPromptsPanel } from './QueuedPromptsPanel'
@@ -3097,17 +3098,21 @@ export function ChatWindow({
                                       handleScrollToBottomHandled
                                     }
                                     completedDurationMs={completedDurationMs}
-                                    hasOlderOnDisk={hasOlderOnDisk}
+                                    hasOlderOnDisk={!zenMode && hasOlderOnDisk}
                                     isLoadingOlder={loadOlderMessages.isPending}
-                                    onLoadOlderRuns={handleLoadOlderRuns}
+                                    onLoadOlderRuns={
+                                      zenMode ? undefined : handleLoadOlderRuns
+                                    }
                                     loadedRunStartIndex={loadedRunStartIndex}
                                     hiddenPromptCount={
-                                      isCompactHistoryExpanded
+                                      zenMode || isCompactHistoryExpanded
                                         ? 0
                                         : compactHistoryWindow.hiddenPromptCount
                                     }
                                     onShowHiddenPrompts={
-                                      handleShowHiddenCompactPrompts
+                                      zenMode
+                                        ? undefined
+                                        : handleShowHiddenCompactPrompts
                                     }
                                   />
                                 ) : (
@@ -3610,146 +3615,177 @@ export function ChatWindow({
                               </div>
 
                               {/* Bottom toolbar */}
-                              <div>
-                                <ChatToolbar
-                                  isSending={isSending}
-                                  hasPendingQuestions={hasPendingQuestions}
-                                  hasPendingAttachments={hasPendingAttachments}
-                                  hasInputValue={hasInputValue}
-                                  executionMode={executionMode}
-                                  selectedBackend={selectedBackend}
-                                  sessionHasMessages={
-                                    (session?.messages?.length ?? 0) > 0
-                                  }
-                                  selectedModel={selectedModel}
-                                  selectedProvider={selectedProvider}
-                                  providerLocked={
-                                    (session?.messages?.length ?? 0) > 0
-                                  }
-                                  selectedThinkingLevel={selectedThinkingLevel}
-                                  selectedEffortLevel={selectedEffortLevel}
-                                  useAdaptiveThinking={useAdaptiveThinkingFlag}
-                                  hideThinkingLevel={hideThinkingLevel}
-                                  baseBranch={
-                                    gitStatus?.base_branch ??
-                                    worktree?.base_branch ??
-                                    'main'
-                                  }
-                                  baseRemote={
-                                    gitStatus?.base_remote ??
-                                    worktree?.base_remote
-                                  }
-                                  uncommittedAdded={uncommittedAdded}
-                                  uncommittedRemoved={uncommittedRemoved}
-                                  branchDiffAdded={branchDiffAdded}
-                                  branchDiffRemoved={branchDiffRemoved}
-                                  prUrl={worktree?.pr_url}
-                                  prNumber={worktree?.pr_number}
-                                  displayStatus={displayStatus}
-                                  checkStatus={checkStatus}
-                                  mergeableStatus={mergeableStatus}
-                                  activeWorktreePath={activeWorktreePath}
-                                  worktreeId={activeWorktreeId ?? null}
-                                  activeSessionId={activeSessionId}
-                                  projectId={worktree?.project_id}
-                                  runScripts={runScripts}
-                                  loadedIssueContexts={
-                                    loadedIssueContexts ?? []
-                                  }
-                                  loadedPRContexts={loadedPRContexts ?? []}
-                                  loadedSecurityContexts={
-                                    loadedSecurityContexts ?? []
-                                  }
-                                  loadedAdvisoryContexts={
-                                    loadedAdvisoryContexts ?? []
-                                  }
-                                  loadedLinearContexts={
-                                    loadedLinearContexts ?? []
-                                  }
-                                  attachedSavedContexts={
-                                    attachedSavedContexts ?? []
-                                  }
-                                  onOpenMagicModal={handleOpenMagicModal}
-                                  onSaveContext={handleSaveContext}
-                                  onLoadContext={handleLoadContext}
-                                  onCommit={handleCommit}
-                                  onCommitAndPush={
-                                    handleCommitAndPushWithPicker
-                                  }
-                                  onOpenPr={handleOpenPr}
-                                  onReview={() =>
-                                    setReviewMethodModalOpen(true)
-                                  }
-                                  onMerge={handleMerge}
-                                  onMergePr={handleMergePr}
-                                  onResolvePrConflicts={
-                                    handleResolvePrConflicts
-                                  }
-                                  onBackendModelChange={
-                                    handleToolbarBackendModelChange
-                                  }
-                                  onResolveConflicts={handleResolveConflicts}
-                                  hasOpenPr={Boolean(
-                                    worktree?.pr_number || worktree?.pr_url
-                                  )}
-                                  onSetDiffRequest={setDiffRequest}
-                                  installedBackends={installedBackends}
-                                  onModelChange={handleToolbarModelChange}
-                                  onProviderChange={handleToolbarProviderChange}
-                                  customCliProfiles={
-                                    preferences?.custom_cli_profiles ?? []
-                                  }
-                                  customCodexProviders={
-                                    preferences?.custom_codex_providers ?? []
-                                  }
-                                  onThinkingLevelChange={
-                                    handleToolbarThinkingLevelChange
-                                  }
-                                  onEffortLevelChange={
-                                    handleToolbarEffortLevelChange
-                                  }
-                                  onSetExecutionMode={
-                                    handleToolbarSetExecutionMode
-                                  }
-                                  onAttach={() =>
-                                    triggerChatAttachRef.current?.()
-                                  }
-                                  onCancel={handleCancel}
-                                  willSteer={
-                                    isBackendAutoSteerEnabled(
-                                      selectedBackend,
-                                      preferences
-                                    ) ||
-                                    (steerModifierActive &&
-                                      isSteerCapableBackend(selectedBackend))
-                                  }
-                                  steerWithModifier={
-                                    steerModifierActive &&
-                                    !isBackendAutoSteerEnabled(
-                                      selectedBackend,
-                                      preferences
-                                    )
-                                  }
-                                  queuedMessageCount={
-                                    currentQueuedMessages.length
-                                  }
-                                  availableMcpServers={availableMcpServers}
-                                  enabledMcpServers={enabledMcpServers}
-                                  onToggleMcpServer={handleToggleMcpServer}
-                                  onOpenProjectSettings={
-                                    handleOpenProjectSettings
-                                  }
-                                  onRunCommand={handleRunCommand}
-                                  packageScripts={packageScripts}
-                                  favoritePackageScripts={
-                                    favoritePackageScripts
-                                  }
-                                  onRunPackageScript={handleRunPackageScript}
-                                  onToggleFavoritePackageScript={
-                                    handleToggleFavoritePackageScript
-                                  }
-                                />
-                              </div>
+                              {zenMode && isMobile ? (
+                                <div className="shrink-0 pr-3">
+                                  <SendCancelButton
+                                    isSending={isSending}
+                                    canSend={
+                                      hasInputValue || hasPendingAttachments
+                                    }
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    onCancel={handleCancel}
+                                  />
+                                </div>
+                              ) : (
+                                <div className={cn(zenMode && 'shrink-0')}>
+                                  <ChatToolbar
+                                    isSending={isSending}
+                                    hasPendingQuestions={hasPendingQuestions}
+                                    hasPendingAttachments={
+                                      hasPendingAttachments
+                                    }
+                                    hasInputValue={hasInputValue}
+                                    executionMode={executionMode}
+                                    selectedBackend={selectedBackend}
+                                    sessionHasMessages={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedModel={selectedModel}
+                                    selectedProvider={selectedProvider}
+                                    providerLocked={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedThinkingLevel={
+                                      selectedThinkingLevel
+                                    }
+                                    selectedEffortLevel={selectedEffortLevel}
+                                    useAdaptiveThinking={
+                                      useAdaptiveThinkingFlag
+                                    }
+                                    hideThinkingLevel={hideThinkingLevel}
+                                    baseBranch={
+                                      gitStatus?.base_branch ??
+                                      worktree?.base_branch ??
+                                      'main'
+                                    }
+                                    baseRemote={
+                                      gitStatus?.base_remote ??
+                                      worktree?.base_remote
+                                    }
+                                    uncommittedAdded={uncommittedAdded}
+                                    uncommittedRemoved={uncommittedRemoved}
+                                    branchDiffAdded={branchDiffAdded}
+                                    branchDiffRemoved={branchDiffRemoved}
+                                    prUrl={worktree?.pr_url}
+                                    prNumber={worktree?.pr_number}
+                                    displayStatus={displayStatus}
+                                    checkStatus={checkStatus}
+                                    mergeableStatus={mergeableStatus}
+                                    activeWorktreePath={activeWorktreePath}
+                                    worktreeId={activeWorktreeId ?? null}
+                                    activeSessionId={activeSessionId}
+                                    projectId={worktree?.project_id}
+                                    runScripts={runScripts}
+                                    loadedIssueContexts={
+                                      loadedIssueContexts ?? []
+                                    }
+                                    loadedPRContexts={loadedPRContexts ?? []}
+                                    loadedSecurityContexts={
+                                      loadedSecurityContexts ?? []
+                                    }
+                                    loadedAdvisoryContexts={
+                                      loadedAdvisoryContexts ?? []
+                                    }
+                                    loadedLinearContexts={
+                                      loadedLinearContexts ?? []
+                                    }
+                                    attachedSavedContexts={
+                                      attachedSavedContexts ?? []
+                                    }
+                                    onOpenMagicModal={handleOpenMagicModal}
+                                    onSaveContext={handleSaveContext}
+                                    onLoadContext={handleLoadContext}
+                                    onCommit={handleCommit}
+                                    onCommitAndPush={
+                                      handleCommitAndPushWithPicker
+                                    }
+                                    onOpenPr={handleOpenPr}
+                                    onReview={() =>
+                                      setReviewMethodModalOpen(true)
+                                    }
+                                    onMerge={handleMerge}
+                                    onMergePr={handleMergePr}
+                                    onResolvePrConflicts={
+                                      handleResolvePrConflicts
+                                    }
+                                    onBackendModelChange={
+                                      handleToolbarBackendModelChange
+                                    }
+                                    onResolveConflicts={handleResolveConflicts}
+                                    hasOpenPr={Boolean(
+                                      worktree?.pr_number || worktree?.pr_url
+                                    )}
+                                    onSetDiffRequest={setDiffRequest}
+                                    installedBackends={installedBackends}
+                                    onModelChange={handleToolbarModelChange}
+                                    onProviderChange={
+                                      handleToolbarProviderChange
+                                    }
+                                    customCliProfiles={
+                                      preferences?.custom_cli_profiles ?? []
+                                    }
+                                    customCodexProviders={
+                                      preferences?.custom_codex_providers ?? []
+                                    }
+                                    onThinkingLevelChange={
+                                      handleToolbarThinkingLevelChange
+                                    }
+                                    onEffortLevelChange={
+                                      handleToolbarEffortLevelChange
+                                    }
+                                    onSetExecutionMode={
+                                      handleToolbarSetExecutionMode
+                                    }
+                                    onAttach={() =>
+                                      triggerChatAttachRef.current?.()
+                                    }
+                                    onCancel={handleCancel}
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
+                                    steerWithModifier={
+                                      steerModifierActive &&
+                                      !isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      )
+                                    }
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    availableMcpServers={availableMcpServers}
+                                    enabledMcpServers={enabledMcpServers}
+                                    onToggleMcpServer={handleToggleMcpServer}
+                                    onOpenProjectSettings={
+                                      handleOpenProjectSettings
+                                    }
+                                    onRunCommand={handleRunCommand}
+                                    packageScripts={packageScripts}
+                                    favoritePackageScripts={
+                                      favoritePackageScripts
+                                    }
+                                    onRunPackageScript={handleRunPackageScript}
+                                    onToggleFavoritePackageScript={
+                                      handleToggleFavoritePackageScript
+                                    }
+                                  />
+                                </div>
+                              )}
                             </div>
                           </form>
 
