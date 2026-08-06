@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo } from 'react'
-import { Copy } from 'lucide-react'
+import { Check, Copy } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
@@ -66,6 +66,7 @@ import {
 } from '@/types/chat'
 import { MessageSettingsBadges } from '@/components/chat/MessageSettingsBadges'
 import type { ApprovalModelOverride } from './ApprovalModelSubmenu'
+import { useUIStore } from '@/store/ui-store'
 
 interface MessageItemProps {
   /** The message to render */
@@ -203,6 +204,7 @@ export const MessageItem = memo(function MessageItem({
   hideCancelledIndicator,
   durationMs,
 }: MessageItemProps) {
+  const zenMode = useUIStore(state => state.zenMode)
   // Only show Approve button for the last message with ExitPlanMode
   const isLatestPlanRequest = messageIndex === lastPlanMessageIndex
 
@@ -888,51 +890,65 @@ export const MessageItem = memo(function MessageItem({
       )}
     >
       {message.role === 'user' ? (
-        <div className="group flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
-          <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground">
-            {messageBoxContent}
-            {message.model && (
-              <div className="mt-1.5">
-                <MessageSettingsBadges
-                  model={message.model}
-                  executionMode={message.execution_mode}
-                  thinkingLevel={message.thinking_level}
-                  effortLevel={message.effort_level}
-                  isCursor={message.model.startsWith('cursor/')}
-                />
+        <div className="group group/prompt flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
+          {zenMode && (
+            <div className="flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/20 px-2.5 py-1 text-xs text-muted-foreground group-hover/prompt:hidden">
+              <Check className="h-3 w-3" />
+              <span>Prompt sent</span>
+            </div>
+          )}
+          <div
+            data-zen-prompt-content
+            className={cn(
+              'min-w-0 max-w-full flex-col items-end gap-1',
+              zenMode ? 'hidden group-hover/prompt:flex' : 'flex'
+            )}
+          >
+            <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground">
+              {messageBoxContent}
+              {message.model && (
+                <div className="mt-1.5">
+                  <MessageSettingsBadges
+                    model={message.model}
+                    executionMode={message.execution_mode}
+                    thinkingLevel={message.thinking_level}
+                    effortLevel={message.effort_level}
+                    isCursor={message.model.startsWith('cursor/')}
+                  />
+                </div>
+              )}
+            </div>
+            {/* Actions under the prompt (restore only after finished turns with file edits) */}
+            {(showTurnRestore || onCopyToInput) && (
+              <div className="flex shrink-0 justify-end items-center gap-1 pr-0.5">
+                {showTurnRestore && (
+                  <CheckpointTurnRestoreButton
+                    userMessageId={message.id}
+                    worktreeId={worktreeId}
+                    hasFileEdits
+                    variant="userBubble"
+                    className="mt-0"
+                  />
+                )}
+                {onCopyToInput && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label="Copy message to input"
+                        onClick={handleCopyToInput}
+                        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] cursor-pointer transition-colors text-muted-foreground/80 hover:bg-muted/50 hover:text-foreground focus-visible:text-foreground [@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70"
+                      >
+                        <Copy className="h-3.5 w-3.5 shrink-0" />
+                        <span>Copy</span>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Copy to clipboard</TooltipContent>
+                  </Tooltip>
+                )}
               </div>
             )}
           </div>
-          {/* Actions under the prompt (restore only after finished turns with file edits) */}
-          {(showTurnRestore || onCopyToInput) && (
-            <div className="flex shrink-0 items-center gap-1 pr-0.5">
-              {showTurnRestore && (
-                <CheckpointTurnRestoreButton
-                  userMessageId={message.id}
-                  worktreeId={worktreeId}
-                  hasFileEdits
-                  variant="userBubble"
-                  className="mt-0"
-                />
-              )}
-              {onCopyToInput && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="Copy message to input"
-                      onClick={handleCopyToInput}
-                      className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] cursor-pointer transition-colors text-muted-foreground/80 hover:bg-muted/50 hover:text-foreground focus-visible:text-foreground [@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70"
-                    >
-                      <Copy className="h-3.5 w-3.5 shrink-0" />
-                      <span>Copy</span>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Copy to clipboard</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
-          )}
         </div>
       ) : (
         <div className="group relative text-foreground/90 w-full min-w-0 break-words">

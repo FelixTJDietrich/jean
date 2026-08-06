@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { MessageItem } from './MessageItem'
@@ -8,6 +8,7 @@ import type {
   QuestionAnswer,
   Question,
 } from '@/types/chat'
+import { useUIStore } from '@/store/ui-store'
 
 const mocks = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
@@ -27,6 +28,9 @@ vi.mock('sonner', () => ({
 }))
 
 describe('MessageItem', () => {
+  beforeEach(() => {
+    useUIStore.setState({ zenMode: false })
+  })
   const noopQuestionAnswer = (
     _toolCallId: string,
     _answers: QuestionAnswer[],
@@ -83,6 +87,30 @@ describe('MessageItem', () => {
     areQuestionsSkipped: vi.fn(() => false),
     isFindingFixed: vi.fn(() => false),
   }
+
+  it('collapses user prompts by default in zen mode', () => {
+    useUIStore.setState({ zenMode: true })
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          id: 'user-1',
+          session_id: 'session-1',
+          role: 'user',
+          content: 'This prompt should appear only on hover',
+          timestamp: 1,
+          tool_calls: [],
+        }}
+      />
+    )
+
+    expect(screen.getByText('Prompt sent')).toBeInTheDocument()
+    expect(
+      screen
+        .getByText('This prompt should appear only on hover')
+        .closest('[data-zen-prompt-content]')
+    ).toHaveClass('hidden', 'group-hover/prompt:flex')
+  })
 
   it('renders assistant text blocks even when a Codex plan is present', () => {
     render(<MessageItem {...baseProps} />)
