@@ -264,8 +264,6 @@ export function SessionChatModal({
     [sessionsData?.sessions]
   )
   const { data: preferences } = usePreferences()
-  const singleSessionPerWorktree =
-    preferences?.single_session_per_worktree ?? false
   const { data: runScripts = [] } = useRunScripts(worktreePath)
   const modalTerminalDockMode = useTerminalStore(
     state => state.modalTerminalDockMode
@@ -724,10 +722,6 @@ export function SessionChatModal({
     if (!isOpen) return
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
-      if (singleSessionPerWorktree && currentSessionId) {
-        toast.info('Clear context to start over in this worktree')
-        return
-      }
       const intent =
         (e as CustomEvent<{ intent?: 'default' | 'picker' }>).detail?.intent ??
         'picker'
@@ -747,8 +741,6 @@ export function SessionChatModal({
     isOpen,
     worktreeId,
     worktreePath,
-    singleSessionPerWorktree,
-    currentSessionId,
   ])
 
   // Keep Code Review first, then attention and active sessions, review,
@@ -1259,26 +1251,30 @@ export function SessionChatModal({
                     </kbd>
                   </TooltipContent>
                 </Tooltip>
-                {singleSessionPerWorktree && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        aria-label="Clear context"
-                        data-testid="clear-session-context"
-                        onClick={handleClearContext}
-                        disabled={clearSessionHistory.isPending}
-                      >
-                        <RotateCcw className="h-3 w-3" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      Clear chat history and start with a fresh AI context
-                    </TooltipContent>
-                  </Tooltip>
-                )}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      aria-label="Clear context"
+                      data-testid="clear-session-context"
+                      onClick={handleClearContext}
+                      disabled={clearSessionHistory.isPending}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Clear chat history and start with a fresh AI context{' '}
+                    <kbd className="ml-1 text-[0.625rem] opacity-60">
+                      {formatShortcutDisplay(
+                        preferences?.keybindings?.clear_session_context ??
+                          DEFAULT_KEYBINDINGS.clear_session_context
+                      )}
+                    </kbd>
+                  </TooltipContent>
+                </Tooltip>
                 {!zenMode && (
                   <>
                     {/* Desktop: inline action buttons */}
@@ -1663,21 +1659,19 @@ export function SessionChatModal({
                 </div>
                 <ScrollBar orientation="horizontal" className="h-1" />
               </ScrollArea>
-              {!singleSessionPerWorktree && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 w-6 p-0 shrink-0"
-                      onClick={handleCreateSession}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>New session</TooltipContent>
-                </Tooltip>
-              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 shrink-0"
+                    onClick={handleCreateSession}
+                  >
+                    <Plus className="h-3 w-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>New session</TooltipContent>
+              </Tooltip>
             </div>
           )}
 

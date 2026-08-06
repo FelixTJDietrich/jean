@@ -730,12 +730,7 @@ const sectionEntries: PreferenceSearchEntry[] = [
     type: 'section',
     title: 'Features',
     sectionTitle: 'Experimental',
-    keywords: [
-      'single session per worktree',
-      'clear context',
-      'combined git sync button',
-      'pull push sync',
-    ],
+    keywords: ['combined git sync button', 'pull push sync'],
     anchorId: 'pref-experimental-section-features',
     fallbackAnchorId: 'pref-pane-experimental',
   },

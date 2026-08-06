@@ -16,5 +16,6 @@ describe('TitleBar mobile zen clear context', () => {
       "window.dispatchEvent(new CustomEvent('clear-session-context'))"
     )
     expect(source).toContain('aria-label="Clear context"')
+    expect(source).toContain('mobileZen && sessionChatModalOpen')
   })
 })

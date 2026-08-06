@@ -66,10 +66,7 @@ export function TitleBar({
   )
   /** Mobile zen: single header line in the title bar (name + exit). */
   const mobileZen = zenMode && isMobile
-  const showMobileZenClearContext =
-    mobileZen &&
-    sessionChatModalOpen &&
-    preferences?.single_session_per_worktree
+  const showMobileZenClearContext = mobileZen && sessionChatModalOpen
 
   const sidebarShortcut = formatShortcutDisplay(
     (preferences?.keybindings?.toggle_left_sidebar ||
@@ -288,7 +285,13 @@ export function TitleBar({
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              Clear chat history and start with a fresh AI context
+              Clear chat history and start with a fresh AI context{' '}
+              <kbd className="ml-1 text-[0.625rem] opacity-60">
+                {formatShortcutDisplay(
+                  preferences?.keybindings?.clear_session_context ??
+                    DEFAULT_KEYBINDINGS.clear_session_context
+                )}
+              </kbd>
             </TooltipContent>
           </Tooltip>
         )}

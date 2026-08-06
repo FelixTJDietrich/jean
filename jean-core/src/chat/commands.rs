@@ -908,22 +908,6 @@ pub async fn create_session(
 
     let preferences = crate::load_preferences(app.clone()).await.ok();
 
-    if preferences
-        .as_ref()
-        .is_some_and(|prefs| prefs.single_session_per_worktree)
-    {
-        let existing = load_sessions(&app, &worktree_path, &worktree_id)?;
-        if existing
-            .sessions
-            .iter()
-            .any(|session| session.archived_at.is_none())
-        {
-            return Err(
-                "This worktree is limited to one session. Clear context to start over.".to_string(),
-            );
-        }
-    }
-
     // Resolve backend: explicit param → project default → global preference → Claude
     let backend_enum = match backend.as_deref() {
         Some("codex") => Backend::Codex,

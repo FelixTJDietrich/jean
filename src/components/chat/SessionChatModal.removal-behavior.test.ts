@@ -104,10 +104,9 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
-  it('places icon-only clear context next to the zen control in single-session mode', () => {
+  it('places icon-only clear context next to the zen control', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
-    expect(source).toContain('preferences?.single_session_per_worktree')
     expect(source).toContain('useClearSessionHistory')
     expect(source).toContain('handleClearContext')
     expect(source).toContain('aria-label="Clear context"')
@@ -115,6 +114,7 @@ describe('SessionChatModal removal behavior', () => {
     expect(source).toMatch(
       /data-testid="toggle-zen-mode"[\s\S]*data-testid="clear-session-context"/
     )
+    expect(source).toContain('DEFAULT_KEYBINDINGS.clear_session_context')
     expect(source).not.toContain('Clear context\n                    </Button>')
   })
 

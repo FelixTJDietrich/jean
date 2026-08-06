@@ -38,20 +38,6 @@ export const ExperimentalPane: React.FC = () => {
       >
         <div className="space-y-4">
           <InlineField
-            label="Single session per worktree"
-            description="Hide new session controls and clear the current chat and AI context instead"
-          >
-            <Switch
-              checked={preferences?.single_session_per_worktree ?? false}
-              onCheckedChange={checked => {
-                patchPreferences.mutate({
-                  single_session_per_worktree: checked,
-                })
-              }}
-            />
-          </InlineField>
-
-          <InlineField
             label="Combined git sync button"
             description="Replace separate Pull and Push badges with one Sync button that does both"
           >

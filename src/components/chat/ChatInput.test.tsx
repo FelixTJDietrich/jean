@@ -247,6 +247,15 @@ describe('ChatInput attachments', () => {
     expect(textarea).not.toHaveClass('max-h-[50vh]')
   })
 
+  it('uses smaller placeholder text on mobile', () => {
+    mobileState.value = true
+
+    const textarea = renderInput()
+
+    expect(textarea).toHaveClass('placeholder:text-sm')
+    expect(textarea).toHaveClass('text-base')
+  })
+
   it('updates the session draft store immediately so disk saves can be debounced', () => {
     const textarea = renderInput()
 
