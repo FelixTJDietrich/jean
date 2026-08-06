@@ -462,7 +462,11 @@ describe('ChatInput IME composition (issue #584)', () => {
     storeState.inputDrafts = {}
   })
 
-  const renderWithSubmit = () => {
+  const renderWithSubmit = (props?: {
+    isSending?: boolean
+    selectedBackend?: 'codex'
+    onSteerModifierChange?: (active: boolean) => void
+  }) => {
     const formRef = createRef<HTMLFormElement>()
     const inputRef = createRef<HTMLTextAreaElement>()
     const onSubmit = vi.fn()
@@ -471,13 +475,15 @@ describe('ChatInput IME composition (issue #584)', () => {
       <ChatInput
         activeSessionId="session-1"
         activeWorktreePath="/tmp/worktree"
-        isSending={false}
+        isSending={props?.isSending ?? false}
         executionMode="build"
         focusChatShortcut="⌘K"
         onSubmit={onSubmit}
         onCancel={vi.fn()}
         formRef={formRef}
         inputRef={inputRef}
+        selectedBackend={props?.selectedBackend}
+        onSteerModifierChange={props?.onSteerModifierChange}
       />
     )
 
@@ -493,6 +499,29 @@ describe('ChatInput IME composition (issue #584)', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', keyCode: 13 })
 
     expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('submits as a steer when the primary modifier is held', () => {
+    const onSteerModifierChange = vi.fn()
+    const { textarea, onSubmit } = renderWithSubmit({
+      isSending: true,
+      selectedBackend: 'codex',
+      onSteerModifierChange,
+    })
+    textarea.value = 'steer this'
+    fireEvent.change(textarea, { target: { value: 'steer this' } })
+
+    fireEvent.keyDown(textarea, {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      ctrlKey: true,
+    })
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.anything(), {
+      forceSteer: true,
+    })
+    expect(onSteerModifierChange).toHaveBeenCalledWith(true)
   })
 
   it('does not submit when Enter confirms IME composition (isComposing)', () => {

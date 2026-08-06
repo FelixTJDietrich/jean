@@ -34,7 +34,10 @@ import {
   isLoginSlashCommand,
   openBackendLoginModal,
 } from '@/lib/cli-auth'
-import { isBackendAutoSteerEnabled } from '@/lib/backend-auto-steer'
+import {
+  isBackendAutoSteerEnabled,
+  isSteerCapableBackend,
+} from '@/lib/backend-auto-steer'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 
 interface UseMessageSendingParams {
@@ -277,7 +280,10 @@ export function useMessageSending({
 
   // Form submit handler
   const handleSubmit = useCallback(
-    async (e: React.FormEvent) => {
+    async (
+      e: React.FormEvent,
+      options?: { forceSteer?: boolean }
+    ) => {
       e.preventDefault()
 
       const {
@@ -554,7 +560,11 @@ export function useMessageSending({
           textFiles.length > 0 ||
           skills.length > 0
         const backend = selectedBackendRef.current
-        if (isBackendAutoSteerEnabled(backend, preferences)) {
+        if (
+          isSteerCapableBackend(backend) &&
+          (options?.forceSteer ||
+            isBackendAutoSteerEnabled(backend, preferences))
+        ) {
           try {
             const steerMessage = buildMessageWithRefs(queuedMessage)
             if (backend === 'pi') {

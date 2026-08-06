@@ -144,7 +144,10 @@ import { ChatErrorFallback } from './ChatErrorFallback'
 import { logger } from '@/lib/logger'
 import { saveCrashState } from '@/lib/recovery'
 import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
-import { isBackendAutoSteerEnabled } from '@/lib/backend-auto-steer'
+import {
+  isBackendAutoSteerEnabled,
+  isSteerCapableBackend,
+} from '@/lib/backend-auto-steer'
 import { ErrorBanner } from './ErrorBanner'
 import {
   VirtualizedMessageList,
@@ -971,6 +974,7 @@ export function ChatWindow({
   // PERFORMANCE: Track hasValue via callback from ChatInput instead of store subscription
   // ChatInput notifies on mount, session change, and empty/non-empty boundary changes
   const [hasInputValue, setHasInputValue] = useState(false)
+  const [steerModifierActive, setSteerModifierActive] = useState(false)
   // Per-session execution mode (defaults to preference or 'plan' for new sessions)
   // Uses deferredSessionId for display consistency with other content
   const defaultExecutionMode = preferences?.default_execution_mode ?? 'plan'
@@ -3590,6 +3594,9 @@ export function ChatWindow({
                                   }
                                   onCommandExecute={handleCommandExecute}
                                   onHasValueChange={setHasInputValue}
+                                  onSteerModifierChange={
+                                    setSteerModifierActive
+                                  }
                                   onRegisterClearHandler={(
                                     handler: (() => void) | null
                                   ) => {
@@ -3613,10 +3620,14 @@ export function ChatWindow({
                                     canSend={
                                       hasInputValue || hasPendingAttachments
                                     }
-                                    willSteer={isBackendAutoSteerEnabled(
-                                      selectedBackend,
-                                      preferences
-                                    )}
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
                                     queuedMessageCount={
                                       currentQueuedMessages.length
                                     }
@@ -3737,10 +3748,14 @@ export function ChatWindow({
                                       triggerChatAttachRef.current?.()
                                     }
                                     onCancel={handleCancel}
-                                    willSteer={isBackendAutoSteerEnabled(
-                                      selectedBackend,
-                                      preferences
-                                    )}
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
                                     queuedMessageCount={
                                       currentQueuedMessages.length
                                     }

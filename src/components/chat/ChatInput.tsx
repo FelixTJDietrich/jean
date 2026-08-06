@@ -53,6 +53,8 @@ import {
   parsePlainTextPromptMetadata,
   type PromptAttachmentMetadata,
 } from './message-content-utils'
+import { isModKeyEvent } from '@/types/keybindings'
+import { isSteerCapableBackend } from '@/lib/backend-auto-steer'
 
 /** Threshold for saving pasted text as file (2000 chars) */
 const TEXT_PASTE_THRESHOLD = 2000
@@ -65,7 +67,10 @@ interface ChatInputProps {
   executionMode: ExecutionMode
   canSwitchBackendWithTab?: boolean
   focusChatShortcut: string
-  onSubmit: (e: React.FormEvent) => void
+  onSubmit: (
+    e: React.FormEvent,
+    options?: { forceSteer?: boolean }
+  ) => void
   onCancel: () => void
   onSwitchBackendWithTab?: () => void
   onCommandExecute?: (command: ClaudeCommand) => void
@@ -76,6 +81,7 @@ interface ChatInputProps {
   inputRef: React.RefObject<HTMLTextAreaElement | null>
   installedBackends?: CliBackend[]
   selectedBackend?: CliBackend
+  onSteerModifierChange?: (active: boolean) => void
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -97,6 +103,7 @@ export const ChatInput = memo(function ChatInput({
   inputRef,
   installedBackends,
   selectedBackend,
+  onSteerModifierChange,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
   const zenMode = useUIStore(state => state.zenMode)
@@ -507,6 +514,12 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
+      const forceSteer =
+        isSending &&
+        isSteerCapableBackend(selectedBackend) &&
+        isModKeyEvent(e)
+      onSteerModifierChange?.(forceSteer)
+
       // When file mention popover is open, handle navigation
       if (fileMentionOpen) {
         if (e.ctrlKey && e.shiftKey && e.key === 'ArrowLeft') {
@@ -632,7 +645,7 @@ export const ChatInput = memo(function ChatInput({
             .getState()
             .setInputDraft(activeSessionId, valueRef.current)
         }
-        onSubmit(e)
+        onSubmit(e, forceSteer ? { forceSteer: true } : undefined)
         // Clear input immediately (don't wait for store subscription)
         valueRef.current = ''
         setShowHint(true)
@@ -654,6 +667,8 @@ export const ChatInput = memo(function ChatInput({
       onSwitchBackendWithTab,
       isMobile,
       resizeTextarea,
+      selectedBackend,
+      onSteerModifierChange,
     ]
   )
 
@@ -1260,6 +1275,10 @@ export const ChatInput = memo(function ChatInput({
         defaultValue=""
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onKeyUp={e => {
+          if (!isModKeyEvent(e)) onSteerModifierChange?.(false)
+        }}
+        onBlur={() => onSteerModifierChange?.(false)}
         onPaste={handlePaste}
         disabled={false}
         className={cn(

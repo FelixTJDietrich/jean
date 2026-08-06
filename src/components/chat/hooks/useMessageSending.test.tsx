@@ -610,6 +610,28 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
   })
 
+  it('steers when explicitly requested even if auto-steer is disabled', async () => {
+    vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      autoSteer: false,
+      inputValue: 'steer this now',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit(
+        { preventDefault: vi.fn() } as unknown as React.FormEvent,
+        { forceSteer: true }
+      )
+    })
+
+    expect(steerCodexTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      'steer this now'
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+  })
+
   it('queues pi prompts instead of steering when pi auto-steer is disabled', async () => {
     const { result } = renderUseMessageSending({
       selectedBackend: 'pi',
