@@ -309,11 +309,15 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: remoteServerInfo, isLoading: isRemoteServerInfoLoading } =
     useQuery({
       queryKey: ['remote-server-info', activeRemoteConnection?.id],
-      queryFn: () =>
-        fetchRemoteServerInfo(
-          activeRemoteConnection!.url,
-          activeRemoteConnection!.token
-        ),
+      queryFn: () => {
+        if (!activeRemoteConnection) {
+          throw new Error('No remote Jean server is connected.')
+        }
+        return fetchRemoteServerInfo(
+          activeRemoteConnection.url,
+          activeRemoteConnection.token
+        )
+      },
       enabled: isGeneralScope && activeRemoteConnection !== null,
       staleTime: 60_000,
     })
