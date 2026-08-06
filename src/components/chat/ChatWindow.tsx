@@ -3563,7 +3563,6 @@ export function ChatWindow({
                             <div
                               className={cn(
                                 zenMode &&
-                                  isMobile &&
                                   'flex max-h-16 items-center overflow-hidden'
                               )}
                             >
@@ -3571,7 +3570,7 @@ export function ChatWindow({
                               <div
                                 className={cn(
                                   'px-4 pt-3 pb-2 md:px-6',
-                                  zenMode && isMobile && 'min-w-0 flex-1'
+                                  zenMode && 'min-w-0 flex-1'
                                 )}
                               >
                                 <ChatInput
@@ -3607,7 +3606,7 @@ export function ChatWindow({
                               </div>
 
                               {/* Bottom toolbar */}
-                              {zenMode && isMobile ? (
+                              {zenMode ? (
                                 <div className="shrink-0 pr-3">
                                   <SendCancelButton
                                     isSending={isSending}

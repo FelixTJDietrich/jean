@@ -7,11 +7,11 @@ const source = readFileSync(
   'utf8'
 )
 
-describe('ChatWindow mobile zen composer', () => {
+describe('ChatWindow zen composer', () => {
   it('places the action toolbar beside the textarea', () => {
     expect(source).toContain("'flex max-h-16 items-center overflow-hidden'")
-    expect(source).toContain("zenMode && isMobile && 'min-w-0 flex-1'")
-    expect(source).toContain('{zenMode && isMobile ? (')
+    expect(source).toContain("zenMode && 'min-w-0 flex-1'")
+    expect(source).toContain('{zenMode ? (')
     expect(source).toContain('<SendCancelButton')
   })
 })

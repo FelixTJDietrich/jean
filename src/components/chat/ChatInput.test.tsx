@@ -252,7 +252,7 @@ describe('ChatInput attachments', () => {
 
     const textarea = renderInput()
 
-    expect(textarea).toHaveClass('!min-h-8', 'max-h-32')
+    expect(textarea).toHaveClass('h-10', 'max-h-10')
     expect(textarea).not.toHaveClass('max-h-[50vh]')
   })
 
