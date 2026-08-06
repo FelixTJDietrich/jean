@@ -247,6 +247,15 @@ describe('ChatInput attachments', () => {
     expect(textarea).not.toHaveClass('max-h-[50vh]')
   })
 
+  it('uses a compact textarea height in desktop zen mode', () => {
+    useUIStore.setState({ zenMode: true })
+
+    const textarea = renderInput()
+
+    expect(textarea).toHaveClass('!min-h-8', 'max-h-32')
+    expect(textarea).not.toHaveClass('max-h-[50vh]')
+  })
+
   it('uses smaller placeholder text on mobile', () => {
     mobileState.value = true
 
