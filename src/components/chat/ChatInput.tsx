@@ -1269,7 +1269,7 @@ export const ChatInput = memo(function ChatInput({
         rows={1}
         autoFocus={!isMobile}
       />
-      {showHint && (
+      {showHint && !zenMode && (
         <span className="absolute top-0 right-0 hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground opacity-40">
           <Kbd>{focusChatShortcut}</Kbd>
           <span>to focus</span>

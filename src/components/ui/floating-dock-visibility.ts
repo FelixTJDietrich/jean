@@ -1,3 +1,3 @@
-export function shouldHideFloatingDock(isMobile: boolean, zenMode: boolean) {
-  return isMobile && zenMode
+export function shouldHideFloatingDock(_isMobile: boolean, zenMode: boolean) {
+  return zenMode
 }

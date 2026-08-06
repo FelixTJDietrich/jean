@@ -254,6 +254,7 @@ describe('ChatInput attachments', () => {
 
     expect(textarea).toHaveClass('h-10', 'max-h-10')
     expect(textarea).not.toHaveClass('max-h-[50vh]')
+    expect(screen.queryByText('to focus')).not.toBeInTheDocument()
   })
 
   it('uses smaller placeholder text on mobile', () => {
