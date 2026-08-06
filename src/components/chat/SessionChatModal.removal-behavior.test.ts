@@ -75,13 +75,10 @@ describe('SessionChatModal removal behavior', () => {
   it('hides session tabs and top action chrome when zen mode is active', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
-    expect(source).toContain("state => state.zenMode")
+    expect(source).toContain('state => state.zenMode')
     expect(source).toContain('data-testid="toggle-zen-mode"')
-    // Mobile zen collapses header into the TitleBar single line
-    expect(source).toContain('{!(zenMode && isMobile) && (')
-    expect(source).toContain(
-      '{!zenMode && sessions.length > 0 && ('
-    )
+    expect(source).not.toContain('{!(zenMode && isMobile) && (')
+    expect(source).toContain('{!zenMode && sessions.length > 0 && (')
     expect(source).toContain('{!zenMode && (')
     expect(source).toContain('<ModalCloseButton onClick={handleClose} />')
   })
@@ -104,6 +101,14 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
+  it('reattaches horizontal tab scrolling after leaving zen mode', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toMatch(
+      /viewport\.addEventListener\('wheel',[\s\S]*\}, \[sessions\.length, zenMode\]\)/
+    )
+  })
+
   it('places icon-only clear context next to the zen control', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
@@ -115,6 +120,12 @@ describe('SessionChatModal removal behavior', () => {
       /data-testid="toggle-zen-mode"[\s\S]*data-testid="clear-session-context"/
     )
     expect(source).toContain('DEFAULT_KEYBINDINGS.clear_session_context')
+    expect(source).toMatch(
+      /isMobile\s*&&[\s\S]*data-testid="toggle-zen-mode"[\s\S]*data-testid="clear-session-context"/
+    )
+    expect(source).toMatch(
+      /onSuccess:\s*\(\)\s*=>\s*window\.dispatchEvent\(new CustomEvent\('focus-chat-input'\)\)/
+    )
     expect(source).not.toContain('Clear context\n                    </Button>')
   })
 

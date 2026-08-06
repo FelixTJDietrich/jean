@@ -16,4 +16,10 @@ describe('Zen mode appearance command', () => {
     command?.execute({} as never)
     expect(useUIStore.getState().zenMode).toBe(true)
   })
+
+  it('only exposes one zen mode command', () => {
+    expect(
+      appearanceCommands.filter(command => command.id.includes('zen-mode'))
+    ).toHaveLength(1)
+  })
 })

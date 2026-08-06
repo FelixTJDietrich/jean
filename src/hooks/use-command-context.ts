@@ -192,6 +192,7 @@ export function useCommandContext(
         queryKey: chatQueryKeys.session(sessionId),
       })
       notify('Chat history cleared', undefined, { type: 'success' })
+      window.dispatchEvent(new CustomEvent('focus-chat-input'))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notify(message, undefined, { type: 'error' })
