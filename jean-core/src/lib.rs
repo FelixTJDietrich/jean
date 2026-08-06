@@ -359,6 +359,8 @@ pub struct AppPreferences {
     #[serde(default)]
     pub close_original_on_clear_context: bool, // Close original session when using Clear Context and yolo (default: true)
     #[serde(default)]
+    pub single_session_per_worktree: bool, // Reuse one session per worktree instead of creating tabs
+    #[serde(default)]
     pub build_model: Option<String>, // Model override for plan approval (build mode), None = use session model
     #[serde(default)]
     pub yolo_model: Option<String>, // Model override for yolo plan approval, None = use session model
@@ -2608,6 +2610,7 @@ impl Default for AppPreferences {
             codex_max_agent_threads: default_codex_max_agent_threads(),
             restore_last_session: true,
             close_original_on_clear_context: true,
+            single_session_per_worktree: false,
             build_model: None,
             yolo_model: None,
             build_backend: None,

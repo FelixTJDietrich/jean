@@ -20,7 +20,6 @@ export const appearanceCommands: AppCommand[] = [
     execute: () => {
       useUIStore.getState().toggleZenMode()
     },
-    isAvailable: () => !useUIStore.getState().zenMode,
   },
   {
     id: 'zen-mode.exit',

@@ -1281,6 +1281,7 @@ export interface AppPreferences {
   kimi_auto_steer_enabled?: boolean // Reserved for Kimi Code steering support
   restore_last_session: boolean // Restore last session when switching projects (default: true)
   close_original_on_clear_context: boolean // Close original session when using Clear Context and yolo (default: true)
+  single_session_per_worktree: boolean // Reuse one session per worktree and clear it instead of creating tabs (default: false)
   build_model: string | null // Model override for plan approval (build mode), null = use session model
   yolo_model: string | null // Model override for yolo plan approval, null = use session model
   build_backend: string | null // Backend override for plan approval (build mode), null = use session backend
@@ -2392,6 +2393,7 @@ export const defaultPreferences: AppPreferences = {
   kimi_auto_steer_enabled: false,
   restore_last_session: true, // Default: enabled
   close_original_on_clear_context: true, // Default: enabled
+  single_session_per_worktree: false,
   build_model: null, // Default: use session model
   yolo_model: null, // Default: use session model
   build_backend: null, // Default: use session backend

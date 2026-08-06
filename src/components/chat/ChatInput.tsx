@@ -7,6 +7,8 @@ import { toast } from 'sonner'
 import { Textarea } from '@/components/ui/textarea'
 import { Kbd } from '@/components/ui/kbd'
 import { useChatStore } from '@/store/chat-store'
+import { useUIStore } from '@/store/ui-store'
+import { cn } from '@/lib/utils'
 import { getFilename, getExtension } from '@/lib/path-utils'
 import type {
   PendingFile,
@@ -97,6 +99,7 @@ export const ChatInput = memo(function ChatInput({
   selectedBackend,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
+  const zenMode = useUIStore(state => state.zenMode)
   const resizeTextarea = useAutoResize(inputRef)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -1259,7 +1262,10 @@ export const ChatInput = memo(function ChatInput({
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         disabled={false}
-        className="min-h-[40px] max-h-[50vh] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm"
+        className={cn(
+          'min-h-[40px] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm',
+          zenMode && isMobile ? 'h-10 max-h-10' : 'max-h-[50vh]'
+        )}
         rows={1}
         autoFocus={!isMobile}
       />

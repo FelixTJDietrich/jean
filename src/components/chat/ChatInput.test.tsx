@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { ChatInput } from './ChatInput'
 import { invoke } from '@/lib/transport'
+import { useUIStore } from '@/store/ui-store'
 import {
   appendPromptMetadataToPlainText,
   encodePromptAttachmentMetadata,
@@ -11,7 +12,8 @@ import {
 
 const processAttachmentFile = vi.fn()
 const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>
-const { slashPopoverMock } = vi.hoisted(() => ({
+const { mobileState, slashPopoverMock } = vi.hoisted(() => ({
+  mobileState: { value: false },
   slashPopoverMock: vi.fn(() => null),
 }))
 
@@ -27,7 +29,7 @@ const storeState = {
 }
 
 vi.mock('@/hooks/use-mobile', () => ({
-  useIsMobile: () => false,
+  useIsMobile: () => mobileState.value,
 }))
 
 vi.mock('./attachment-processing', () => ({
@@ -76,6 +78,8 @@ describe('ChatInput attachments', () => {
   }
 
   beforeEach(() => {
+    mobileState.value = false
+    useUIStore.setState({ zenMode: false })
     processAttachmentFile.mockReset()
     invokeMock.mockReset()
     storeState.setInputDraft.mockReset()
@@ -231,6 +235,16 @@ describe('ChatInput attachments', () => {
     )
     expect(textarea.className).toContain('[overflow-wrap:anywhere]')
     expect(textarea.parentElement).toHaveClass('min-w-0')
+  })
+
+  it('caps the textarea height in mobile zen mode', () => {
+    mobileState.value = true
+    useUIStore.setState({ zenMode: true })
+
+    const textarea = renderInput()
+
+    expect(textarea).toHaveClass('h-10', 'max-h-10')
+    expect(textarea).not.toHaveClass('max-h-[50vh]')
   })
 
   it('updates the session draft store immediately so disk saves can be debounced', () => {

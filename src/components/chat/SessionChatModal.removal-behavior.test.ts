@@ -104,6 +104,18 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
+  it('replaces new session controls with clear context in single-session mode', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toContain('preferences?.single_session_per_worktree')
+    expect(source).toContain('useClearSessionHistory')
+    expect(source).toContain('handleClearContext')
+    expect(source).toContain('Clear context')
+    expect(source).toMatch(
+      /singleSessionPerWorktree\s*\?\s*[\s\S]*handleClearContext[\s\S]*:\s*[\s\S]*handleCreateSession/
+    )
+  })
+
   it('falls back to a real session when restored active session state is stale', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 

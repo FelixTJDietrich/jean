@@ -25,6 +25,7 @@ import {
   Globe,
   Play,
   Plus,
+  RotateCcw,
   Trash2,
 } from 'lucide-react'
 import { ModalCloseButton } from '@/components/ui/modal-close-button'
@@ -51,6 +52,7 @@ import { useUIStore } from '@/store/ui-store'
 import {
   useSessions,
   useCreateSession,
+  useClearSessionHistory,
   useRenameSession,
   useReorderSessions,
   reconnectNativeCliSession,
@@ -262,6 +264,8 @@ export function SessionChatModal({
     [sessionsData?.sessions]
   )
   const { data: preferences } = usePreferences()
+  const singleSessionPerWorktree =
+    preferences?.single_session_per_worktree ?? false
   const { data: runScripts = [] } = useRunScripts(worktreePath)
   const modalTerminalDockMode = useTerminalStore(
     state => state.modalTerminalDockMode
@@ -429,6 +433,7 @@ export function SessionChatModal({
   // Rename session state
   const renameSession = useRenameSession()
   const createSession = useCreateSession()
+  const clearSessionHistory = useClearSessionHistory()
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(
     null
   )
@@ -666,6 +671,15 @@ export function SessionChatModal({
     })
   }, [worktreeId, worktreePath])
 
+  const handleClearContext = useCallback(() => {
+    if (!currentSessionId || clearSessionHistory.isPending) return
+    clearSessionHistory.mutate({
+      worktreeId,
+      worktreePath,
+      sessionId: currentSessionId,
+    })
+  }, [clearSessionHistory, currentSessionId, worktreeId, worktreePath])
+
   const handleOpenInNativeClient = useCallback(
     (session: Session) => {
       void (async () => {
@@ -703,6 +717,10 @@ export function SessionChatModal({
     if (!isOpen) return
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
+      if (singleSessionPerWorktree && currentSessionId) {
+        toast.info('Clear context to start over in this worktree')
+        return
+      }
       const intent =
         (e as CustomEvent<{ intent?: 'default' | 'picker' }>).detail?.intent ??
         'picker'
@@ -718,7 +736,13 @@ export function SessionChatModal({
       window.removeEventListener('create-new-session', handler, {
         capture: true,
       })
-  }, [isOpen, worktreeId, worktreePath])
+  }, [
+    isOpen,
+    worktreeId,
+    worktreePath,
+    singleSessionPerWorktree,
+    currentSessionId,
+  ])
 
   // Keep Code Review first, then attention and active sessions, review,
   // and idle/new empty sessions. Within each tier, manual tab order wins.
@@ -1612,19 +1636,39 @@ export function SessionChatModal({
                 </div>
                 <ScrollBar orientation="horizontal" className="h-1" />
               </ScrollArea>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 w-6 p-0 shrink-0"
-                    onClick={handleCreateSession}
-                  >
-                    <Plus className="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>New session</TooltipContent>
-              </Tooltip>
+              {singleSessionPerWorktree ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 shrink-0 gap-1 px-2 text-xs"
+                      onClick={handleClearContext}
+                      disabled={clearSessionHistory.isPending}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Clear context
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Clear chat history and start with a fresh AI context
+                  </TooltipContent>
+                </Tooltip>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 shrink-0"
+                      onClick={handleCreateSession}
+                    >
+                      <Plus className="h-3 w-3" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>New session</TooltipContent>
+                </Tooltip>
+              )}
             </div>
           )}
 

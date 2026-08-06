@@ -724,6 +724,22 @@ const sectionEntries: PreferenceSearchEntry[] = [
     fallbackAnchorId: 'pref-pane-integrations',
   },
   {
+    id: 'experimental-features',
+    pane: 'experimental',
+    paneTitle: 'Experimental',
+    type: 'section',
+    title: 'Features',
+    sectionTitle: 'Experimental',
+    keywords: [
+      'single session per worktree',
+      'clear context',
+      'combined git sync button',
+      'pull push sync',
+    ],
+    anchorId: 'pref-experimental-section-features',
+    fallbackAnchorId: 'pref-pane-experimental',
+  },
+  {
     id: 'experimental-developer-tools',
     pane: 'experimental',
     paneTitle: 'Experimental',

@@ -122,6 +122,7 @@ import { FilePreview } from './FilePreview'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
 import { ChatToolbar } from './ChatToolbar'
+import { SendCancelButton } from './toolbar/SendCancelButton'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
 import { ReviewMethodModal } from './ReviewMethodModal'
 import { QueuedPromptsPanel } from './QueuedPromptsPanel'
@@ -270,6 +271,7 @@ export function ChatWindow({
   worktreePath: propWorktreePath,
 }: ChatWindowProps = {}) {
   const isMobile = useIsMobile()
+  const zenMode = useUIStore(state => state.zenMode)
   // PERFORMANCE: Use focused selectors instead of whole-store destructuring
   // This prevents re-renders when other sessions' state changes (e.g., streaming chunks)
 
@@ -3558,157 +3560,209 @@ export function ChatWindow({
                                 </div>
                               )}
 
-                            {/* Textarea section */}
-                            <div className="px-4 pt-3 pb-2 md:px-6">
-                              <ChatInput
-                                activeSessionId={activeSessionId}
-                                activeWorktreePath={activeWorktreePath}
-                                activeProjectId={worktree?.project_id ?? null}
-                                isSending={isSending}
-                                executionMode={executionMode}
-                                canSwitchBackendWithTab={
-                                  (session?.messages?.length ?? 0) === 0
-                                }
-                                focusChatShortcut={focusChatShortcut}
-                                onSubmit={handleSubmit}
-                                onCancel={handleCancel}
-                                onSwitchBackendWithTab={handleTabBackendSwitch}
-                                onCommandExecute={handleCommandExecute}
-                                onHasValueChange={setHasInputValue}
-                                onRegisterClearHandler={(
-                                  handler: (() => void) | null
-                                ) => {
-                                  clearChatInputStateRef.current = handler
-                                }}
-                                onRegisterAttachHandler={handler => {
-                                  triggerChatAttachRef.current = handler
-                                }}
-                                formRef={formRef}
-                                inputRef={inputRef}
-                                installedBackends={installedBackends}
-                                selectedBackend={selectedBackend}
-                              />
-                            </div>
+                            <div
+                              className={cn(
+                                zenMode &&
+                                  isMobile &&
+                                  'flex max-h-16 items-center overflow-hidden'
+                              )}
+                            >
+                              {/* Textarea section */}
+                              <div
+                                className={cn(
+                                  'px-4 pt-3 pb-2 md:px-6',
+                                  zenMode && isMobile && 'min-w-0 flex-1'
+                                )}
+                              >
+                                <ChatInput
+                                  activeSessionId={activeSessionId}
+                                  activeWorktreePath={activeWorktreePath}
+                                  activeProjectId={worktree?.project_id ?? null}
+                                  isSending={isSending}
+                                  executionMode={executionMode}
+                                  canSwitchBackendWithTab={
+                                    (session?.messages?.length ?? 0) === 0
+                                  }
+                                  focusChatShortcut={focusChatShortcut}
+                                  onSubmit={handleSubmit}
+                                  onCancel={handleCancel}
+                                  onSwitchBackendWithTab={
+                                    handleTabBackendSwitch
+                                  }
+                                  onCommandExecute={handleCommandExecute}
+                                  onHasValueChange={setHasInputValue}
+                                  onRegisterClearHandler={(
+                                    handler: (() => void) | null
+                                  ) => {
+                                    clearChatInputStateRef.current = handler
+                                  }}
+                                  onRegisterAttachHandler={handler => {
+                                    triggerChatAttachRef.current = handler
+                                  }}
+                                  formRef={formRef}
+                                  inputRef={inputRef}
+                                  installedBackends={installedBackends}
+                                  selectedBackend={selectedBackend}
+                                />
+                              </div>
 
-                            {/* Bottom toolbar */}
-                            <div>
-                              <ChatToolbar
-                                isSending={isSending}
-                                hasPendingQuestions={hasPendingQuestions}
-                                hasPendingAttachments={hasPendingAttachments}
-                                hasInputValue={hasInputValue}
-                                executionMode={executionMode}
-                                selectedBackend={selectedBackend}
-                                sessionHasMessages={
-                                  (session?.messages?.length ?? 0) > 0
-                                }
-                                selectedModel={selectedModel}
-                                selectedProvider={selectedProvider}
-                                providerLocked={
-                                  (session?.messages?.length ?? 0) > 0
-                                }
-                                selectedThinkingLevel={selectedThinkingLevel}
-                                selectedEffortLevel={selectedEffortLevel}
-                                useAdaptiveThinking={useAdaptiveThinkingFlag}
-                                hideThinkingLevel={hideThinkingLevel}
-                                baseBranch={
-                                  gitStatus?.base_branch ??
-                                  worktree?.base_branch ??
-                                  'main'
-                                }
-                                baseRemote={
-                                  gitStatus?.base_remote ??
-                                  worktree?.base_remote
-                                }
-                                uncommittedAdded={uncommittedAdded}
-                                uncommittedRemoved={uncommittedRemoved}
-                                branchDiffAdded={branchDiffAdded}
-                                branchDiffRemoved={branchDiffRemoved}
-                                prUrl={worktree?.pr_url}
-                                prNumber={worktree?.pr_number}
-                                displayStatus={displayStatus}
-                                checkStatus={checkStatus}
-                                mergeableStatus={mergeableStatus}
-                                activeWorktreePath={activeWorktreePath}
-                                worktreeId={activeWorktreeId ?? null}
-                                activeSessionId={activeSessionId}
-                                projectId={worktree?.project_id}
-                                runScripts={runScripts}
-                                loadedIssueContexts={loadedIssueContexts ?? []}
-                                loadedPRContexts={loadedPRContexts ?? []}
-                                loadedSecurityContexts={
-                                  loadedSecurityContexts ?? []
-                                }
-                                loadedAdvisoryContexts={
-                                  loadedAdvisoryContexts ?? []
-                                }
-                                loadedLinearContexts={
-                                  loadedLinearContexts ?? []
-                                }
-                                attachedSavedContexts={
-                                  attachedSavedContexts ?? []
-                                }
-                                onOpenMagicModal={handleOpenMagicModal}
-                                onSaveContext={handleSaveContext}
-                                onLoadContext={handleLoadContext}
-                                onCommit={handleCommit}
-                                onCommitAndPush={handleCommitAndPushWithPicker}
-                                onOpenPr={handleOpenPr}
-                                onReview={() => setReviewMethodModalOpen(true)}
-                                onMerge={handleMerge}
-                                onMergePr={handleMergePr}
-                                onResolvePrConflicts={handleResolvePrConflicts}
-                                onBackendModelChange={
-                                  handleToolbarBackendModelChange
-                                }
-                                onResolveConflicts={handleResolveConflicts}
-                                hasOpenPr={Boolean(
-                                  worktree?.pr_number || worktree?.pr_url
-                                )}
-                                onSetDiffRequest={setDiffRequest}
-                                installedBackends={installedBackends}
-                                onModelChange={handleToolbarModelChange}
-                                onProviderChange={handleToolbarProviderChange}
-                                customCliProfiles={
-                                  preferences?.custom_cli_profiles ?? []
-                                }
-                                customCodexProviders={
-                                  preferences?.custom_codex_providers ?? []
-                                }
-                                onThinkingLevelChange={
-                                  handleToolbarThinkingLevelChange
-                                }
-                                onEffortLevelChange={
-                                  handleToolbarEffortLevelChange
-                                }
-                                onSetExecutionMode={
-                                  handleToolbarSetExecutionMode
-                                }
-                                onAttach={() =>
-                                  triggerChatAttachRef.current?.()
-                                }
-                                onCancel={handleCancel}
-                                willSteer={isBackendAutoSteerEnabled(
-                                  selectedBackend,
-                                  preferences
-                                )}
-                                queuedMessageCount={
-                                  currentQueuedMessages.length
-                                }
-                                availableMcpServers={availableMcpServers}
-                                enabledMcpServers={enabledMcpServers}
-                                onToggleMcpServer={handleToggleMcpServer}
-                                onOpenProjectSettings={
-                                  handleOpenProjectSettings
-                                }
-                                onRunCommand={handleRunCommand}
-                                packageScripts={packageScripts}
-                                favoritePackageScripts={favoritePackageScripts}
-                                onRunPackageScript={handleRunPackageScript}
-                                onToggleFavoritePackageScript={
-                                  handleToggleFavoritePackageScript
-                                }
-                              />
+                              {/* Bottom toolbar */}
+                              {zenMode && isMobile ? (
+                                <div className="shrink-0 pr-3">
+                                  <SendCancelButton
+                                    isSending={isSending}
+                                    canSend={
+                                      hasInputValue || hasPendingAttachments
+                                    }
+                                    willSteer={isBackendAutoSteerEnabled(
+                                      selectedBackend,
+                                      preferences
+                                    )}
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    onCancel={handleCancel}
+                                  />
+                                </div>
+                              ) : (
+                                <div>
+                                  <ChatToolbar
+                                    isSending={isSending}
+                                    hasPendingQuestions={hasPendingQuestions}
+                                    hasPendingAttachments={
+                                      hasPendingAttachments
+                                    }
+                                    hasInputValue={hasInputValue}
+                                    executionMode={executionMode}
+                                    selectedBackend={selectedBackend}
+                                    sessionHasMessages={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedModel={selectedModel}
+                                    selectedProvider={selectedProvider}
+                                    providerLocked={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedThinkingLevel={
+                                      selectedThinkingLevel
+                                    }
+                                    selectedEffortLevel={selectedEffortLevel}
+                                    useAdaptiveThinking={
+                                      useAdaptiveThinkingFlag
+                                    }
+                                    hideThinkingLevel={hideThinkingLevel}
+                                    baseBranch={
+                                      gitStatus?.base_branch ??
+                                      worktree?.base_branch ??
+                                      'main'
+                                    }
+                                    baseRemote={
+                                      gitStatus?.base_remote ??
+                                      worktree?.base_remote
+                                    }
+                                    uncommittedAdded={uncommittedAdded}
+                                    uncommittedRemoved={uncommittedRemoved}
+                                    branchDiffAdded={branchDiffAdded}
+                                    branchDiffRemoved={branchDiffRemoved}
+                                    prUrl={worktree?.pr_url}
+                                    prNumber={worktree?.pr_number}
+                                    displayStatus={displayStatus}
+                                    checkStatus={checkStatus}
+                                    mergeableStatus={mergeableStatus}
+                                    activeWorktreePath={activeWorktreePath}
+                                    worktreeId={activeWorktreeId ?? null}
+                                    activeSessionId={activeSessionId}
+                                    projectId={worktree?.project_id}
+                                    runScripts={runScripts}
+                                    loadedIssueContexts={
+                                      loadedIssueContexts ?? []
+                                    }
+                                    loadedPRContexts={loadedPRContexts ?? []}
+                                    loadedSecurityContexts={
+                                      loadedSecurityContexts ?? []
+                                    }
+                                    loadedAdvisoryContexts={
+                                      loadedAdvisoryContexts ?? []
+                                    }
+                                    loadedLinearContexts={
+                                      loadedLinearContexts ?? []
+                                    }
+                                    attachedSavedContexts={
+                                      attachedSavedContexts ?? []
+                                    }
+                                    onOpenMagicModal={handleOpenMagicModal}
+                                    onSaveContext={handleSaveContext}
+                                    onLoadContext={handleLoadContext}
+                                    onCommit={handleCommit}
+                                    onCommitAndPush={
+                                      handleCommitAndPushWithPicker
+                                    }
+                                    onOpenPr={handleOpenPr}
+                                    onReview={() =>
+                                      setReviewMethodModalOpen(true)
+                                    }
+                                    onMerge={handleMerge}
+                                    onMergePr={handleMergePr}
+                                    onResolvePrConflicts={
+                                      handleResolvePrConflicts
+                                    }
+                                    onBackendModelChange={
+                                      handleToolbarBackendModelChange
+                                    }
+                                    onResolveConflicts={handleResolveConflicts}
+                                    hasOpenPr={Boolean(
+                                      worktree?.pr_number || worktree?.pr_url
+                                    )}
+                                    onSetDiffRequest={setDiffRequest}
+                                    installedBackends={installedBackends}
+                                    onModelChange={handleToolbarModelChange}
+                                    onProviderChange={
+                                      handleToolbarProviderChange
+                                    }
+                                    customCliProfiles={
+                                      preferences?.custom_cli_profiles ?? []
+                                    }
+                                    customCodexProviders={
+                                      preferences?.custom_codex_providers ?? []
+                                    }
+                                    onThinkingLevelChange={
+                                      handleToolbarThinkingLevelChange
+                                    }
+                                    onEffortLevelChange={
+                                      handleToolbarEffortLevelChange
+                                    }
+                                    onSetExecutionMode={
+                                      handleToolbarSetExecutionMode
+                                    }
+                                    onAttach={() =>
+                                      triggerChatAttachRef.current?.()
+                                    }
+                                    onCancel={handleCancel}
+                                    willSteer={isBackendAutoSteerEnabled(
+                                      selectedBackend,
+                                      preferences
+                                    )}
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    availableMcpServers={availableMcpServers}
+                                    enabledMcpServers={enabledMcpServers}
+                                    onToggleMcpServer={handleToggleMcpServer}
+                                    onOpenProjectSettings={
+                                      handleOpenProjectSettings
+                                    }
+                                    onRunCommand={handleRunCommand}
+                                    packageScripts={packageScripts}
+                                    favoritePackageScripts={
+                                      favoritePackageScripts
+                                    }
+                                    onRunPackageScript={handleRunPackageScript}
+                                    onToggleFavoritePackageScript={
+                                      handleToggleFavoritePackageScript
+                                    }
+                                  />
+                                </div>
+                              )}
                             </div>
                           </form>
 
