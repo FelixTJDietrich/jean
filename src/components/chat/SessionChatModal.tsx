@@ -25,7 +25,6 @@ import {
   Globe,
   Play,
   Plus,
-  RotateCcw,
   Trash2,
 } from 'lucide-react'
 import { ModalCloseButton } from '@/components/ui/modal-close-button'
@@ -1207,62 +1206,36 @@ export function SessionChatModal({
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   {isMobile && (
-                    <>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 px-2 text-xs"
-                            aria-label={
-                              zenMode ? 'Exit zen mode' : 'Enter zen mode'
-                            }
-                            aria-pressed={zenMode}
-                            data-testid="toggle-zen-mode"
-                            onClick={toggleZenMode}
-                          >
-                            {zenMode ? (
-                              <Minimize2 className="h-3 w-3" />
-                            ) : (
-                              <Maximize2 className="h-3 w-3" />
-                            )}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {zenMode ? 'Exit zen mode' : 'Zen mode'}{' '}
-                          <kbd className="ml-1 text-[0.625rem] opacity-60">
-                            {formatShortcutDisplay(
-                              preferences?.keybindings?.toggle_zen_mode ??
-                                DEFAULT_KEYBINDINGS.toggle_zen_mode
-                            )}
-                          </kbd>
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            aria-label="Clear context"
-                            data-testid="clear-session-context"
-                            onClick={handleClearContext}
-                            disabled={clearSessionHistory.isPending}
-                          >
-                            <RotateCcw className="h-3 w-3" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          Clear chat history and start with a fresh AI context{' '}
-                          <kbd className="ml-1 text-[0.625rem] opacity-60">
-                            {formatShortcutDisplay(
-                              preferences?.keybindings?.clear_session_context ??
-                                DEFAULT_KEYBINDINGS.clear_session_context
-                            )}
-                          </kbd>
-                        </TooltipContent>
-                      </Tooltip>
-                    </>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          aria-label={
+                            zenMode ? 'Exit zen mode' : 'Enter zen mode'
+                          }
+                          aria-pressed={zenMode}
+                          data-testid="toggle-zen-mode"
+                          onClick={toggleZenMode}
+                        >
+                          {zenMode ? (
+                            <Minimize2 className="h-3 w-3" />
+                          ) : (
+                            <Maximize2 className="h-3 w-3" />
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {zenMode ? 'Exit zen mode' : 'Zen mode'}{' '}
+                        <kbd className="ml-1 text-[0.625rem] opacity-60">
+                          {formatShortcutDisplay(
+                            preferences?.keybindings?.toggle_zen_mode ??
+                              DEFAULT_KEYBINDINGS.toggle_zen_mode
+                          )}
+                        </kbd>
+                      </TooltipContent>
+                    </Tooltip>
                   )}
                   {!zenMode && (
                     <>

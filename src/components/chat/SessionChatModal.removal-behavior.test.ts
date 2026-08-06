@@ -109,24 +109,17 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
-  it('places icon-only clear context next to the zen control', () => {
+  it('keeps only the zen control in the mobile header', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
     expect(source).toContain('useClearSessionHistory')
     expect(source).toContain('handleClearContext')
-    expect(source).toContain('aria-label="Clear context"')
-    expect(source).toContain('data-testid="clear-session-context"')
-    expect(source).toMatch(
-      /data-testid="toggle-zen-mode"[\s\S]*data-testid="clear-session-context"/
-    )
-    expect(source).toContain('DEFAULT_KEYBINDINGS.clear_session_context')
-    expect(source).toMatch(
-      /isMobile\s*&&[\s\S]*data-testid="toggle-zen-mode"[\s\S]*data-testid="clear-session-context"/
-    )
+    expect(source).toContain('data-testid="toggle-zen-mode"')
+    expect(source).not.toContain('aria-label="Clear context"')
+    expect(source).not.toContain('data-testid="clear-session-context"')
     expect(source).toMatch(
       /onSuccess:\s*\(\)\s*=>\s*window\.dispatchEvent\(new CustomEvent\('focus-chat-input'\)\)/
     )
-    expect(source).not.toContain('Clear context\n                    </Button>')
   })
 
   it('falls back to a real session when restored active session state is stale', () => {
