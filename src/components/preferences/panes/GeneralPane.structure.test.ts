@@ -156,6 +156,15 @@ describe('GeneralPane settings structure', () => {
       'CLIENT_BUILD_INFO.appVersion'
     )
     expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      "label={activeRemoteConnection ? 'Jean Client' : 'Jean'}"
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'label="Jean Server"'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'remoteServerVersion'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
       'CLIENT_BUILD_INFO.gitSha'
     )
     expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(

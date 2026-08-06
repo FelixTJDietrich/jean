@@ -8,7 +8,7 @@ import React, {
 } from 'react'
 import { invoke } from '@/lib/transport'
 import { loginArgsForBackend } from '@/lib/cli-auth'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Loader2, Check, ChevronsUpDown, Play } from 'lucide-react'
 import { Label } from '@/components/ui/label'
@@ -196,6 +196,11 @@ import {
 } from '@/components/chat/toolbar/toolbar-utils'
 import { playNotificationSound } from '@/lib/sounds'
 import { CLIENT_BUILD_INFO } from '@/lib/build-info'
+import { getActiveRemoteConnection } from '@/lib/remote-connections'
+import {
+  fetchRemoteServerInfo,
+  formatJeanVersionLabel,
+} from '@/lib/remote-version'
 import type { ThinkingLevel, EffortLevel } from '@/types/chat'
 import { hasBackend, isNativeApp } from '@/lib/environment'
 import { isWindows, openExternal } from '@/lib/platform'
@@ -300,6 +305,19 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 }) => {
   const isGeneralScope = scope === 'general'
   const queryClient = useQueryClient()
+  const activeRemoteConnection = getActiveRemoteConnection()
+  const { data: remoteServerInfo, isLoading: isRemoteServerInfoLoading } =
+    useQuery({
+      queryKey: ['remote-server-info', activeRemoteConnection?.id],
+      queryFn: () =>
+        fetchRemoteServerInfo(
+          activeRemoteConnection!.url,
+          activeRemoteConnection!.token
+        ),
+      enabled: isGeneralScope && activeRemoteConnection !== null,
+      staleTime: 60_000,
+    })
+  const remoteServerVersion = remoteServerInfo?.appVersion
   const { data: preferences } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
   const codexReasoning = getCatalogModelReasoning(
@@ -5000,11 +5018,27 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             anchorId="pref-general-section-version"
           >
             <div className="space-y-4">
-              <InlineField label="Jean" description="Application version">
+              <InlineField
+                label={activeRemoteConnection ? 'Jean Client' : 'Jean'}
+                description="Application version"
+              >
                 <span className="font-mono text-sm text-muted-foreground">
                   v{CLIENT_BUILD_INFO.appVersion}
                 </span>
               </InlineField>
+
+              {activeRemoteConnection && (
+                <InlineField
+                  label="Jean Server"
+                  description="Connected remote server version"
+                >
+                  <span className="font-mono text-sm text-muted-foreground">
+                    {isRemoteServerInfoLoading
+                      ? 'Loading…'
+                      : formatJeanVersionLabel(remoteServerVersion)}
+                  </span>
+                </InlineField>
+              )}
 
               {CLIENT_BUILD_INFO.gitSha && (
                 <InlineField
