@@ -19,6 +19,7 @@ import {
   Minimize2,
   PanelLeft,
   PanelLeftClose,
+  RotateCcw,
   Settings,
   X,
 } from 'lucide-react'
@@ -60,8 +61,15 @@ export function TitleBar({
   const commandContext = useCommandContext()
   const { data: preferences } = usePreferences()
   const isMobile = useIsMobile()
+  const sessionChatModalOpen = useUIStore(
+    state => state.sessionChatModalOpen
+  )
   /** Mobile zen: single header line in the title bar (name + exit). */
   const mobileZen = zenMode && isMobile
+  const showMobileZenClearContext =
+    mobileZen &&
+    sessionChatModalOpen &&
+    preferences?.single_session_per_worktree
 
   const sidebarShortcut = formatShortcutDisplay(
     (preferences?.keybindings?.toggle_left_sidebar ||
@@ -260,6 +268,27 @@ export function TitleBar({
                     DEFAULT_KEYBINDINGS.toggle_zen_mode) as string
                 )}
               </kbd>
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {showMobileZenClearContext && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                onClick={() =>
+                  window.dispatchEvent(new CustomEvent('clear-session-context'))
+                }
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                aria-label="Clear context"
+                data-testid="clear-session-context"
+              >
+                <RotateCcw className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Clear chat history and start with a fresh AI context
             </TooltipContent>
           </Tooltip>
         )}

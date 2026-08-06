@@ -680,6 +680,13 @@ export function SessionChatModal({
     })
   }, [clearSessionHistory, currentSessionId, worktreeId, worktreePath])
 
+  useEffect(() => {
+    if (!isOpen) return
+    window.addEventListener('clear-session-context', handleClearContext)
+    return () =>
+      window.removeEventListener('clear-session-context', handleClearContext)
+  }, [handleClearContext, isOpen])
+
   const handleOpenInNativeClient = useCallback(
     (session: Session) => {
       void (async () => {
@@ -1252,6 +1259,26 @@ export function SessionChatModal({
                     </kbd>
                   </TooltipContent>
                 </Tooltip>
+                {singleSessionPerWorktree && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        aria-label="Clear context"
+                        data-testid="clear-session-context"
+                        onClick={handleClearContext}
+                        disabled={clearSessionHistory.isPending}
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Clear chat history and start with a fresh AI context
+                    </TooltipContent>
+                  </Tooltip>
+                )}
                 {!zenMode && (
                   <>
                     {/* Desktop: inline action buttons */}
@@ -1636,25 +1663,7 @@ export function SessionChatModal({
                 </div>
                 <ScrollBar orientation="horizontal" className="h-1" />
               </ScrollArea>
-              {singleSessionPerWorktree ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 shrink-0 gap-1 px-2 text-xs"
-                      onClick={handleClearContext}
-                      disabled={clearSessionHistory.isPending}
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      Clear context
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Clear chat history and start with a fresh AI context
-                  </TooltipContent>
-                </Tooltip>
-              ) : (
+              {!singleSessionPerWorktree && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
