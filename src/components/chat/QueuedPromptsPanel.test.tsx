@@ -197,7 +197,7 @@ describe('QueuedPromptsPanel', () => {
     expect(onEdit).toHaveBeenCalledWith('session-1', 'msg-1', 'Updated prompt')
   })
 
-  it('does not show edit for steerable queued prompts', () => {
+  it('allows editing prompts that remain queued for steerable backends', () => {
     renderPanel({
       messages: [
         createMessage('msg-1', 'Codex prompt', {
@@ -212,10 +212,10 @@ describe('QueuedPromptsPanel', () => {
       ],
     })
 
-    expect(screen.queryByLabelText('Edit queued prompt')).not.toBeInTheDocument()
+    expect(screen.getAllByLabelText('Edit queued prompt')).toHaveLength(3)
   })
 
-  it('does not show edit for steering backends with file @-mentions', () => {
+  it('allows editing queued steering prompts with file @-mentions', () => {
     renderPanel({
       messages: [
         createMessage('msg-1', 'Pi prompt', {
@@ -232,10 +232,10 @@ describe('QueuedPromptsPanel', () => {
       ],
     })
 
-    expect(screen.queryByLabelText('Edit queued prompt')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Edit queued prompt')).toBeInTheDocument()
   })
 
-  it('does not show edit for steering backends with pasted images', () => {
+  it('allows editing queued steering prompts with pasted images', () => {
     renderPanel({
       messages: [
         createMessage('msg-1', 'Grok prompt', {
@@ -247,6 +247,6 @@ describe('QueuedPromptsPanel', () => {
       ],
     })
 
-    expect(screen.queryByLabelText('Edit queued prompt')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Edit queued prompt')).toBeInTheDocument()
   })
 })
