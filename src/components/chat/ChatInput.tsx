@@ -512,7 +512,9 @@ export const ChatInput = memo(function ChatInput({
       }
 
       const forceSteer =
-        isSending && isSteerCapableBackend(selectedBackend) && isModKeyEvent(e)
+        isSending &&
+        isSteerCapableBackend(selectedBackend) &&
+        (e.metaKey || e.ctrlKey)
       onSteerModifierChange?.(forceSteer)
 
       // When file mention popover is open, handle navigation
