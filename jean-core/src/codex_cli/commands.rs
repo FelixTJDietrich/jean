@@ -2264,6 +2264,75 @@ fn code_mode_host_asset_candidates(target: &str) -> Vec<CodexAssetCandidate> {
         .collect()
 }
 
+fn codex_requires_code_mode_host(version: &str) -> bool {
+    let mut parts = version.trim_start_matches('v').split('.');
+    let Some(major) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(minor) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    major > 0 || minor >= 147
+}
+
+/// Install only the missing code-mode host required by Jean-managed Codex
+/// 0.147+. Returns true when the helper was installed.
+pub async fn install_missing_codex_code_mode_host(app: AppHandle) -> Result<bool, String> {
+    let preferences = crate::load_preferences_sync(&app)?;
+    if preferences.codex_cli_source != "jean" {
+        return Ok(false);
+    }
+    if !super::config::jean_managed_installed(&app) {
+        return Ok(false);
+    }
+
+    let status = check_codex_cli_installed(app.clone()).await?;
+    let Some(version) = status.version else {
+        return Ok(false);
+    };
+    if !status.installed || !codex_requires_code_mode_host(&version) {
+        return Ok(false);
+    }
+
+    let wsl = crate::platform::get_wsl_config();
+    let target = resolve_codex_runtime_target()?;
+    if wsl.enabled {
+        let codex_path = super::config::get_wsl_cli_binary_path(&wsl.distro)?;
+        let parent = std::path::Path::new(&codex_path)
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let host_path = format!("{parent}/codex-code-mode-host");
+        if crate::platform::wsl_file_executable(&wsl.distro, &host_path) {
+            return Ok(false);
+        }
+        install_code_mode_host_helper(
+            &app,
+            &version,
+            target,
+            None,
+            Some((&wsl.distro, &codex_path)),
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    let cli_dir = get_cli_dir(&app)?;
+    let host_path = cli_dir.join(CODE_MODE_HOST_BINARY_NAME);
+    if host_path.exists() {
+        return Ok(false);
+    }
+    install_code_mode_host_helper(&app, &version, target, Some(&cli_dir), None).await?;
+
+    #[cfg(target_os = "macos")]
+    let _ = silent_command("xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(&host_path)
+        .output();
+
+    Ok(true)
+}
+
 /// Download and install `codex-code-mode-host` next to the Jean-managed binary.
 ///
 /// Best-effort: callers log and continue on failure so install still succeeds
@@ -2561,6 +2630,15 @@ mod tests {
             vec!["codex-code-mode-host-x86_64-pc-windows-msvc.exe.zip"]
         );
         assert!(win.iter().all(|c| c.format == CodexArchiveFormat::Zip));
+    }
+
+    #[test]
+    fn code_mode_host_is_required_from_codex_0_147() {
+        assert!(!codex_requires_code_mode_host("0.146.1"));
+        assert!(codex_requires_code_mode_host("0.147.0"));
+        assert!(codex_requires_code_mode_host("0.148.0-beta.1"));
+        assert!(codex_requires_code_mode_host("1.0.0"));
+        assert!(!codex_requires_code_mode_host("unknown"));
     }
 
     #[test]
