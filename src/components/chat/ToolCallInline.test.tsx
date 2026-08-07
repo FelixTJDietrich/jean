@@ -33,7 +33,6 @@ vi.mock('./InlineFileDiff', async importOriginal => {
   }
 })
 
-
 function clickExpandTrigger() {
   const triggers = document.querySelectorAll(
     '[data-slot="collapsible-trigger"]'
@@ -44,6 +43,22 @@ function clickExpandTrigger() {
 }
 
 describe('ToolCallInline', () => {
+  it('keeps clickable file details at the compact tool-row font size', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'tool-read-font-size',
+          name: 'Read',
+          input: { file_path: '/tmp/example.ts', limit: 20 },
+        }}
+        onFileClick={vi.fn()}
+      />
+    )
+
+    const fileDetail = screen.getByRole('button', { name: /example\.ts/i })
+    expect(fileDetail).not.toHaveClass('font-mono')
+  })
+
   it('renders Cursor EnterPlanMode instructions', () => {
     render(
       <ToolCallInline

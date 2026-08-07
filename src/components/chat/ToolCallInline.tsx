@@ -415,7 +415,7 @@ export function ToolCallInline({
               onClick={handleFileClick}
               className={cn(
                 TOOL_CALL_DETAIL_PILL_CLASS,
-                'inline-flex items-center gap-1 font-mono hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer'
+                'inline-flex items-center gap-1 hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer'
               )}
             >
               <span className="truncate">{detail}</span>
@@ -682,10 +682,7 @@ export function StackedGroup({
           <div className="border-t border-border/50 px-3 py-2 space-y-1">
             {items.map(item =>
               item.type === 'thinking' ? (
-                <SubThinkingItem
-                  key={item.key}
-                  thinking={item.thinking}
-                />
+                <SubThinkingItem key={item.key} thinking={item.thinking} />
               ) : (
                 <SubToolItem
                   key={item.tool.id}
