@@ -1215,6 +1215,7 @@ dependencies = [
  "which",
  "windows-sys 0.59.0",
  "zip",
+ "zune-core",
 ]
 
 [[package]]
