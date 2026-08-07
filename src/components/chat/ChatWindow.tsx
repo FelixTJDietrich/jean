@@ -3664,8 +3664,8 @@ export function ChatWindow({
 
                             <div
                               className={cn(
-                                zenMode &&
-                                  'flex max-h-16 items-center overflow-hidden'
+                                zenMode && 'flex items-center overflow-hidden',
+                                zenMode && 'max-h-20'
                               )}
                             >
                               {/* Textarea section */}
@@ -3709,7 +3709,7 @@ export function ChatWindow({
                               </div>
 
                               {/* Bottom toolbar */}
-                              {zenMode && isMobile ? (
+                              {zenMode ? (
                                 <div className="shrink-0 pr-3">
                                   <SendCancelButton
                                     isSending={isSending}
@@ -3723,6 +3723,13 @@ export function ChatWindow({
                                       ) ||
                                       (steerModifierActive &&
                                         isSteerCapableBackend(selectedBackend))
+                                    }
+                                    steerWithModifier={
+                                      steerModifierActive &&
+                                      !isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      )
                                     }
                                     queuedMessageCount={
                                       currentQueuedMessages.length
