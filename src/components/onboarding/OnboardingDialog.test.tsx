@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     (_patch: unknown, options?: { onSuccess?: () => void }) =>
       options?.onSuccess?.()
   ),
+  patchPreferencesAsync: vi.fn().mockResolvedValue(undefined),
 }))
 
 function setupResult(installed = false, path: string | null = null) {
@@ -156,7 +157,10 @@ vi.mock('@/services/preferences', () => ({
       gh_cli_source: 'path',
     },
   }),
-  usePatchPreferences: () => ({ mutate: mocks.patchPreferences }),
+  usePatchPreferences: () => ({
+    mutate: mocks.patchPreferences,
+    mutateAsync: mocks.patchPreferencesAsync,
+  }),
 }))
 
 vi.mock('@/lib/platform', async importOriginal => ({
@@ -195,6 +199,7 @@ describe('OnboardingDialog backends', () => {
     mocks.cursorAuthRefetchCount = 0
     mocks.cursorInstallSucceeds = true
     mocks.patchPreferences.mockClear()
+    mocks.patchPreferencesAsync.mockClear()
     useUIStore.setState({
       onboardingOpen: true,
       onboardingStartStep: null,

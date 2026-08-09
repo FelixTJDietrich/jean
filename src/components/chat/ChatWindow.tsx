@@ -145,7 +145,7 @@ import { StreamingStatusBar } from './StreamingStatusBar'
 import { ChatErrorFallback } from './ChatErrorFallback'
 import { logger } from '@/lib/logger'
 import { saveCrashState } from '@/lib/recovery'
-import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
+import { resolveSelectedModelForBackend } from '@/lib/session-defaults'
 import {
   isBackendAutoSteerEnabled,
   isSteerCapableBackend,
@@ -849,12 +849,12 @@ export function ChatWindow({
   )
 
   // Per-session model selection, falls back to preferences default (backend-aware)
-  const defaultModel = resolveDefaultModelForBackend(
+  const selectedModel = resolveSelectedModelForBackend(
     selectedBackend,
+    session?.selected_model,
     preferences,
     selectedBackend === 'pi' ? availablePiModelOptions : undefined
   )
-  const selectedModel: string = session?.selected_model ?? defaultModel
   const buildNewContextLabel = resolveApprovalLabel(
     'build',
     preferences,

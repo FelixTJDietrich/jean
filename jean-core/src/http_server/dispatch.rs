@@ -2491,6 +2491,7 @@ pub async fn dispatch_command(
             let result = crate::cursor_cli::get_cursor_install_command(app.clone()).await?;
             to_value(result)
         }
+        "check_system_prerequisites" => to_value(crate::check_system_prerequisites()),
         "check_grok_cli_installed" => {
             let result = crate::grok_cli::check_grok_cli_installed(app.clone()).await?;
             to_value(result)

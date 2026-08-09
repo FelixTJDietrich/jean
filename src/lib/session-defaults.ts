@@ -1,5 +1,6 @@
 import type { CliBackend } from '@/types/preferences'
 import { DEFAULT_MODEL } from '@/store/chat-store'
+import { getModelImpliedBackend } from '@/lib/model-utils'
 
 interface BackendModelPreferences {
   selected_model?: string
@@ -70,4 +71,24 @@ export function resolveDefaultModelForBackend(
     return preferences?.selected_antigravity_model ?? 'antigravity/auto'
   }
   return preferences?.selected_model ?? DEFAULT_MODEL
+}
+
+export function resolveSelectedModelForBackend(
+  backend: CliBackend,
+  sessionModel: string | null | undefined,
+  preferences: BackendModelPreferences | null | undefined,
+  availableModels?: ModelOption[]
+): string {
+  const impliedBackend = getModelImpliedBackend(sessionModel)
+  const isClaudeModel =
+    sessionModel?.startsWith('claude-') ||
+    ['opus', 'sonnet', 'haiku', 'fable'].includes(sessionModel ?? '')
+  if (
+    sessionModel &&
+    (!impliedBackend || impliedBackend === backend) &&
+    !(backend !== 'claude' && isClaudeModel)
+  ) {
+    return sessionModel
+  }
+  return resolveDefaultModelForBackend(backend, preferences, availableModels)
 }

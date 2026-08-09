@@ -3551,18 +3551,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     {grokStatus.version ?? 'Installed'}
                   </Button>
                 ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-muted-foreground">
-                      Not found in PATH
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleGrokInstall}
-                    >
-                      Install now
-                    </Button>
-                  </div>
+                  <span className="text-sm text-muted-foreground">
+                    Not found in PATH
+                  </span>
                 )}
               </InlineField>
               {grokAuthMessage && (

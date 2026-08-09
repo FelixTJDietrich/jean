@@ -59,12 +59,14 @@ mod opencode_server;
 mod opinionated;
 mod pi_cli;
 mod platform;
+mod prerequisites;
 mod projects;
 mod server_update;
 mod terminal;
 mod version;
 
 pub use version::{app_version, set_app_version};
+pub use prerequisites::*;
 
 // Desktop-only open helpers (native Tauri commands delegate here so editor
 // launch logic stays shared and complete: binary mapping, -g goto args,

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { resolveDefaultModelForBackend } from './session-defaults'
+import {
+  resolveDefaultModelForBackend,
+  resolveSelectedModelForBackend,
+} from './session-defaults'
 import type { AppPreferences } from '@/types/preferences'
 
 const preferences = {
@@ -89,5 +92,23 @@ describe('resolveDefaultModelForBackend', () => {
         ]
       )
     ).toBe('pi/openai-codex/gpt-5.4')
+  })
+})
+
+describe('resolveSelectedModelForBackend', () => {
+  it('replaces a stale Claude session model for a Codex backend', () => {
+    expect(
+      resolveSelectedModelForBackend(
+        'codex',
+        'claude-opus-4-8[1m]',
+        preferences
+      )
+    ).toBe('gpt-5.5-fast')
+  })
+
+  it('keeps a session model that matches its backend', () => {
+    expect(
+      resolveSelectedModelForBackend('codex', 'gpt-5.6-sol-fast', preferences)
+    ).toBe('gpt-5.6-sol-fast')
   })
 })

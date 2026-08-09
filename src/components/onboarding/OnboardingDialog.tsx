@@ -108,6 +108,11 @@ import { WslSetupStep } from './WslSetupStep'
 import { UsageModeStep, type OnboardingUsageMode } from './UsageModeStep'
 import { RemoteSetupStep } from './RemoteSetupStep'
 import { ArrowLeft, Loader2 } from 'lucide-react'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import {
+  checkSystemPrerequisites,
+  type SystemPrerequisites,
+} from '@/services/prerequisites'
 
 type AIBackend =
   | 'claude'
@@ -349,6 +354,20 @@ function OnboardingDialogContent() {
 
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
+  const [prerequisites, setPrerequisites] =
+    useState<SystemPrerequisites | null>(null)
+  const [installingPrerequisites, setInstallingPrerequisites] = useState(false)
+  const [prerequisiteAttempt, setPrerequisiteAttempt] = useState(0)
+
+  const refreshPrerequisites = useCallback(async () => {
+    const status = await checkSystemPrerequisites()
+    setPrerequisites(status)
+    return status
+  }, [])
+
+  useEffect(() => {
+    refreshPrerequisites().catch(() => undefined)
+  }, [refreshPrerequisites])
 
   const claudeSetup = useClaudeCliSetup()
   const pathDetection = useClaudePathDetection()
@@ -2066,7 +2085,7 @@ function OnboardingDialogContent() {
     setGhLoginAttempt(prev => prev + 1)
   }, [])
 
-  const handleComplete = useCallback(() => {
+  const handleComplete = useCallback(async () => {
     claudeSetup.refetchStatus()
     codexSetup.refetchStatus()
     opencodeSetup.refetchStatus()
@@ -2079,10 +2098,25 @@ function OnboardingDialogContent() {
     ghSetup.refetchStatus()
     // Set the first selected backend as the default so the preference
     // isn't left pointing at an uninstalled backend (e.g. 'claude').
-    const [firstBackend] = selectedBackends
+    const authenticatedBackends: Partial<Record<AIBackend, boolean>> = {
+      claude: claudeAuth.data?.authenticated,
+      codex: codexAuth.data?.authenticated,
+      opencode: opencodeAuth.data?.authenticated,
+      cursor: cursorAuth.data?.authenticated,
+      pi: piAuth.data?.authenticated,
+      commandcode: commandcodeAuth.data?.authenticated,
+      grok: grokAuth.data?.authenticated,
+      kimi: kimiAuth.data?.authenticated,
+    }
+    const firstBackend = selectedBackends.find(
+      backend => authenticatedBackends[backend]
+    )
     if (firstBackend && preferences) {
       const magicDefaults = magicDefaultsForBackend(firstBackend)
-      patchPreferences.mutate({
+      // Persist the backend/model pair before closing onboarding. Otherwise a
+      // session opened immediately afterwards can be created with Claude's
+      // model while the UI has already fallen back to the installed Codex CLI.
+      await patchPreferences.mutateAsync({
         default_backend: firstBackend,
         ...(magicDefaults
           ? {
@@ -2110,6 +2144,14 @@ function OnboardingDialogContent() {
     kimiSetup,
     antigravitySetup,
     ghSetup,
+    claudeAuth.data?.authenticated,
+    codexAuth.data?.authenticated,
+    opencodeAuth.data?.authenticated,
+    cursorAuth.data?.authenticated,
+    piAuth.data?.authenticated,
+    commandcodeAuth.data?.authenticated,
+    grokAuth.data?.authenticated,
+    kimiAuth.data?.authenticated,
     selectedBackends,
     preferences,
     patchPreferences,
@@ -2804,6 +2846,48 @@ function OnboardingDialogContent() {
                   setStep('backend-select')
                 }}
               />
+            ) : step === 'backend-select' &&
+              prerequisites &&
+              (!prerequisites.gitInstalled ||
+                !prerequisites.nodeInstalled ||
+                !prerequisites.npmInstalled) ? installingPrerequisites &&
+              prerequisites.automaticInstallCommand ? (
+              <AuthLoginState
+                key={prerequisiteAttempt}
+                cliName="Git and Node.js prerequisites"
+                terminalId={`onboarding-prerequisites-${loginSessionSeed}-${prerequisiteAttempt}`}
+                command="/bin/bash"
+                commandArgs={[
+                  '-lc',
+                  prerequisites.automaticInstallCommand,
+                ]}
+                action="install"
+                onComplete={async () => {
+                  const status = await refreshPrerequisites()
+                  if (
+                    status.gitInstalled &&
+                    status.nodeInstalled &&
+                    status.npmInstalled
+                  ) {
+                    setInstallingPrerequisites(false)
+                  } else {
+                    toast.error(
+                      'Prerequisites are still missing. Restart Jean after installing Node.js so it can refresh PATH.'
+                    )
+                  }
+                }}
+                onRetry={() => setPrerequisiteAttempt(value => value + 1)}
+              />
+            ) : step === 'backend-select' &&
+              prerequisites &&
+              (!prerequisites.gitInstalled ||
+                !prerequisites.nodeInstalled ||
+                !prerequisites.npmInstalled) ? (
+              <PrerequisiteSetupState
+                status={prerequisites}
+                onAutomaticInstall={() => setInstallingPrerequisites(true)}
+                onRecheck={() => void refreshPrerequisites()}
+              />
             ) : step === 'backend-select' ? (
               <BackendSelectionState
                 selectedBackends={selectedBackends}
@@ -3301,6 +3385,56 @@ function OnboardingDialogContent() {
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function PrerequisiteSetupState({
+  status,
+  onAutomaticInstall,
+  onRecheck,
+}: {
+  status: SystemPrerequisites
+  onAutomaticInstall: () => void
+  onRecheck: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Install host prerequisites</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Git is required by Jean. Node.js and npm are shared prerequisites for
+          Jean-managed npm tools such as Grok, PI, Command Code, Kimi Code, and
+          agent-browser.
+        </p>
+      </div>
+      <div className="rounded-md border p-3 text-sm">
+        <div>Git: {status.gitVersion ?? 'missing'}</div>
+        <div>Node.js: {status.nodeVersion ?? 'missing'}</div>
+        <div>npm: {status.npmVersion ?? 'missing'}</div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Jean uses the official Node.js installation flow because Debian and
+        Ubuntu packages can be outdated. Automatic installation requires your
+        confirmation and may ask for sudo access.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {status.automaticInstallSupported && (
+          <Button onClick={onAutomaticInstall}>Install automatically</Button>
+        )}
+        <Button variant="outline" onClick={() => openUrl(status.manualInstallUrl)}>
+          Node.js instructions
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => openUrl('https://git-scm.com/downloads')}
+        >
+          Git instructions
+        </Button>
+        <Button variant="ghost" onClick={onRecheck}>
+          Recheck
+        </Button>
+      </div>
+    </div>
   )
 }
 
