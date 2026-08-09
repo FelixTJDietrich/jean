@@ -9,6 +9,7 @@ const preferences = {
   selected_cursor_model: 'cursor/auto',
   selected_commandcode_model: 'commandcode/deepseek/deepseek-v4-flash',
   selected_kimi_model: 'kimi/custom-coding-model',
+  selected_antigravity_model: 'antigravity/flash',
 } as unknown as AppPreferences
 
 describe('resolveDefaultModelForBackend', () => {
@@ -47,6 +48,18 @@ describe('resolveDefaultModelForBackend', () => {
   it('falls back to the Kimi Code configured default model', () => {
     expect(resolveDefaultModelForBackend('kimi', {} as AppPreferences)).toBe(
       'kimi/default'
+    )
+  })
+
+  it('uses the Antigravity model preference for Antigravity sessions', () => {
+    expect(resolveDefaultModelForBackend('antigravity', preferences)).toBe(
+      'antigravity/flash'
+    )
+  })
+
+  it('falls back to the Antigravity CLI automatic model', () => {
+    expect(resolveDefaultModelForBackend('antigravity', {} as AppPreferences)).toBe(
+      'antigravity/auto'
     )
   })
 

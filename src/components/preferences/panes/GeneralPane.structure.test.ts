@@ -48,6 +48,16 @@ describe('GeneralPane settings structure', () => {
     }
   })
 
+  it('places managed uninstall actions below the full-width source cards', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+
+    expect(source.match(/className="w-full space-y-3"/g)).toHaveLength(7)
+    expect(source.match(/<BackendCliSourceCards/g)).toHaveLength(7)
+  })
+
   it('renders the Kimi auto-steer toggle inside Kimi settings', () => {
     const source = readFileSync(
       'src/components/preferences/panes/GeneralPane.tsx',
@@ -104,6 +114,9 @@ describe('GeneralPane settings structure', () => {
     expect(source).toContain('const codexInstalled = !!codexStatus?.installed')
     expect(source).toContain(
       'const opencodeInstalled = !!opencodeStatus?.installed'
+    )
+    expect(source).toContain(
+      'const antigravityInstalled = !!antigravityStatus?.installed'
     )
     expect(source).not.toMatch(
       /claudeInstalled\s*=\s*!!cliStatus\?\.installed\s*&&\s*!!claudeAuth\?\.authenticated/

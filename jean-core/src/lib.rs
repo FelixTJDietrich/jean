@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod agent_browser;
+mod antigravity_cli;
 mod auto_fix;
 mod background_tasks;
 mod chat;
@@ -332,6 +333,8 @@ pub struct AppPreferences {
     pub selected_grok_model: String, // Default Grok model
     #[serde(default = "default_kimi_model")]
     pub selected_kimi_model: String, // Default Kimi Code model
+    #[serde(default = "default_antigravity_model", alias = "selected_gemini_model")]
+    pub selected_antigravity_model: String, // Default Antigravity CLI model
     #[serde(default = "default_codex_reasoning_effort")]
     pub default_codex_reasoning_effort: String, // Codex reasoning effort: low, medium, high, xhigh
     #[serde(default = "default_codex_model_verbosity")]
@@ -352,6 +355,8 @@ pub struct AppPreferences {
     pub grok_auto_steer_enabled: bool, // Steer prompts into a running Grok turn instead of queueing (default: true)
     #[serde(default)]
     pub kimi_auto_steer_enabled: bool,
+    #[serde(default, alias = "gemini_auto_steer_enabled")]
+    pub antigravity_auto_steer_enabled: bool,
     #[serde(default = "default_codex_max_agent_threads")]
     pub codex_max_agent_threads: u32, // Max concurrent agent threads (1-8)
     #[serde(default = "default_restore_last_session")]
@@ -388,6 +393,8 @@ pub struct AppPreferences {
     pub grok_cli_source: String, // Grok CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
     pub kimi_cli_source: String, // Kimi Code CLI source: "jean" (managed) or "path" (system PATH)
+    #[serde(default = "default_cli_source", alias = "gemini_cli_source")]
+    pub antigravity_cli_source: String, // Antigravity CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
     pub gh_cli_source: String, // GitHub CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default)]
@@ -787,6 +794,10 @@ fn default_kimi_model() -> String {
     "kimi/default".to_string()
 }
 
+fn default_antigravity_model() -> String {
+    "antigravity/auto".to_string()
+}
+
 fn default_grok_cli_source() -> String {
     default_cli_source()
 }
@@ -881,6 +892,8 @@ mod tests {
     fn default_global_system_prompt_prefers_interactive_plan_questions() {
         let prompt = default_global_system_prompt();
 
+        assert!(prompt
+            .contains("Always use ASD-STE100 Simplified Technical English when you talk to me."));
         assert!(prompt.contains("backend-native interactive question UI"));
         assert!(prompt.contains("Codex request_user_input"));
         assert!(prompt
@@ -1972,7 +1985,9 @@ When specifying subagent_type for Task tool calls, always use the fully qualifie
 }
 
 fn default_global_system_prompt() -> String {
-    r#"### 1. Planning Guidance
+    r#"Always use ASD-STE100 Simplified Technical English when you talk to me.
+
+### 1. Planning Guidance
 - For non-trivial tasks (3+ steps or architectural decisions), prefer planning before implementation when the current execution mode has not already authorized execution.
 - If something goes sideways, STOP and re-plan immediately - don't keep pushing
 - Use plan mode for verification steps when the current execution mode is plan; in build/yolo, verify directly after implementing.
@@ -2197,6 +2212,12 @@ pub fn is_kimi_model(model: &str) -> bool {
     model.starts_with("kimi/")
 }
 
+/// Returns true if the given model string identifies an Antigravity model.
+/// Antigravity model IDs are prefixed with "antigravity/" (e.g. "antigravity/auto").
+pub fn is_antigravity_model(model: &str) -> bool {
+    model.starts_with("antigravity/")
+}
+
 /// Returns true if the given model string identifies a Codex model.
 /// Codex model IDs contain "codex" or start with "gpt-", but NOT OpenCode models.
 pub fn is_codex_model(model: &str) -> bool {
@@ -2381,6 +2402,7 @@ fn magic_prompt_model_matches_backend(model: &str, backend: &str) -> bool {
         "commandcode" => model.starts_with("commandcode/"),
         "grok" => is_grok_model(model),
         "kimi" => is_kimi_model(model),
+        "antigravity" => is_antigravity_model(model),
         "claude" => {
             !is_codex_model(model)
                 && !is_opencode_model(model)
@@ -2388,6 +2410,7 @@ fn magic_prompt_model_matches_backend(model: &str, backend: &str) -> bool {
                 && !is_pi_model(model)
                 && !is_grok_model(model)
                 && !is_kimi_model(model)
+                && !is_antigravity_model(model)
                 && !model.starts_with("commandcode/")
         }
         _ => true,
@@ -2403,6 +2426,7 @@ fn selected_model_for_backend(preferences: &AppPreferences, backend: &str) -> St
         "commandcode" => preferences.selected_commandcode_model.clone(),
         "grok" => preferences.selected_grok_model.clone(),
         "kimi" => preferences.selected_kimi_model.clone(),
+        "antigravity" => preferences.selected_antigravity_model.clone(),
         _ => preferences.selected_model.clone(),
     }
 }
@@ -2595,6 +2619,7 @@ impl Default for AppPreferences {
             selected_commandcode_model: default_commandcode_model(),
             selected_grok_model: default_grok_model(),
             selected_kimi_model: default_kimi_model(),
+            selected_antigravity_model: default_antigravity_model(),
             default_codex_reasoning_effort: default_codex_reasoning_effort(),
             default_codex_model_verbosity: default_codex_model_verbosity(),
             default_grok_reasoning_effort: default_grok_reasoning_effort(),
@@ -2605,6 +2630,7 @@ impl Default for AppPreferences {
             pi_auto_steer_enabled: default_pi_auto_steer(),
             grok_auto_steer_enabled: default_grok_auto_steer(),
             kimi_auto_steer_enabled: false,
+            antigravity_auto_steer_enabled: false,
             codex_max_agent_threads: default_codex_max_agent_threads(),
             restore_last_session: true,
             close_original_on_clear_context: true,
@@ -2623,6 +2649,7 @@ impl Default for AppPreferences {
             opencode_cli_source: default_cli_source(),
             grok_cli_source: default_grok_cli_source(),
             kimi_cli_source: default_cli_source(),
+            antigravity_cli_source: default_cli_source(),
             gh_cli_source: default_cli_source(),
             wsl_mode_chosen: false,
             wsl_enabled: false,
@@ -4185,7 +4212,6 @@ pub async fn run_server() -> Result<(), String> {
         chat::kimi::run_kimi_acp_host_from_args()?;
         return Ok(());
     }
-
     async_runtime::set(tokio::runtime::Handle::current());
     platform::raise_fd_limit();
     #[cfg(target_os = "linux")]

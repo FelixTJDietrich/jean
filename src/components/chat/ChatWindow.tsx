@@ -930,14 +930,15 @@ export function ChatWindow({
   )
   // Custom providers don't support Opus 4.6 adaptive thinking — use thinking levels instead
   const useAdaptiveThinkingFlag =
-    !isCustomProvider &&
-    supportsAdaptiveThinking(
-      selectedModel,
-      cliStatus?.version ?? null,
-      selectedModelReasoning === undefined
-        ? undefined
-        : selectedModelReasoning?.type === 'effort'
-    )
+    selectedBackend === 'antigravity' ||
+    (!isCustomProvider &&
+      supportsAdaptiveThinking(
+        selectedModel,
+        cliStatus?.version ?? null,
+        selectedModelReasoning === undefined
+          ? undefined
+          : selectedModelReasoning?.type === 'effort'
+      ))
 
   // Hide thinking level UI entirely for providers that don't support it
   const customCliProfiles = preferences?.custom_cli_profiles ?? []
@@ -2093,7 +2094,8 @@ export function ChatWindow({
         backend === 'opencode' ||
         backend === 'pi' ||
         backend === 'grok' ||
-        backend === 'kimi'
+        backend === 'kimi' ||
+        backend === 'antigravity'
       const effortLevel = usesEffortBackend
         ? ((preferences?.magic_prompt_efforts?.code_review_effort as
             | EffortLevel

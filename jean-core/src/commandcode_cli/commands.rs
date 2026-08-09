@@ -186,7 +186,7 @@ fn is_model_token(token: &str) -> bool {
     provider_model
         || token.starts_with("claude-")
         || token.starts_with("gpt-")
-        || token.starts_with("gemini-")
+        || token.starts_with("antigravity-")
         || lower.contains("kimi-")
 }
 
