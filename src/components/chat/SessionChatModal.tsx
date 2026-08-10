@@ -194,6 +194,7 @@ interface SessionChatModalProps {
   worktreePath: string
   isOpen: boolean
   onClose: () => void
+  onRequestCloseWorktree: () => void
 }
 
 export function SessionChatModal({
@@ -201,6 +202,7 @@ export function SessionChatModal({
   worktreePath,
   isOpen,
   onClose,
+  onRequestCloseWorktree,
 }: SessionChatModalProps) {
   const isMobile = useIsMobile()
   const isTouch = useIsTouchDevice()
@@ -541,6 +543,9 @@ export function SessionChatModal({
 
   // CMD+W: close the active session tab, or close modal if last tab
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
+  const [closeConfirmMode, setCloseConfirmMode] = useState<
+    'worktree' | 'session'
+  >('session')
   const pendingCloseAction = useRef<(() => void) | null>(null)
 
   const executeCloseAction = useCallback(() => {
@@ -568,6 +573,7 @@ export function SessionChatModal({
       }
 
       if (needsConfirm) {
+        setCloseConfirmMode('session')
         pendingCloseAction.current = action
         setCloseConfirmOpen(true)
       } else {
@@ -597,6 +603,15 @@ export function SessionChatModal({
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
       const activeSessions = sessions.filter(s => !s.archived_at)
+      if (activeSessions.length === 0) {
+        setCloseConfirmMode('worktree')
+        pendingCloseAction.current = () => {
+          onRequestCloseWorktree()
+          onClose()
+        }
+        setCloseConfirmOpen(true)
+        return
+      }
       const action = () => {
         if (activeSessions.length <= 1) {
           if (currentSessionId) {
@@ -610,6 +625,7 @@ export function SessionChatModal({
       const currentSession = sessions.find(s => s.id === currentSessionId)
       const sessionIsEmpty = !currentSession?.message_count
       if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
+        setCloseConfirmMode('session')
         pendingCloseAction.current = action
         setCloseConfirmOpen(true)
       } else {
@@ -630,6 +646,8 @@ export function SessionChatModal({
     handleDeleteSession,
     selectVisualNeighbor,
     preferences?.confirm_session_close,
+    onRequestCloseWorktree,
+    onClose,
   ])
 
   // Listen for toggle-session-label event (CMD+S)
@@ -1708,7 +1726,7 @@ export function SessionChatModal({
         onOpenChange={setCloseConfirmOpen}
         onConfirm={executeCloseAction}
         branchName={worktree?.branch}
-        mode="session"
+        mode={closeConfirmMode}
       />
     </>
   )
