@@ -24,14 +24,14 @@ describe('buildReleaseNotesFromTagSessionPrompt', () => {
     expect(prompt).toContain('Do not create or edit a GitHub release')
   })
 
-  it('includes the configured magic prompt with release placeholders resolved', () => {
+  it('uses the configured magic prompt as-is with release placeholders resolved', () => {
     const prompt = buildReleaseNotesFromTagSessionPrompt(
       'v4.2.0',
       'Jean 4.2',
       'Use this custom style for {tag} ({previous_release_name}).'
     )
 
-    expect(prompt).toContain('Use this custom style for v4.2.0 (Jean 4.2).')
+    expect(prompt).toBe('Use this custom style for v4.2.0 (Jean 4.2).')
     expect(prompt).not.toContain('{tag}')
     expect(prompt).not.toContain('{previous_release_name}')
   })
