@@ -17,6 +17,8 @@ describe('buildReleaseNotesFromTagSessionPrompt', () => {
     expect(prompt).toContain('git log')
     expect(prompt).toContain('GitHub CLI')
     expect(prompt).toContain('Markdown')
+    expect(prompt).toContain('single fenced `markdown` code block')
+    expect(prompt).toContain('Do not put any text before or after the code block')
     expect(prompt).toContain('Do not create or edit a GitHub release')
   })
 })

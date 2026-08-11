@@ -117,7 +117,7 @@ export function buildReleaseNotesFromTagSessionPrompt(
 
 Inspect the repository yourself. Fetch current remote data, use \`git log\` and the GitHub CLI to identify commits and merged pull requests since \`${tag}\`, and inspect PR titles and descriptions when useful. Treat merged PR metadata as the primary source and commits as fallback context.
 
-Reply with the finished release notes as Markdown directly in this chat so I can copy them in Jean. Include a concise title and group entries under only the applicable headings: Features, Fixes, Improvements, and Breaking Changes. Keep the notes concise, user-facing, and in past tense. Include PR and closing issue references when verified, but never invent references. Skip merge commits and trivial formatting-only changes.
+Reply with the finished release notes inside a single fenced \`markdown\` code block so Jean shows a copy button. Do not put any text before or after the code block. Inside it, include a concise title and group entries under only the applicable headings: Features, Fixes, Improvements, and Breaking Changes. Keep the notes concise, user-facing, and in past tense. Include PR and closing issue references when verified, but never invent references. Skip merge commits and trivial formatting-only changes.
 
 Do not create or edit a GitHub release, PR, tag, or repository file. Only reply with the final Markdown release notes.`
 }
