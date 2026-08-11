@@ -104,7 +104,8 @@ export function ReleaseNotesDialog() {
           (await createBaseSession.mutateAsync(selectedProjectId))
         const prompt = buildReleaseNotesFromTagSessionPrompt(
           release.tagName,
-          release.name || release.tagName
+          release.name || release.tagName,
+          preferences?.magic_prompts?.release_notes
         )
         const session = await createSession.mutateAsync({
           worktreeId: baseWorktree.id,

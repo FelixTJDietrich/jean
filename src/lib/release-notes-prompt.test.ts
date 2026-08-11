@@ -18,8 +18,22 @@ describe('buildReleaseNotesFromTagSessionPrompt', () => {
     expect(prompt).toContain('GitHub CLI')
     expect(prompt).toContain('Markdown')
     expect(prompt).toContain('single fenced `markdown` code block')
-    expect(prompt).toContain('Do not put any text before or after the code block')
+    expect(prompt).toContain('Create release on GitHub')
+    expect(prompt).toContain('/releases/new?')
+    expect(prompt).toContain('URL-encode the title and complete Markdown body')
     expect(prompt).toContain('Do not create or edit a GitHub release')
+  })
+
+  it('includes the configured magic prompt with release placeholders resolved', () => {
+    const prompt = buildReleaseNotesFromTagSessionPrompt(
+      'v4.2.0',
+      'Jean 4.2',
+      'Use this custom style for {tag} ({previous_release_name}).'
+    )
+
+    expect(prompt).toContain('Use this custom style for v4.2.0 (Jean 4.2).')
+    expect(prompt).not.toContain('{tag}')
+    expect(prompt).not.toContain('{previous_release_name}')
   })
 })
 

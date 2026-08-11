@@ -68,7 +68,13 @@ vi.mock('@/store/chat-store', () => ({
   },
 }))
 vi.mock('@/services/preferences', () => ({
-  usePreferences: () => ({ data: {} }),
+  usePreferences: () => ({
+    data: {
+      magic_prompts: {
+        release_notes: 'Use the saved release-note voice for {tag}.',
+      },
+    },
+  }),
 }))
 vi.mock('@/services/mcp', () => ({
   resolveMcpConfigForSend: () =>
@@ -123,7 +129,9 @@ describe('ReleaseNotesDialog', () => {
         sessionId: 'session-1',
         worktreeId: 'base-1',
         worktreePath: '/repo',
-        message: expect.stringContaining('final Markdown release notes'),
+        message: expect.stringContaining(
+          'Use the saved release-note voice for v4.2.0.'
+        ),
       })
     )
     expect(mocks.invoke).not.toHaveBeenCalledWith(
