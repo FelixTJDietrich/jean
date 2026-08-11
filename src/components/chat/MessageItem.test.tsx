@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
+import userEvent from '@testing-library/user-event'
 import { MessageItem } from './MessageItem'
 import type {
   ChatMessage,
@@ -7,8 +8,29 @@ import type {
   QuestionAnswer,
   Question,
 } from '@/types/chat'
+import { useUIStore } from '@/store/ui-store'
+
+const mocks = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+}))
+
+vi.mock('@/lib/clipboard', () => ({
+  copyToClipboard: mocks.copyToClipboard,
+}))
+
+vi.mock('sonner', () => ({
+  toast: {
+    success: mocks.toastSuccess,
+    error: mocks.toastError,
+  },
+}))
 
 describe('MessageItem', () => {
+  beforeEach(() => {
+    useUIStore.setState({ zenMode: false })
+  })
   const noopQuestionAnswer = (
     _toolCallId: string,
     _answers: QuestionAnswer[],
@@ -66,6 +88,72 @@ describe('MessageItem', () => {
     isFindingFixed: vi.fn(() => false),
   }
 
+  it('renders user prompts without a collapsed prompt-sent indicator', () => {
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          id: 'user-1',
+          session_id: 'session-1',
+          role: 'user',
+          content: 'Keep this prompt visible',
+          timestamp: 1,
+          tool_calls: [],
+        }}
+      />
+    )
+
+    expect(screen.getByText('Keep this prompt visible')).toBeVisible()
+    expect(screen.queryByText('Prompt sent')).not.toBeInTheDocument()
+  })
+
+  it('hides prompt metadata and message actions in zen mode', () => {
+    useUIStore.setState({ zenMode: true })
+    render(
+      <MessageItem
+        {...baseProps}
+        onCopyToInput={vi.fn()}
+        message={{
+          id: 'user-1',
+          session_id: 'session-1',
+          role: 'user',
+          content: 'Keep only this prompt',
+          timestamp: 1,
+          tool_calls: [],
+          model: 'codex/gpt-5.6',
+          execution_mode: 'yolo',
+          effort_level: 'medium',
+        }}
+      />
+    )
+
+    expect(screen.getByText('Keep only this prompt')).toBeVisible()
+    expect(screen.queryByText(/GPT 5.6/i)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Copy message to input' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('hides assistant copy actions in zen mode', () => {
+    useUIStore.setState({ zenMode: true })
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          ...baseMessage,
+          content: 'Zen response',
+          content_blocks: [{ type: 'text', text: 'Zen response' }],
+          tool_calls: [],
+        }}
+      />
+    )
+
+    expect(screen.getByText('Zen response')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Copy response to clipboard' })
+    ).not.toBeInTheDocument()
+  })
+
   it('renders assistant text blocks even when a Codex plan is present', () => {
     render(<MessageItem {...baseProps} />)
 
@@ -97,6 +185,8 @@ describe('MessageItem', () => {
     expect(
       screen.getByText('Repo inspected. Native plan had no prose body.')
     ).toBeVisible()
+    expect(screen.getByText('Clarify scope')).toBeVisible()
+    expect(screen.getByText('In progress:')).toBeVisible()
   })
 
   it('prefers final plan text over explanation-only fallback and hides duplicate text block', () => {
@@ -381,6 +471,60 @@ describe('MessageItem', () => {
     expect(screen.getByText('23s')).toBeVisible()
   })
 
+  it('copies an assistant response to the clipboard', async () => {
+    mocks.copyToClipboard.mockResolvedValue(undefined)
+
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          ...baseMessage,
+          content: 'This is the assistant response.',
+          tool_calls: [],
+          content_blocks: [],
+        }}
+      />
+    )
+
+    screen.getByRole('button', { name: 'Copy response to clipboard' }).click()
+
+    await waitFor(() => {
+      expect(mocks.copyToClipboard).toHaveBeenCalledWith(
+        'This is the assistant response.'
+      )
+      expect(mocks.toastSuccess).toHaveBeenCalledWith(
+        'Response copied to clipboard'
+      )
+    })
+  })
+
+  it('copies text from content blocks when the persisted response is empty', async () => {
+    mocks.copyToClipboard.mockResolvedValue(undefined)
+
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          ...baseMessage,
+          content: '',
+          tool_calls: [],
+          content_blocks: [
+            { type: 'text', text: 'First response block.' },
+            { type: 'text', text: 'Second response block.' },
+          ],
+        }}
+      />
+    )
+
+    screen.getByRole('button', { name: 'Copy response to clipboard' }).click()
+
+    await waitFor(() => {
+      expect(mocks.copyToClipboard).toHaveBeenCalledWith(
+        'First response block.\nSecond response block.'
+      )
+    })
+  })
+
   it('copies steered prompts rendered in full native messages', () => {
     const onCopyToInput = vi.fn()
 
@@ -411,5 +555,79 @@ describe('MessageItem', () => {
         content: 'copy this steered prompt',
       })
     )
+  })
+
+  it('constrains long user prompts so mobile viewports do not clip the left edge', () => {
+    const longUrl =
+      'https://github.com/coollabsio/jean/actions/runs/30667035760'
+    const content = [
+      'Investigate the failed GitHub Actions workflow run for "CI Build"',
+      `- Run URL: ${longUrl}`,
+      '1. Use the GitHub CLI to fetch the workflow run logs',
+    ].join('\n')
+
+    const { container } = render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          ...baseMessage,
+          id: 'user-1',
+          role: 'user',
+          content,
+          tool_calls: [],
+          content_blocks: [],
+        }}
+      />
+    )
+
+    const bubble = container.querySelector(
+      '.max-w-\\[85\\%\\].min-w-0'
+    ) as HTMLElement | null
+    expect(bubble).toBeTruthy()
+    expect(bubble?.className).toContain('min-w-0')
+
+    const text = screen.getByText(/Investigate the failed GitHub Actions/)
+    expect(text.className).toContain('overflow-wrap:anywhere')
+    expect(text.className).toContain('break-words')
+    expect(text.className).toContain('min-w-0')
+    expect(screen.getByText(new RegExp(longUrl))).toBeInTheDocument()
+  })
+
+  it('shows a custom context menu on right-click instead of browser defaults', async () => {
+    const user = userEvent.setup()
+    const original = window.getSelection
+    window.getSelection = () =>
+      ({
+        toString: () => '',
+      }) as Selection
+
+    mocks.copyToClipboard.mockResolvedValue(undefined)
+
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          ...baseMessage,
+          content: 'Right-click me for a custom menu.',
+          tool_calls: [],
+          content_blocks: [],
+        }}
+      />
+    )
+
+    fireEvent.contextMenu(screen.getByText('Right-click me for a custom menu.'))
+
+    const item = await screen.findByRole('menuitem', {
+      name: /copy response/i,
+    })
+    await user.click(item)
+
+    await waitFor(() => {
+      expect(mocks.copyToClipboard).toHaveBeenCalledWith(
+        'Right-click me for a custom menu.'
+      )
+    })
+
+    window.getSelection = original
   })
 })

@@ -1,7 +1,7 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
-import { isLinux, isMacOS, openExternal } from '@/lib/platform'
+import { isClientLinux, isClientMacOS, openExternal } from '@/lib/platform'
 import { Button } from '@/components/ui/button'
 import {
   Tooltip,
@@ -13,8 +13,10 @@ import { useCommandContext } from '@/lib/commands'
 import {
   ArrowUpCircle,
   Download,
+  FolderTree,
   Github,
   Heart,
+  Minimize2,
   PanelLeft,
   PanelLeftClose,
   Settings,
@@ -34,8 +36,10 @@ import { isNativeApp } from '@/lib/environment'
 import { UnreadBell } from '@/components/unread/UnreadBell'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { FALLBACK_APP_VERSION } from '@/lib/app-version'
+import { applyServerUpdate } from '@/hooks/useServerUpdateCheck'
 import { LinuxWindowControls } from './LinuxWindowControls'
 import { ClaudeAccountPill } from './ClaudeAccountPill'
+import { RemoteConnectionsDialog } from '@/components/remote/RemoteConnectionsDialog'
 
 interface TitleBarProps {
   className?: string
@@ -48,14 +52,25 @@ export function TitleBar({
   title = 'Jean',
   hideTitle = false,
 }: TitleBarProps) {
-  const { leftSidebarVisible, toggleLeftSidebar } = useUIStore()
+  const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
+  const toggleLeftSidebar = useUIStore(state => state.toggleLeftSidebar)
+  const fileBrowserVisible = useUIStore(state => state.fileBrowserVisible)
+  const toggleFileBrowser = useUIStore(state => state.toggleFileBrowser)
+  const zenMode = useUIStore(state => state.zenMode)
+  const toggleZenMode = useUIStore(state => state.toggleZenMode)
   const commandContext = useCommandContext()
   const { data: preferences } = usePreferences()
   const isMobile = useIsMobile()
+  /** Mobile zen: single header line in the title bar (name + exit). */
+  const mobileZen = zenMode && isMobile
 
   const sidebarShortcut = formatShortcutDisplay(
     (preferences?.keybindings?.toggle_left_sidebar ||
       DEFAULT_KEYBINDINGS.toggle_left_sidebar) as string
+  )
+  const fileBrowserShortcut = formatShortcutDisplay(
+    (preferences?.keybindings?.toggle_file_browser ||
+      DEFAULT_KEYBINDINGS.toggle_file_browser) as string
   )
   const native = isNativeApp()
 
@@ -79,140 +94,219 @@ export function TitleBar({
         className
       )}
     >
-      {/* Left side - Window Controls + Left Actions */}
+      {/* Left side - Window Controls + Left Actions (hidden in zen mode) */}
       <div
         className="flex items-center"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
+        {/* macOS traffic-light inset even when action buttons are hidden */}
+        {zenMode && native && isClientMacOS && (
+          <div className="pl-[80px]" aria-hidden />
+        )}
         {/* Left Action Buttons */}
-        <div
-          className={cn(
-            'relative z-10 flex items-center gap-1 pt-1',
-            native && isMacOS ? 'pl-[80px]' : 'pl-2'
-          )}
-        >
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                onClick={toggleLeftSidebar}
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-              >
-                {leftSidebarVisible ? (
-                  <PanelLeftClose className="size-3.5" />
-                ) : (
-                  <PanelLeft className="size-3.5" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              {leftSidebarVisible ? 'Hide' : 'Show'} Left Sidebar{' '}
-              <kbd className="ml-1 text-[0.625rem] opacity-60">
-                {sidebarShortcut}
-              </kbd>
-            </TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                onClick={commandContext.openPreferences}
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-              >
-                <Settings className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              Settings{' '}
-              <kbd className="ml-1 text-[0.625rem] opacity-60">
-                {formatShortcutDisplay(
-                  (preferences?.keybindings?.open_preferences ||
-                    DEFAULT_KEYBINDINGS.open_preferences) as string
-                )}
-              </kbd>
-            </TooltipContent>
-          </Tooltip>
-          {!isMobile && (
+        {!zenMode && (
+          <div
+            className={cn(
+              'relative z-10 flex items-center gap-1 pt-1',
+              native && isClientMacOS ? 'pl-[80px]' : 'pl-2'
+            )}
+          >
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  onClick={() =>
-                    openExternal('https://github.com/coollabsio/jean')
-                  }
+                  onClick={toggleLeftSidebar}
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
                 >
-                  <Github className="size-3.5" />
+                  {leftSidebarVisible ? (
+                    <PanelLeftClose className="size-3.5" />
+                  ) : (
+                    <PanelLeft className="size-3.5" />
+                  )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>GitHub</TooltipContent>
+              <TooltipContent>
+                {leftSidebarVisible ? 'Hide' : 'Show'} Left Sidebar{' '}
+                <kbd className="ml-1 text-[0.625rem] opacity-60">
+                  {sidebarShortcut}
+                </kbd>
+              </TooltipContent>
             </Tooltip>
-          )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                onClick={() => openExternal('https://jean.build/sponsorships/')}
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-none text-pink-500 hover:text-pink-400"
-              >
-                <Heart className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Sponsor</TooltipContent>
-          </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={toggleFileBrowser}
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    'h-6 w-6 rounded-none text-foreground/70 hover:text-foreground',
+                    fileBrowserVisible && 'text-foreground bg-muted/50'
+                  )}
+                  aria-pressed={fileBrowserVisible}
+                  aria-label={
+                    fileBrowserVisible
+                      ? 'Hide file browser'
+                      : 'Show file browser'
+                  }
+                  data-testid="toggle-file-browser"
+                >
+                  <FolderTree className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {fileBrowserVisible ? 'Hide' : 'Show'} File Browser{' '}
+                <kbd className="ml-1 text-[0.625rem] opacity-60">
+                  {fileBrowserShortcut}
+                </kbd>
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={commandContext.openPreferences}
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                >
+                  <Settings className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Settings{' '}
+                <kbd className="ml-1 text-[0.625rem] opacity-60">
+                  {formatShortcutDisplay(
+                    (preferences?.keybindings?.open_preferences ||
+                      DEFAULT_KEYBINDINGS.open_preferences) as string
+                  )}
+                </kbd>
+              </TooltipContent>
+            </Tooltip>
+            {!isMobile && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={() =>
+                      openExternal('https://github.com/coollabsio/jean')
+                    }
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                  >
+                    <Github className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>GitHub</TooltipContent>
+              </Tooltip>
+            )}
+            {native && <RemoteConnectionsDialog />}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={() =>
+                    openExternal('https://jean.build/sponsorships/')
+                  }
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 rounded-none text-pink-500 hover:text-pink-400"
+                >
+                  <Heart className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Sponsor</TooltipContent>
+            </Tooltip>
+          </div>
+        )}
+      </div>
+
+      {/* Center - Title / Unread indicator (inlined left in mobile zen) */}
+      {mobileZen ? (
+        <div
+          className="relative z-10 flex min-w-0 flex-1 items-center pl-3 pr-1"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <span className="truncate text-sm font-semibold text-foreground">
+            {hideTitle ? '' : title}
+          </span>
         </div>
-      </div>
+      ) : (
+        <div
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <UnreadBell title={title} hideTitle={hideTitle} />
+        </div>
+      )}
 
-      {/* Center - Title / Unread indicator */}
-      <div
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        <UnreadBell title={title} hideTitle={hideTitle} />
-      </div>
-
-      {/* Right side - Version + Windows/Linux window controls */}
+      {/* Right side - Version + Windows/Linux window controls (hidden in zen) */}
       <div
         className={cn('flex items-center pt-1', isMobile && 'pr-2')}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        {isMobile && (
+        {mobileZen && (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                onClick={() =>
-                  openExternal('https://github.com/coollabsio/jean')
-                }
+                onClick={toggleZenMode}
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                aria-label="Exit zen mode"
+                data-testid="toggle-zen-mode"
               >
-                <Github className="h-3 w-3" />
+                <Minimize2 className="size-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>GitHub</TooltipContent>
+            <TooltipContent>
+              Exit zen mode{' '}
+              <kbd className="ml-1 text-[0.625rem] opacity-60">
+                {formatShortcutDisplay(
+                  (preferences?.keybindings?.toggle_zen_mode ||
+                    DEFAULT_KEYBINDINGS.toggle_zen_mode) as string
+                )}
+              </kbd>
+            </TooltipContent>
           </Tooltip>
         )}
-        <ClaudeAccountPill />
-        <CliUpdatesIndicator />
-        {appVersion && <UpdateIndicator />}
-        {appVersion && (
-          <button
-            onClick={() =>
-              openExternal(
-                `https://github.com/coollabsio/jean/releases/tag/v${appVersion}`
-              )
-            }
-            className="px-1.5 text-[0.625rem] text-foreground/40 transition-colors cursor-pointer hover:text-foreground/60"
-          >
-            v{appVersion}
-          </button>
+        {!zenMode && (
+          <>
+            <ClaudeAccountPill />
+            {isMobile && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={() =>
+                      openExternal('https://github.com/coollabsio/jean')
+                    }
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                  >
+                    <Github className="h-3 w-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>GitHub</TooltipContent>
+              </Tooltip>
+            )}
+            <CliUpdatesIndicator />
+            <ServerUpdateIndicator />
+            {appVersion && <UpdateIndicator />}
+            {appVersion && (
+              <button
+                type="button"
+                onClick={() =>
+                  openExternal(
+                    `https://github.com/coollabsio/jean/releases/tag/v${appVersion}`
+                  )
+                }
+                className="px-1.5 text-[0.625rem] text-foreground/40 transition-colors cursor-pointer hover:text-foreground/60"
+              >
+                v{appVersion}
+              </button>
+            )}
+          </>
         )}
-        {native && isLinux && <LinuxWindowControls />}
+        {native && isClientLinux && <LinuxWindowControls />}
       </div>
     </div>
   )
@@ -264,7 +358,10 @@ function CliUpdatesIndicator() {
       <Tooltip>
         <TooltipTrigger asChild>
           <PopoverTrigger asChild>
-            <button className="relative mr-1.5 flex items-center gap-1 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary hover:bg-primary/25 transition-colors cursor-pointer">
+            <button
+              type="button"
+              className="relative mr-1.5 flex items-center gap-1 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary hover:bg-primary/25 transition-colors cursor-pointer"
+            >
               <Download className="size-3" />
               <span>{updates.length}</span>
             </button>
@@ -291,13 +388,16 @@ function CliUpdatesIndicator() {
               </div>
               <div className="flex items-center gap-1 ml-2 shrink-0">
                 <button
+                  type="button"
                   onClick={() => triggerUpdate(update)}
                   className="rounded px-2 py-0.5 text-[0.625rem] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
                 >
                   Update
                 </button>
                 <button
+                  type="button"
                   onClick={() => dismissCliUpdateNotice(update.type)}
+                  aria-label="Dismiss update notice"
                   className="rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
                 >
                   <X className="size-3" />
@@ -311,24 +411,85 @@ function CliUpdatesIndicator() {
   )
 }
 
-function UpdateIndicator() {
-  const pendingVersion = useUIStore(state => state.pendingUpdateVersion)
-  if (!pendingVersion) return null
+function ServerUpdateIndicator() {
+  const pending = useUIStore(state => state.pendingServerUpdate)
+  if (!pending) return null
+
+  const handleClick = () => {
+    if (!pending.canUpdate) {
+      toast.info(`jean-server ${pending.latestVersion} is available`, {
+        id: 'server-update-available',
+        description:
+          pending.reason ||
+          'This host cannot self-update. Replace the binary or image manually.',
+        duration: 12_000,
+      })
+      return
+    }
+    void applyServerUpdate(pending.latestVersion)
+  }
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          onClick={() =>
-            window.dispatchEvent(new Event('install-pending-update'))
-          }
+          type="button"
+          onClick={handleClick}
           className="mr-1.5 flex items-center gap-1 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary hover:bg-primary/25 transition-colors cursor-pointer"
         >
           <ArrowUpCircle className="size-3.5" />
-          Update available
+          Server update
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">Update to v{pendingVersion}</TooltipContent>
+      <TooltipContent side="bottom">
+        {pending.canUpdate
+          ? `Update jean-server to v${pending.latestVersion} (currently v${pending.currentVersion})`
+          : `jean-server v${pending.latestVersion} available — ${pending.reason || 'manual update required'}`}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function UpdateIndicator() {
+  const pendingVersion = useUIStore(state => state.pendingUpdateVersion)
+  const readyVersion = useUIStore(state => state.updateReadyVersion)
+  const isInstalling = useUIStore(state => state.isUpdateInstalling)
+
+  // Ready takes priority; also show while deferred or mid-download so the user
+  // keeps a visible affordance after dismissing the modal.
+  const version = readyVersion ?? pendingVersion
+  if (!version && !isInstalling) return null
+
+  const label = readyVersion
+    ? 'Restart to update'
+    : isInstalling
+      ? 'Updating…'
+      : 'Update available'
+  const tooltip = readyVersion
+    ? `Restart to apply v${readyVersion}`
+    : isInstalling
+      ? version
+        ? `Downloading v${version}…`
+        : 'Downloading update…'
+      : `Update to v${version}`
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() => {
+            if (isInstalling && !readyVersion) return
+            window.dispatchEvent(new Event('install-pending-update'))
+          }}
+          disabled={isInstalling && !readyVersion}
+          className="mr-1.5 flex items-center gap-1 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary hover:bg-primary/25 transition-colors cursor-pointer disabled:opacity-70 disabled:cursor-default"
+        >
+          <ArrowUpCircle className="size-3.5" />
+          {label}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{tooltip}</TooltipContent>
     </Tooltip>
   )
 }

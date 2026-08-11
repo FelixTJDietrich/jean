@@ -6,24 +6,68 @@ import { useMessageSending } from './useMessageSending'
 import {
   persistEnqueue,
   steerCodexTurn,
+  steerGrokTurn,
   steerOpencodeTurn,
   steerPiTurn,
 } from '@/services/chat'
 import type { ExecutionMode, Session } from '@/types/chat'
 import type * as ChatService from '@/services/chat'
 
-const { mockInvoke } = vi.hoisted(() => ({
-  mockInvoke: vi.fn().mockResolvedValue(undefined),
-}))
+const { mockInvoke, mockInstalledBackends, mockBackendAuthStatuses } =
+  vi.hoisted(() => ({
+    mockInvoke: vi.fn().mockResolvedValue(undefined),
+    mockInstalledBackends: {
+      installedBackends: [
+        'claude',
+        'codex',
+        'opencode',
+        'cursor',
+        'pi',
+        'commandcode',
+        'grok',
+        'kimi',
+        'antigravity',
+      ] as string[],
+      isLoading: false,
+    },
+    mockBackendAuthStatuses: {
+      authByBackend: {
+        claude: true,
+        codex: true,
+        opencode: true,
+        cursor: true,
+        pi: true,
+        commandcode: true,
+        grok: true,
+        kimi: true,
+        antigravity: true,
+      } as Record<string, boolean | undefined>,
+      isLoading: false,
+    },
+  }))
 
 vi.mock('@/lib/transport', () => ({
   invoke: mockInvoke,
+}))
+
+vi.mock('@/hooks/useInstalledBackends', () => ({
+  useInstalledBackends: () => mockInstalledBackends,
+  useBackendAuthStatuses: () => mockBackendAuthStatuses,
+  isBackendUsable: (
+    installed: boolean | undefined,
+    authenticated: boolean | undefined
+  ) => {
+    if (!installed) return false
+    if (authenticated === undefined) return true
+    return authenticated
+  },
 }))
 
 vi.mock('sonner', () => ({
   toast: {
     error: vi.fn(),
     message: vi.fn(),
+    success: vi.fn(),
   },
 }))
 
@@ -34,6 +78,7 @@ vi.mock('@/services/chat', async importOriginal => {
     cancelChatMessage: vi.fn(),
     persistEnqueue: vi.fn(),
     steerCodexTurn: vi.fn(),
+    steerGrokTurn: vi.fn(),
     steerOpencodeTurn: vi.fn(),
     steerPiTurn: vi.fn(),
   }
@@ -44,6 +89,7 @@ function renderUseMessageSending({
   autoSteer,
   opencodeAutoSteer,
   piAutoSteer,
+  grokAutoSteer,
   inputValue = '/goal Ship the feature',
   selectedBackend = 'codex',
   selectedModel = 'gpt-5.5',
@@ -66,8 +112,16 @@ function renderUseMessageSending({
   autoSteer?: boolean
   opencodeAutoSteer?: boolean
   piAutoSteer?: boolean
+  grokAutoSteer?: boolean
   inputValue?: string
-  selectedBackend?: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'grok'
+  selectedBackend?:
+    | 'claude'
+    | 'codex'
+    | 'opencode'
+    | 'cursor'
+    | 'pi'
+    | 'grok'
+    | 'antigravity'
   selectedModel?: string
   selectedEffortLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   createSession?: {
@@ -107,6 +161,7 @@ function renderUseMessageSending({
         codex_auto_steer_enabled: autoSteer,
         opencode_auto_steer_enabled: opencodeAutoSteer,
         pi_auto_steer_enabled: piAutoSteer,
+        grok_auto_steer_enabled: grokAutoSteer,
       },
       sendMessage,
       createSession,
@@ -121,10 +176,49 @@ function renderUseMessageSending({
   return { ...hook, sendMessage, executionModeRef, createSession }
 }
 
+vi.mock('@/lib/cli-auth', async importOriginal => {
+  const actual = await importOriginal()
+  return {
+    ...(actual as object),
+    handleCliAuthError: vi.fn((error: string) => error),
+    openBackendLoginModal: vi.fn().mockResolvedValue(true),
+  }
+})
+
+import { handleCliAuthError } from '@/lib/cli-auth'
+
+function resetInstalledBackendsMock() {
+  mockInstalledBackends.installedBackends = [
+    'claude',
+    'codex',
+    'opencode',
+    'cursor',
+    'pi',
+    'commandcode',
+    'grok',
+    'kimi',
+    'antigravity',
+  ]
+  mockInstalledBackends.isLoading = false
+  mockBackendAuthStatuses.authByBackend = {
+    claude: true,
+    codex: true,
+    opencode: true,
+    cursor: true,
+    pi: true,
+    commandcode: true,
+    grok: true,
+    kimi: true,
+    antigravity: true,
+  }
+  mockBackendAuthStatuses.isLoading = false
+}
+
 describe('useMessageSending Codex /goal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
     useChatStore.setState({
       inputDrafts: {},
       pendingImages: {},
@@ -146,6 +240,50 @@ describe('useMessageSending Codex /goal', () => {
       streamingContentBlocks: {},
       streamingThinkingContent: {},
     })
+  })
+
+  it('blocks send when the selected backend is not installed', async () => {
+    mockInstalledBackends.installedBackends = ['claude']
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'hello',
+      selectedBackend: 'codex',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(handleCliAuthError).toHaveBeenCalledWith(
+      'codex is not installed',
+      'codex'
+    )
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
+  it('blocks send when the selected backend is installed but not authenticated', async () => {
+    mockInstalledBackends.installedBackends = ['claude', 'codex']
+    mockBackendAuthStatuses.authByBackend = {
+      ...mockBackendAuthStatuses.authByBackend,
+      codex: false,
+    }
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'hello',
+      selectedBackend: 'codex',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(handleCliAuthError).toHaveBeenCalledWith(
+      'codex is not authenticated',
+      'codex'
+    )
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 
   it('starts goals in build mode by default', async () => {
@@ -202,6 +340,7 @@ describe('useMessageSending Grok /goal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
     useChatStore.setState({
       inputDrafts: {},
       pendingImages: {},
@@ -228,7 +367,7 @@ describe('useMessageSending Grok /goal', () => {
   it('passes /goal commands through to Grok without Codex RPC wrapping', async () => {
     const { result, sendMessage, executionModeRef } = renderUseMessageSending({
       selectedBackend: 'grok',
-      selectedModel: 'grok/grok-composer-2.5-fast',
+      selectedModel: 'grok/grok-4.5',
       inputValue: '/goal Ship the Grok feature',
     })
 
@@ -258,6 +397,7 @@ describe('useMessageSending PI effort', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
     useChatStore.setState({
       inputDrafts: {},
       pendingImages: {},
@@ -306,10 +446,87 @@ describe('useMessageSending PI effort', () => {
   })
 })
 
+describe('useMessageSending Antigravity effort', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
+    useChatStore.setState({
+      inputDrafts: {},
+      pendingImages: {},
+      pendingFiles: {},
+      pendingTextFiles: {},
+      pendingSkills: {},
+      sendingSessionIds: {},
+      executionModes: {},
+      selectedModels: {},
+      executingModes: {},
+      errors: {},
+      lastSentMessages: {},
+      reviewingSessions: {},
+      waitingForInputSessionIds: {},
+      messageQueues: {},
+      approvedTools: {},
+      streamingContents: {},
+      activeToolCalls: {},
+      streamingContentBlocks: {},
+      streamingThinkingContent: {},
+    })
+  })
+
+  it('passes selected Antigravity effort when sending a prompt', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'antigravity',
+      selectedModel: 'antigravity/auto',
+      selectedEffortLevel: 'medium',
+      inputValue: 'inspect antigravity effort',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backend: 'antigravity',
+        effortLevel: 'medium',
+        thinkingLevel: 'off',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('queues antigravity prompts while a turn is running (no steer API)', async () => {
+    useChatStore.setState({ sendingSessionIds: { 'session-1': true } })
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'antigravity',
+      selectedModel: 'antigravity/auto',
+      inputValue: 'also inspect antigravity',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerCodexTurn).not.toHaveBeenCalled()
+    expect(steerGrokTurn).not.toHaveBeenCalled()
+    expect(steerOpencodeTurn).not.toHaveBeenCalled()
+    expect(steerPiTurn).not.toHaveBeenCalled()
+    expect(persistEnqueue).toHaveBeenCalled()
+    expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+})
+
 describe('useMessageSending git diff Add to prompt', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
     useChatStore.setState({
       activeSessionIds: { 'worktree-1': 'session-1' },
       inputDrafts: { 'session-1': 'existing draft' },
@@ -360,6 +577,7 @@ describe('useMessageSending Codex auto-steer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
     useChatStore.setState({
       inputDrafts: {},
       pendingImages: {},
@@ -433,6 +651,32 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 
+  it('steers the running grok turn instead of queueing when auto-steer is enabled', async () => {
+    vi.mocked(steerGrokTurn).mockResolvedValue(undefined)
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'grok',
+      selectedModel: 'grok/grok-4.5',
+      inputValue: 'also inspect grok',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerGrokTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      'also inspect grok'
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+    expect(
+      useChatStore.getState().messageQueues['session-1'] ?? []
+    ).toHaveLength(0)
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
   it('steers the running opencode turn instead of queueing by default', async () => {
     vi.mocked(steerOpencodeTurn).mockResolvedValue(undefined)
     const { result, sendMessage } = renderUseMessageSending({
@@ -459,8 +703,6 @@ describe('useMessageSending Codex auto-steer', () => {
     ).toHaveLength(0)
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
-
-
 
   it('steers codex attachments instead of queueing when auto-steer is enabled', async () => {
     vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
@@ -513,6 +755,28 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
   })
 
+  it('steers when explicitly requested even if auto-steer is disabled', async () => {
+    vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      autoSteer: false,
+      inputValue: 'steer this now',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit(
+        { preventDefault: vi.fn() } as unknown as React.FormEvent,
+        { forceSteer: true }
+      )
+    })
+
+    expect(steerCodexTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      'steer this now'
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+  })
+
   it('queues pi prompts instead of steering when pi auto-steer is disabled', async () => {
     const { result } = renderUseMessageSending({
       selectedBackend: 'pi',
@@ -530,6 +794,133 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(steerPiTurn).not.toHaveBeenCalled()
     expect(persistEnqueue).toHaveBeenCalled()
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+  })
+
+  it('queues grok prompts instead of steering when grok auto-steer is disabled', async () => {
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'grok',
+      selectedModel: 'grok/grok-4.5',
+      grokAutoSteer: false,
+      inputValue: 'also inspect grok',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerGrokTurn).not.toHaveBeenCalled()
+    expect(persistEnqueue).toHaveBeenCalled()
+    expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+  })
+
+  it('steers grok prompts with pasted images as path refs', async () => {
+    vi.mocked(steerGrokTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'grok',
+      selectedModel: 'grok/grok-4.5',
+      inputValue: 'also inspect grok',
+    })
+    useChatStore.setState({
+      pendingImages: {
+        'session-1': [
+          { id: 'img-1', path: '/tmp/img.png', filename: 'img.png' },
+        ],
+      },
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerGrokTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      expect.stringContaining(
+        '[Image attached: /tmp/img.png - Use the Read tool to view this image]'
+      )
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+  })
+
+  it('steers grok prompts with pasted text files as path refs', async () => {
+    vi.mocked(steerGrokTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'grok',
+      selectedModel: 'grok/grok-4.5',
+      inputValue: 'check this paste',
+    })
+    useChatStore.setState({
+      pendingTextFiles: {
+        'session-1': [
+          {
+            id: 'txt-1',
+            path: '/tmp/pasted-texts/paste-1.txt',
+            filename: 'paste-1.txt',
+            content: 'hello',
+            size: 5,
+          },
+        ],
+      },
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerGrokTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      expect.stringContaining(
+        '[Text file attached: /tmp/pasted-texts/paste-1.txt - Use the Read tool to view this file]'
+      )
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+  })
+
+  it('steers grok prompts with file @-mentions instead of queueing', async () => {
+    vi.mocked(steerGrokTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'grok',
+      selectedModel: 'grok/grok-4.5',
+      inputValue:
+        'i dont think we need to change the @AppServiceProvider.php as it worked before without it',
+    })
+    useChatStore.setState({
+      pendingFiles: {
+        'session-1': [
+          {
+            id: 'file-1',
+            relativePath: 'app/Providers/AppServiceProvider.php',
+            extension: 'php',
+            isDirectory: false,
+          },
+        ],
+      },
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerGrokTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      expect.stringContaining(
+        '[File: app/Providers/AppServiceProvider.php - Use the Read tool to view this file]'
+      )
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+    expect(
+      useChatStore.getState().messageQueues['session-1'] ?? []
+    ).toHaveLength(0)
   })
 
   it('queues opencode prompts instead of steering when opencode auto-steer is disabled', async () => {

@@ -178,20 +178,32 @@ export function useCommandContext(
   // Sessions - Clear chat history
   const clearSessionHistory = useCallback(async () => {
     const { activeWorktreeId, getActiveSession } = useChatStore.getState()
+    const uiState = useUIStore.getState()
+    if (uiState.sessionChatModalOpen && uiState.sessionChatModalWorktreeId) {
+      window.dispatchEvent(new CustomEvent('clear-session-context'))
+      return
+    }
+
     if (!activeWorktreeId) return
 
     const sessionId = getActiveSession(activeWorktreeId)
     if (!sessionId) return
+    const worktreePath =
+      useChatStore.getState().getWorktreePath(activeWorktreeId) ??
+      useChatStore.getState().activeWorktreePath
+    if (!worktreePath) return
 
     try {
       await invoke('clear_session_history', {
         worktreeId: activeWorktreeId,
+        worktreePath,
         sessionId,
       })
       await queryClient.invalidateQueries({
         queryKey: chatQueryKeys.session(sessionId),
       })
       notify('Chat history cleared', undefined, { type: 'success' })
+      window.dispatchEvent(new CustomEvent('focus-chat-input'))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notify(message, undefined, { type: 'error' })
@@ -463,7 +475,11 @@ export function useCommandContext(
   // State getters
   const hasActiveSession = useCallback(() => {
     const chatState = useChatStore.getState()
+    const uiState = useUIStore.getState()
     const worktreeId =
+      (uiState.sessionChatModalOpen
+        ? uiState.sessionChatModalWorktreeId
+        : null) ??
       chatState.activeWorktreeId ??
       useProjectsStore.getState().selectedWorktreeId
     if (!worktreeId) return false
@@ -531,7 +547,8 @@ export function useCommandContext(
       return
     }
 
-    // Get base branch from project's default_branch
+    // Prefer the worktree's stored base branch/remote so multi-remote
+    // worktrees pull from the same start point they were created with.
     const { selectedWorktreeId, selectedProjectId } =
       useProjectsStore.getState()
     const projects = queryClient.getQueryData<Project[]>(
@@ -539,17 +556,24 @@ export function useCommandContext(
     )
 
     let baseBranch = 'main' // Default fallback
+    let baseRemote: string | undefined
 
     if (selectedWorktreeId) {
-      // Get worktree to find project_id
       const worktree = queryClient.getQueryData<{
         project_id: string
+        base_branch?: string
+        base_remote?: string
       }>([...projectsQueryKeys.all, 'worktree', selectedWorktreeId])
       if (worktree) {
-        const project = projects?.find(p => p.id === worktree.project_id)
-        if (project?.default_branch) {
-          baseBranch = project.default_branch
+        if (worktree.base_branch) {
+          baseBranch = worktree.base_branch
+        } else {
+          const project = projects?.find(p => p.id === worktree.project_id)
+          if (project?.default_branch) {
+            baseBranch = project.default_branch
+          }
         }
+        baseRemote = worktree.base_remote
       }
     } else if (selectedProjectId) {
       const project = projects?.find(p => p.id === selectedProjectId)
@@ -563,6 +587,7 @@ export function useCommandContext(
       worktreeId: activeWorktreeId ?? '',
       worktreePath,
       baseBranch,
+      remote: baseRemote,
     })
   }, [getTargetPath, queryClient])
 

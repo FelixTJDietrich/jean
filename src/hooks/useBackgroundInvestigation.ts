@@ -1,16 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { invoke } from '@/lib/transport'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { usePreferences } from '@/services/preferences'
 import { chatQueryKeys } from '@/services/chat'
 import { resolveBackend, supportsAdaptiveThinking } from '@/lib/model-utils'
+import { applyYoloInvestigationFixDirective } from '@/lib/investigation-prompt'
 import {
   DEFAULT_INVESTIGATE_ISSUE_PROMPT,
   DEFAULT_INVESTIGATE_PR_PROMPT,
   DEFAULT_INVESTIGATE_SECURITY_ALERT_PROMPT,
   DEFAULT_INVESTIGATE_ADVISORY_PROMPT,
   DEFAULT_INVESTIGATE_LINEAR_ISSUE_PROMPT,
+  DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT,
   DEFAULT_PARALLEL_EXECUTION_PROMPT,
   DEFAULT_MAGIC_PROMPT_MODES,
   resolveMagicPromptProvider,
@@ -26,27 +28,38 @@ type InvestigationType =
   | 'security-alert'
   | 'advisory'
   | 'linear-issue'
+  | 'sentry-issue'
 
 /**
- * Headless hook for starting investigations on background-created worktrees.
+ * Headless hook for starting investigations on auto-investigate worktrees.
  *
- * When a worktree is created via CMD+Click with auto-investigate, the ChatWindow
- * never mounts (no modal opens), so the auto-investigate flag is never consumed.
- * This hook watches those flags, builds the investigation prompt, and sends it
- * through the shared backend background-investigation command — no modal needed.
+ * Owns the entire auto-investigate path for both CMD+Click background creates
+ * and foreground creates that open a session modal. Always queues the prompt
+ * through `start_background_investigation` so remote/web clients (where the
+ * frontend queue processor does not drain) still start investigations even when
+ * the worktree becomes active or opens in a modal.
  *
  * Must be mounted at App level alongside useQueueProcessor.
  */
 export function useBackgroundInvestigation(): void {
   const { data: preferences } = usePreferences()
   const queryClient = useQueryClient()
-  const processingRef = useRef<Set<string>>(new Set())
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Lazy init so we don't allocate a new Set on every render.
+  const processingRef = useRef<Set<string> | null>(null)
+  if (processingRef.current === null) {
+    processingRef.current = new Set()
+  }
+  const processing = processingRef.current
   const [retryTick, setRetryTick] = useState(0)
+  // Separate timer state so the setTimeout lives in its own effect with a
+  // direct cleanup path (avoids nested-callback timer ownership issues).
+  const [retryScheduled, setRetryScheduled] = useState(false)
 
   // Ref for unstable preferences dependency; keeps effect deps stable.
   const preferencesRef = useRef(preferences)
-  preferencesRef.current = preferences
+  useLayoutEffect(() => {
+    preferencesRef.current = preferences
+  })
 
   // Subscribe to auto-investigate flags — re-run effect when they change
   const hasAutoInvestigate = useUIStore(
@@ -55,7 +68,8 @@ export function useBackgroundInvestigation(): void {
       state.autoInvestigatePRWorktreeIds.size > 0 ||
       state.autoInvestigateSecurityAlertWorktreeIds.size > 0 ||
       state.autoInvestigateAdvisoryWorktreeIds.size > 0 ||
-      state.autoInvestigateLinearIssueWorktreeIds.size > 0
+      state.autoInvestigateLinearIssueWorktreeIds.size > 0 ||
+      state.autoInvestigateSentryIssueWorktreeIds.size > 0
   )
 
   // Re-trigger effect when new worktree paths are registered.
@@ -65,108 +79,206 @@ export function useBackgroundInvestigation(): void {
     state => Object.keys(state.worktreePaths).length
   )
 
+  // Owns the 2s retry timer exclusively — cleanup is always clearTimeout(id).
   useEffect(() => {
-    if (!hasAutoInvestigate) return
+    if (!retryScheduled) return
+    const id = setTimeout(() => {
+      setRetryScheduled(false)
+      setRetryTick(t => t + 1)
+    }, 2000)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [retryScheduled])
 
-    const {
-      autoInvestigateWorktreeIds,
-      autoInvestigatePRWorktreeIds,
-      autoInvestigateSecurityAlertWorktreeIds,
-      autoInvestigateAdvisoryWorktreeIds,
-      autoInvestigateLinearIssueWorktreeIds,
-      autoOpenSessionWorktreeIds,
-    } = useUIStore.getState()
+  useEffect(() => {
+    let disposed = false
 
-    const { worktreePaths, activeWorktreeId } = useChatStore.getState()
-
-    const isWorktreeReady = (worktreeId: string): boolean => {
-      const cached = queryClient.getQueryData<Worktree>([
-        ...projectsQueryKeys.all,
-        'worktree',
-        worktreeId,
-      ])
-      return cached?.status === 'ready'
+    const scheduleRetry = () => {
+      if (!disposed) setRetryScheduled(true)
     }
 
-    // Collect all worktree IDs that need background investigation
-    const candidates: { worktreeId: string; type: InvestigationType }[] = []
-    let skippedNotReady = 0
+    if (hasAutoInvestigate) {
+      const {
+        autoInvestigateWorktreeIds,
+        autoInvestigatePRWorktreeIds,
+        autoInvestigateSecurityAlertWorktreeIds,
+        autoInvestigateAdvisoryWorktreeIds,
+        autoInvestigateLinearIssueWorktreeIds,
+        autoInvestigateSentryIssueWorktreeIds,
+      } = useUIStore.getState()
 
-    const checkCandidate = (worktreeId: string): boolean => {
-      if (worktreeId === activeWorktreeId) return false
-      if (autoOpenSessionWorktreeIds.has(worktreeId)) return false
-      if (!worktreePaths[worktreeId]) return false
-      if (!isWorktreeReady(worktreeId)) {
-        skippedNotReady++
+      const { worktreePaths } = useChatStore.getState()
+
+      // Client-only `status` is set by worktree event handlers. Backend
+      // get_worktree/list_worktrees never include it, so remote/web refetches
+      // wipe `status: 'ready'` back to undefined. Treat anything other than an
+      // explicit in-flight status as ready once we know about the worktree.
+      const isWorktreeReady = (worktreeId: string): boolean => {
+        const cached = queryClient.getQueryData<Worktree>([
+          ...projectsQueryKeys.all,
+          'worktree',
+          worktreeId,
+        ])
+        if (
+          cached?.status === 'pending' ||
+          cached?.status === 'error' ||
+          cached?.status === 'deleting'
+        ) {
+          return false
+        }
+        if (cached) return true
+
+        // Recovery path: list cache may already have the server-backed worktree
+        // after a missed worktree:created event, while the single-worktree entry
+        // was never promoted off pending / never written.
+        const listQueries = queryClient.getQueriesData<Worktree[]>({
+          queryKey: projectsQueryKeys.all,
+        })
+        for (const [, list] of listQueries) {
+          if (!Array.isArray(list)) continue
+          const found = list.find(w => w.id === worktreeId)
+          if (
+            found &&
+            found.status !== 'pending' &&
+            found.status !== 'error' &&
+            found.status !== 'deleting'
+          ) {
+            queryClient.setQueryData<Worktree>(
+              [...projectsQueryKeys.all, 'worktree', worktreeId],
+              { ...found, status: 'ready' }
+            )
+            if (found.path) {
+              useChatStore
+                .getState()
+                .registerWorktreePath(worktreeId, found.path)
+            }
+            return true
+          }
+        }
         return false
       }
-      if (processingRef.current.has(worktreeId)) return false
-      return true
-    }
 
-    const sources: { ids: Set<string>; type: InvestigationType }[] = [
-      { ids: autoInvestigateWorktreeIds, type: 'issue' },
-      { ids: autoInvestigatePRWorktreeIds, type: 'pr' },
-      { ids: autoInvestigateSecurityAlertWorktreeIds, type: 'security-alert' },
-      { ids: autoInvestigateAdvisoryWorktreeIds, type: 'advisory' },
-      { ids: autoInvestigateLinearIssueWorktreeIds, type: 'linear-issue' },
-    ]
+      // Collect all worktree IDs that need background investigation
+      const candidates: { worktreeId: string; type: InvestigationType }[] = []
+      let skippedWaiting = 0
 
-    const queuedWorktreeIds = new Set<string>()
-    for (const { ids, type } of sources) {
-      for (const worktreeId of ids) {
-        if (queuedWorktreeIds.has(worktreeId) || !checkCandidate(worktreeId)) {
-          continue
+      // Always handle auto-investigate headlessly — do not skip active or
+      // auto-opening worktrees. ChatWindow used to own those cases, but remote
+      // Jean clients can open the worktree without reliably sending the prompt.
+      const resolveWorktreePath = (worktreeId: string): string | undefined => {
+        if (worktreePaths[worktreeId]) return worktreePaths[worktreeId]
+
+        // List/single caches often already know the path after a recovery
+        // refetch even when worktreePaths was never registered (missed
+        // worktree:created on remote).
+        const cached =
+          queryClient.getQueryData<Worktree>([
+            ...projectsQueryKeys.all,
+            'worktree',
+            worktreeId,
+          ]) ??
+          queryClient
+            .getQueriesData<Worktree[]>({ queryKey: projectsQueryKeys.all })
+            .flatMap(([, list]) => (Array.isArray(list) ? list : []))
+            .find(w => w.id === worktreeId)
+        if (!cached?.path) return undefined
+
+        useChatStore.getState().registerWorktreePath(worktreeId, cached.path)
+        return cached.path
+      }
+
+      const checkCandidate = (worktreeId: string): boolean => {
+        // Missing path and not-ready both need retries. Previously only the
+        // not-ready branch scheduled a timer; a missing path with no later
+        // worktreePathCount bump (e.g. missed worktree:created on remote) left
+        // the investigation flag stuck forever.
+        if (!resolveWorktreePath(worktreeId)) {
+          skippedWaiting++
+          return false
         }
-        queuedWorktreeIds.add(worktreeId)
-        candidates.push({ worktreeId, type })
+        if (!isWorktreeReady(worktreeId)) {
+          skippedWaiting++
+          return false
+        }
+        if (processing.has(worktreeId)) return false
+        return true
+      }
+
+      const sources: { ids: Set<string>; type: InvestigationType }[] = [
+        { ids: autoInvestigateWorktreeIds, type: 'issue' },
+        { ids: autoInvestigatePRWorktreeIds, type: 'pr' },
+        {
+          ids: autoInvestigateSecurityAlertWorktreeIds,
+          type: 'security-alert',
+        },
+        { ids: autoInvestigateAdvisoryWorktreeIds, type: 'advisory' },
+        { ids: autoInvestigateLinearIssueWorktreeIds, type: 'linear-issue' },
+        { ids: autoInvestigateSentryIssueWorktreeIds, type: 'sentry-issue' },
+      ]
+
+      const queuedWorktreeIds = new Set<string>()
+      for (const { ids, type } of sources) {
+        for (const worktreeId of ids) {
+          if (
+            queuedWorktreeIds.has(worktreeId) ||
+            !checkCandidate(worktreeId)
+          ) {
+            continue
+          }
+          queuedWorktreeIds.add(worktreeId)
+          candidates.push({ worktreeId, type })
+        }
+      }
+
+      // If worktrees are flagged but path/status aren't ready yet, retry after 2s.
+      // The effect has no dependency that changes when worktree status goes
+      // from pending → ready (and path registration can be missed on remote),
+      // so without this retry the effect would never re-fire for those worktrees.
+      if (skippedWaiting > 0) {
+        scheduleRetry()
+      }
+
+      // Process each candidate
+      for (const { worktreeId, type } of candidates) {
+        processing.add(worktreeId)
+
+        // Keep the flag until the backend has durably accepted the prompt. If
+        // prompt construction or the start command fails, the retry below can
+        // try again instead of silently leaving an empty session behind.
+        const uiStore = useUIStore.getState()
+        const consumeByType = {
+          issue: uiStore.consumeAutoInvestigate,
+          pr: uiStore.consumeAutoInvestigatePR,
+          'security-alert': uiStore.consumeAutoInvestigateSecurityAlert,
+          advisory: uiStore.consumeAutoInvestigateAdvisory,
+          'linear-issue': uiStore.consumeAutoInvestigateLinearIssue,
+          'sentry-issue': uiStore.consumeAutoInvestigateSentryIssue,
+        } satisfies Record<InvestigationType, (worktreeId: string) => void>
+
+        processBackgroundInvestigation(
+          worktreeId,
+          type,
+          preferencesRef.current,
+          null,
+          queryClient
+        )
+          .then(() => {
+            if (!disposed) consumeByType[type](worktreeId)
+          })
+          .catch(err => {
+            logger.error('Background investigation failed', { worktreeId, err })
+            if (disposed) return
+            scheduleRetry()
+          })
+          .finally(() => {
+            processing.delete(worktreeId)
+          })
       }
     }
 
-    // Clear any pending retry timer
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current)
-      retryTimerRef.current = null
-    }
-
-    // If worktrees are flagged but not ready yet, retry after 2s.
-    // The effect has no dependency that changes when worktree status goes
-    // from pending → ready, so without this retry the effect would never
-    // re-fire for those worktrees.
-    if (skippedNotReady > 0) {
-      retryTimerRef.current = setTimeout(() => setRetryTick(t => t + 1), 2000)
-    }
-
-    if (candidates.length === 0) return
-
-    // Process each candidate
-    for (const { worktreeId, type } of candidates) {
-      processingRef.current.add(worktreeId)
-
-      // Consume the flag immediately so we don't re-process
-      const uiStore = useUIStore.getState()
-      const consumeByType = {
-        issue: uiStore.consumeAutoInvestigate,
-        pr: uiStore.consumeAutoInvestigatePR,
-        'security-alert': uiStore.consumeAutoInvestigateSecurityAlert,
-        advisory: uiStore.consumeAutoInvestigateAdvisory,
-        'linear-issue': uiStore.consumeAutoInvestigateLinearIssue,
-      } satisfies Record<InvestigationType, (worktreeId: string) => void>
-      consumeByType[type](worktreeId)
-
-      processBackgroundInvestigation(
-        worktreeId,
-        type,
-        preferencesRef.current,
-        null,
-        queryClient
-      )
-        .catch(err => {
-          logger.error('Background investigation failed', { worktreeId, err })
-        })
-        .finally(() => {
-          processingRef.current.delete(worktreeId)
-        })
+    return () => {
+      disposed = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasAutoInvestigate, worktreePathCount, queryClient, retryTick])
@@ -184,7 +296,7 @@ async function buildPrompt(
   if (type === 'issue') {
     const contexts = await invoke<{ number: number }[]>(
       'list_loaded_issue_contexts',
-      { sessionId: worktreeId }
+      { sessionId: worktreeId, worktreeId }
     )
     const refs = (contexts ?? []).map(c => `#${c.number}`).join(', ')
     const word = (contexts ?? []).length === 1 ? 'issue' : 'issues'
@@ -201,7 +313,9 @@ async function buildPrompt(
   if (type === 'pr') {
     const contexts = await invoke<{ number: number }[]>(
       'list_loaded_pr_contexts',
-      { sessionId: worktreeId }
+      // create_worktree stores refs under worktree_id; pass both so remote
+      // servers resolve context whether queried by session or worktree key.
+      { sessionId: worktreeId, worktreeId }
     )
     const refs = (contexts ?? []).map(c => `#${c.number}`).join(', ')
     const word = (contexts ?? []).length === 1 ? 'PR' : 'PRs'
@@ -267,6 +381,36 @@ async function buildPrompt(
       .replace(/\{linearContext\}/g, linearContext)
   }
 
+  if (type === 'sentry-issue') {
+    const contexts = await invoke<
+      {
+        id: string
+        shortId: string
+        title: string
+        permalink: string
+        content: string
+      }[]
+    >('get_sentry_issue_context_contents', {
+      sessionId: worktreeId,
+      worktreeId,
+      projectId: projectId ?? '',
+    })
+    const refs = contexts.map(context => context.shortId).join(', ')
+    const word = contexts.length === 1 ? 'issue' : 'issues'
+    const sentryContext = contexts
+      .map(context => context.content)
+      .join('\n\n---\n\n')
+    const customPrompt = preferences?.magic_prompts?.investigate_sentry_issue
+    const template =
+      customPrompt && customPrompt.trim()
+        ? customPrompt
+        : DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT
+    return template
+      .replace(/\{sentryWord\}/g, word)
+      .replace(/\{sentryRefs\}/g, refs)
+      .replace(/\{sentryContext\}/g, sentryContext)
+  }
+
   // advisory
   const contexts = await invoke<
     { ghsaId: string; severity: string; summary: string }[]
@@ -316,6 +460,12 @@ const investigationConfig = {
     effortKey: 'investigate_linear_issue_effort',
     modeKey: 'investigate_linear_issue_mode',
   },
+  'sentry-issue': {
+    modelKey: 'investigate_sentry_issue_model',
+    providerKey: 'investigate_sentry_issue_provider',
+    effortKey: 'investigate_sentry_issue_effort',
+    modeKey: 'investigate_sentry_issue_mode',
+  },
 } as const satisfies Record<
   InvestigationType,
   {
@@ -346,7 +496,11 @@ async function processBackgroundInvestigation(
   queryClient: ReturnType<typeof useQueryClient>
 ): Promise<void> {
   const worktreePath = useChatStore.getState().worktreePaths[worktreeId]
-  if (!worktreePath) return
+  if (!worktreePath) {
+    // Throw so the caller keeps the auto-investigate flag and retries instead
+    // of treating a missing path as success and consuming the flag.
+    throw new Error(`Worktree path not registered for ${worktreeId}`)
+  }
 
   logger.info('Starting background investigation', { worktreeId, type })
 
@@ -357,9 +511,6 @@ async function processBackgroundInvestigation(
     worktreeId,
   ])
   const projectId = cachedWorktree?.project_id
-
-  // Build the investigation prompt
-  const prompt = await buildPrompt(worktreeId, type, preferences, projectId)
 
   // Resolve model, provider, backend
   const { modelKey, providerKey, effortKey, modeKey } =
@@ -395,6 +546,12 @@ async function processBackgroundInvestigation(
   const executionMode =
     preferences?.magic_prompt_modes?.[modeKey] ??
     DEFAULT_MAGIC_PROMPT_MODES[modeKey]
+
+  // Build the investigation prompt (append fix directive when mode is yolo)
+  const prompt = applyYoloInvestigationFixDirective(
+    await buildPrompt(worktreeId, type, preferences, projectId),
+    executionMode
+  )
 
   const result = await invoke<{
     sessionId: string

@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { hasBackend } from '@/lib/environment'
+import { hasBackendTransport } from '@/lib/environment'
 import { invoke, listen, useWsConnectionStatus } from '@/lib/transport'
 import { logger } from '@/lib/logger'
 import type {
@@ -14,7 +14,7 @@ import type {
   CodeRabbitReleaseInfo,
 } from '@/types/coderabbit-cli'
 
-const isTauri = hasBackend
+const isTauri = hasBackendTransport
 
 export const coderabbitCliQueryKeys = {
   all: ['coderabbit-cli'] as const,
@@ -197,6 +197,10 @@ export function useCodeRabbitInstallProgress(): [
   return [progress, resetProgress]
 }
 
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_coderabbit_cli_version_exists', { version })
+}
+
 export function useCodeRabbitCliSetup() {
   const status = useCodeRabbitCliStatus()
   const versions = useAvailableCodeRabbitVersions()
@@ -230,8 +234,6 @@ export function useCodeRabbitCliSetup() {
     })
   }
 
-  const checkManualVersion = (version: string) =>
-    invoke<boolean>('check_coderabbit_cli_version_exists', { version })
 
   return {
     status: status.data,

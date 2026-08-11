@@ -150,6 +150,8 @@ describe('PreferencesDialog', () => {
       'PIBeta',
       'Command CodeBeta',
       'GrokBeta',
+      'Kimi CodeBeta',
+      'Antigravity CLIBeta',
       'GitHub CLI',
       'CodeRabbit CLI',
       'Terminal',
@@ -162,9 +164,22 @@ describe('PreferencesDialog', () => {
       'Usage',
       'Experimental',
     ])
+    // Separators appear between sections (not before the first "App" section)
     expect(
       navigationMenu.querySelectorAll('[data-sidebar="separator"]')
     ).toHaveLength(5)
+    expect(
+      Array.from(
+        navigationMenu.querySelectorAll('[data-sidebar="group-label"]')
+      ).map(label => label.textContent)
+    ).toEqual([
+      'App',
+      'Backends',
+      'Tools',
+      'Connectivity',
+      'Account',
+      'Advanced',
+    ])
 
     for (const label of ['PI', 'Command Code']) {
       const button = within(navigationMenu).getByText(label).closest('button')
@@ -182,8 +197,17 @@ describe('PreferencesDialog', () => {
       throw new Error('Expected Grok navigation button to be rendered')
     }
 
-    expect(within(grokButton).getByText('Beta')).toHaveClass(
-      'bg-yellow-500/10'
+    expect(within(grokButton).getByText('Beta')).toHaveClass('bg-yellow-500/10')
+
+    const kimiButton = within(navigationMenu)
+      .getByText('Kimi Code')
+      .closest('button')
+    if (!kimiButton) {
+      throw new Error('Expected Kimi Code navigation button to be rendered')
+    }
+
+    expect(within(kimiButton).getByLabelText('Kimi Code')).toHaveClass(
+      'translate-x-0.5'
     )
   })
 

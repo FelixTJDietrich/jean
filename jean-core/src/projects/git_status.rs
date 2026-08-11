@@ -1,0 +1,1453 @@
+use crate::platform::wsl_aware_command;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
+
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Information about a worktree for polling
+#[derive(Debug, Clone)]
+pub struct ActiveWorktreeInfo {
+    pub worktree_id: String,
+    pub worktree_path: String,
+    pub base_branch: String,
+    /// Remote the base branch lives on when it was explicitly picked
+    /// (e.g. "fork"); None means the historical origin-based comparison.
+    pub base_remote: Option<String>,
+    /// GitHub PR number (if a PR has been created)
+    pub pr_number: Option<u32>,
+    /// GitHub PR URL (if a PR has been created)
+    pub pr_url: Option<String>,
+    /// Remote most recently pushed to for the PR (e.g., "origin" or "<fork_owner>")
+    pub pr_push_remote: Option<String>,
+    /// Branch name on `pr_push_remote` most recently pushed to
+    pub pr_push_branch: Option<String>,
+}
+
+/// Git branch status relative to a base branch
+#[derive(Debug, Clone, Serialize)]
+pub struct GitBranchStatus {
+    pub worktree_id: String,
+    pub current_branch: String,
+    pub base_branch: String,
+    /// Remote the base branch was compared against, when not origin
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_remote: Option<String>,
+    pub behind_count: u32,
+    pub ahead_count: u32,
+    pub has_updates: bool,
+    pub checked_at: u64,
+    /// Lines added in uncommitted changes (working directory)
+    pub uncommitted_added: u32,
+    /// Lines removed in uncommitted changes (working directory)
+    pub uncommitted_removed: u32,
+    /// Lines added compared to base branch (origin/main)
+    pub branch_diff_added: u32,
+    /// Lines removed compared to base branch (origin/main)
+    pub branch_diff_removed: u32,
+    /// Commits the local base branch is ahead of origin (unpushed on base)
+    pub base_branch_ahead_count: u32,
+    /// Commits the local base branch is behind origin
+    pub base_branch_behind_count: u32,
+    /// Commits unique to this worktree (ahead of local base branch, not origin)
+    pub worktree_ahead_count: u32,
+    /// Commits in HEAD not yet pushed to origin/{current_branch}
+    pub unpushed_count: u32,
+}
+
+/// Fetch the latest changes from origin for a specific branch
+fn fetch_origin_branch(repo_path: &str, branch: &str) -> Result<(), String> {
+    log::trace!("Fetching origin/{branch} in {repo_path}");
+
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["fetch", "origin", branch])
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't fail if no remote - just log and continue
+        if stderr.contains("does not appear to be a git repository")
+            || stderr.contains("Could not read from remote")
+            || stderr.contains("'origin' does not appear to be a git repository")
+            || stderr.contains("couldn't find remote ref")
+        {
+            log::trace!("No remote origin/{branch} available: {stderr}");
+            return Ok(());
+        }
+        log::warn!("Failed to fetch origin/{branch}: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Fetch a branch from a specific remote (not necessarily origin)
+fn fetch_origin_branch_from_remote(
+    repo_path: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<(), String> {
+    log::trace!("Fetching {remote}/{branch} in {repo_path}");
+
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["fetch", remote, branch])
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("does not appear to be a git repository")
+            || stderr.contains("Could not read from remote")
+            || stderr.contains("couldn't find remote ref")
+        {
+            log::trace!("No remote {remote}/{branch} available: {stderr}");
+            return Ok(());
+        }
+        log::warn!("Failed to fetch {remote}/{branch}: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Get the upstream tracking ref for the current branch (e.g., "origin/main", "fork/feature")
+/// Returns None if no upstream is configured.
+fn get_upstream_ref(repo_path: &str) -> Option<String> {
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if upstream.is_empty() {
+            None
+        } else {
+            Some(upstream)
+        }
+    } else {
+        None
+    }
+}
+
+/// Get the current branch name
+/// Uses symbolic-ref first (works on repos with no commits), falls back to rev-parse
+fn get_current_branch(repo_path: &str) -> Result<String, String> {
+    // Try symbolic-ref first — works even on empty repos (no commits yet)
+    let sym_output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .output();
+
+    if let Ok(ref o) = sym_output {
+        if o.status.success() {
+            let branch = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !branch.is_empty() {
+                return Ok(branch);
+            }
+        }
+    }
+
+    // Fall back to rev-parse (works when HEAD is detached)
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|e| format!("Failed to run git command: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to get current branch: {stderr}"));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(branch)
+}
+
+/// Get the number of lines added and removed in uncommitted changes (working directory)
+/// This includes tracked file modifications (staged + unstaged) AND untracked (new) files
+fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
+    let mut added = 0u32;
+    let mut removed = 0u32;
+
+    // 1. Get diff stats for unstaged changes (working directory vs index)
+    // git diff --numstat outputs: "added<tab>removed<tab>filename" per line
+    let unstaged_output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["diff", "--numstat"])
+        .output();
+
+    if let Ok(o) = unstaged_output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 {
+                    // Binary files show "-" instead of numbers
+                    added += parts[0].parse().unwrap_or(0);
+                    removed += parts[1].parse().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    // 2. Get diff stats for staged changes (index vs HEAD)
+    // git diff --cached --numstat shows changes that have been `git add`ed
+    let staged_output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["diff", "--cached", "--numstat"])
+        .output();
+
+    if let Ok(o) = staged_output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 {
+                    // Binary files show "-" instead of numbers
+                    added += parts[0].parse().unwrap_or(0);
+                    removed += parts[1].parse().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    // 3. Get stats for untracked (new) files
+    // List all untracked files (raw UTF-8 paths — see GIT_NO_QUOTE_PATH_ARGS / #631)
+    let untracked_output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(GIT_NO_QUOTE_PATH_ARGS)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output();
+
+    if let Ok(o) = untracked_output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for file_path in stdout.lines() {
+                if file_path.is_empty() {
+                    continue;
+                }
+                // Count lines in each untracked file (all lines are "added")
+                let full_path = Path::new(repo_path).join(file_path);
+                if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    // Count lines, but minimum 1 for file existence (even if empty)
+                    let line_count = content.lines().count() as u32;
+                    added += line_count.max(1);
+                } else {
+                    // Binary file or read error - count as 1 addition
+                    added += 1;
+                }
+            }
+        }
+    }
+
+    (added, removed)
+}
+
+/// Generate raw patch format for untracked files
+/// Returns a string in unified diff format
+fn get_untracked_files_raw_patch(repo_path: &str) -> String {
+    let mut raw_patch = String::new();
+
+    // List all untracked files (raw UTF-8 paths — see GIT_NO_QUOTE_PATH_ARGS / #631)
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(GIT_NO_QUOTE_PATH_ARGS)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output();
+
+    let Ok(o) = output else {
+        return raw_patch;
+    };
+
+    if !o.status.success() {
+        return raw_patch;
+    }
+
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    for file_path in stdout.lines() {
+        if file_path.is_empty() {
+            continue;
+        }
+
+        let full_path = Path::new(repo_path).join(file_path);
+
+        // Try to read file content
+        if let Ok(content) = std::fs::read_to_string(&full_path) {
+            let lines: Vec<&str> = content.lines().collect();
+            let line_count = lines.len();
+
+            // Generate unified diff format for new file
+            raw_patch.push_str(&format!("diff --git a/{file_path} b/{file_path}\n"));
+            raw_patch.push_str("new file mode 100644\n");
+            raw_patch.push_str("--- /dev/null\n");
+            raw_patch.push_str(&format!("+++ b/{file_path}\n"));
+            raw_patch.push_str(&format!("@@ -0,0 +1,{line_count} @@\n"));
+
+            for line in &lines {
+                raw_patch.push('+');
+                raw_patch.push_str(line);
+                raw_patch.push('\n');
+            }
+        }
+    }
+
+    raw_patch
+}
+
+/// Get detailed diff information for untracked (new) files
+/// Returns a Vec of DiffFile entries for each untracked file
+fn get_untracked_files_diff(repo_path: &str) -> Vec<DiffFile> {
+    let mut untracked_files: Vec<DiffFile> = Vec::new();
+
+    // List all untracked files (raw UTF-8 paths — see GIT_NO_QUOTE_PATH_ARGS / #631)
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(GIT_NO_QUOTE_PATH_ARGS)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output();
+
+    let Ok(o) = output else {
+        return untracked_files;
+    };
+
+    if !o.status.success() {
+        return untracked_files;
+    }
+
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    for file_path in stdout.lines() {
+        if file_path.is_empty() {
+            continue;
+        }
+
+        let full_path = Path::new(repo_path).join(file_path);
+
+        // Try to read file content
+        match std::fs::read_to_string(&full_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let line_count = lines.len() as u32;
+
+                // Create diff lines (all additions)
+                let diff_lines: Vec<DiffLine> = lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| DiffLine {
+                        line_type: "addition".to_string(),
+                        content: (*line).to_string(),
+                        old_line_number: None,
+                        new_line_number: Some((i + 1) as u32),
+                    })
+                    .collect();
+
+                // Create a single hunk containing all lines
+                let hunk = DiffHunk {
+                    header: format!("@@ -0,0 +1,{line_count} @@"),
+                    old_start: 0,
+                    old_lines: 0,
+                    new_start: 1,
+                    new_lines: line_count,
+                    lines: diff_lines,
+                };
+
+                untracked_files.push(DiffFile {
+                    path: file_path.to_string(),
+                    old_path: None,
+                    status: "untracked".to_string(),
+                    additions: line_count,
+                    deletions: 0,
+                    is_binary: false,
+                    hunks: vec![hunk],
+                });
+            }
+            Err(_) => {
+                // Binary file or read error - mark as binary untracked
+                untracked_files.push(DiffFile {
+                    path: file_path.to_string(),
+                    old_path: None,
+                    status: "untracked".to_string(),
+                    additions: 0,
+                    deletions: 0,
+                    is_binary: true,
+                    hunks: Vec::new(),
+                });
+            }
+        }
+    }
+
+    untracked_files
+}
+
+/// Remote-qualified ref for a base branch, defaulting to origin.
+///
+/// A worktree started from another remote (e.g. `fork/main`) must be compared
+/// against that remote, otherwise every commit the remote is ahead of origin
+/// shows up as the worktree's own work.
+pub fn base_ref(base_remote: Option<&str>, base_branch: &str) -> String {
+    format!("{}/{base_branch}", base_remote.unwrap_or("origin"))
+}
+
+/// Get the number of lines added and removed compared to the base branch
+fn get_branch_diff_stats(
+    repo_path: &str,
+    base_branch: &str,
+    base_remote: Option<&str>,
+) -> (u32, u32) {
+    // git diff --numstat <remote>/main...HEAD shows changes in current branch vs base
+    let origin_ref = base_ref(base_remote, base_branch);
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["diff", "--numstat", &format!("{origin_ref}...HEAD")])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let mut added = 0u32;
+            let mut removed = 0u32;
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 {
+                    // Binary files show "-" instead of numbers
+                    added += parts[0].parse().unwrap_or(0);
+                    removed += parts[1].parse().unwrap_or(0);
+                }
+            }
+            (added, removed)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Check if a git ref exists
+fn ref_exists(repo_path: &str, git_ref: &str) -> bool {
+    wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-parse", "--verify", "--quiet", git_ref])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Count commits between two refs
+/// Returns 0 if either ref doesn't exist
+fn count_commits_between(repo_path: &str, from_ref: &str, to_ref: &str) -> u32 {
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-list", "--count", &format!("{from_ref}..{to_ref}")])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+// ============================================================================
+// Git Diff Types and Parsing
+// ============================================================================
+
+/// A single line in a diff hunk
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffLine {
+    /// Line type: "context", "addition", "deletion"
+    pub line_type: String,
+    /// The actual content (without +/- prefix)
+    pub content: String,
+    /// Old line number (None for additions)
+    pub old_line_number: Option<u32>,
+    /// New line number (None for deletions)
+    pub new_line_number: Option<u32>,
+}
+
+/// A single hunk in a diff
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffHunk {
+    /// Header line (e.g., "@@ -1,5 +1,7 @@")
+    pub header: String,
+    /// Old file starting line
+    pub old_start: u32,
+    /// Old file line count
+    pub old_lines: u32,
+    /// New file starting line
+    pub new_start: u32,
+    /// New file line count
+    pub new_lines: u32,
+    /// Lines in this hunk
+    pub lines: Vec<DiffLine>,
+}
+
+/// A single file in a diff
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffFile {
+    /// File path relative to repo root
+    pub path: String,
+    /// Previous file path (for renames)
+    pub old_path: Option<String>,
+    /// File status: "added", "modified", "deleted", "renamed"
+    pub status: String,
+    /// Lines added
+    pub additions: u32,
+    /// Lines removed
+    pub deletions: u32,
+    /// Whether this is a binary file
+    pub is_binary: bool,
+    /// The actual diff hunks
+    pub hunks: Vec<DiffHunk>,
+}
+
+/// Complete diff response
+#[derive(Debug, Clone, Serialize)]
+pub struct GitDiff {
+    /// Type of diff: "uncommitted" or "branch"
+    pub diff_type: String,
+    /// Base ref (e.g., "origin/main" or "HEAD")
+    pub base_ref: String,
+    /// Target ref (e.g., "HEAD" or "working directory")
+    pub target_ref: String,
+    /// Total lines added
+    pub total_additions: u32,
+    /// Total lines removed
+    pub total_deletions: u32,
+    /// Files changed
+    pub files: Vec<DiffFile>,
+    /// Raw unified diff patch output (for rendering with external libraries)
+    pub raw_patch: String,
+}
+
+/// Git `-c` args that force raw UTF-8 paths instead of C-quoted octal escapes.
+///
+/// With the default `core.quotePath=true`, paths containing bytes ≥ 0x80 are emitted
+/// as `"a/\346\227\245..."` which breaks `@pierre/diffs` (frontend) and our own
+/// `parse_unified_diff` header parser. Command-line `-c` overrides any user/global
+/// config. See issue #631.
+pub const GIT_NO_QUOTE_PATH_ARGS: &[&str] = &["-c", "core.quotePath=false"];
+
+/// Decode a git C-style escaped string (content between the surrounding quotes).
+/// Handles `\\`, `\"`, `\n`, `\t`, `\r`, and octal byte escapes like `\346` (UTF-8).
+fn unescape_git_c_style(escaped: &str) -> String {
+    let bytes = escaped.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                }
+                b'r' => {
+                    out.push(b'\r');
+                    i += 2;
+                }
+                b'a' => {
+                    out.push(0x07);
+                    i += 2;
+                }
+                b'b' => {
+                    out.push(0x08);
+                    i += 2;
+                }
+                b'f' => {
+                    out.push(0x0c);
+                    i += 2;
+                }
+                b'v' => {
+                    out.push(0x0b);
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                d0 if (b'0'..=b'7').contains(&d0) => {
+                    let mut val: u8 = d0 - b'0';
+                    i += 2;
+                    let mut count = 1;
+                    while count < 3 && i < bytes.len() && (b'0'..=b'7').contains(&bytes[i]) {
+                        val = val.wrapping_mul(8).wrapping_add(bytes[i] - b'0');
+                        i += 1;
+                        count += 1;
+                    }
+                    out.push(val);
+                }
+                other => {
+                    out.push(other);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Unquote a git path token: strips surrounding double-quotes and C-unescapes,
+/// or returns the token as-is when unquoted.
+fn unquote_git_path(token: &str) -> String {
+    let token = token.trim();
+    if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
+        unescape_git_c_style(&token[1..token.len() - 1])
+    } else {
+        token.to_string()
+    }
+}
+
+/// Strip a leading `a/` or `b/` prefix from a diff path (after unquoting).
+fn strip_diff_ab_prefix(path: &str) -> &str {
+    path.strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path)
+}
+
+/// Extract a C-quoted token (`"..."` with escapes) from the start of `s`.
+/// Returns `(token_including_quotes, remainder)`.
+fn take_quoted_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if !s.starts_with('"') {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            // Skip the escaped sequence. Octal escapes are 1–3 digits.
+            if (b'0'..=b'7').contains(&bytes[i]) {
+                let mut count = 0;
+                while count < 3 && i < bytes.len() && (b'0'..=b'7').contains(&bytes[i]) {
+                    i += 1;
+                    count += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return Some((&s[..=i], &s[i + 1..]));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse `diff --git a/<old> b/<new>` into the new-side path (without `a/`/`b/`).
+///
+/// Handles:
+/// - C-quoted paths from `core.quotePath=true` (octal-escaped non-ASCII)
+/// - Unquoted paths that contain spaces (`a/file with spaces.txt b/file with spaces.txt`)
+/// - Renames where old and new paths differ
+fn parse_diff_git_new_path(line: &str) -> String {
+    let rest = line.strip_prefix("diff --git ").unwrap_or(line).trim();
+
+    // Quoted form: diff --git "a/..." "b/..."
+    if rest.starts_with('"') {
+        if let Some((a_tok, after_a)) = take_quoted_token(rest) {
+            if let Some((b_tok, _)) = take_quoted_token(after_a.trim_start()) {
+                let b = unquote_git_path(b_tok);
+                return strip_diff_ab_prefix(&b).to_string();
+            }
+            // Only one quoted token — fall back to a-side
+            let a = unquote_git_path(a_tok);
+            return strip_diff_ab_prefix(&a).to_string();
+        }
+    }
+
+    // Unquoted form: `a/<path> b/<path>` where path may contain spaces.
+    // Prefer an equal-path split (common for modifications).
+    if let Some(after_a) = rest.strip_prefix("a/") {
+        let mut search_at = 0;
+        while let Some(rel) = after_a[search_at..].find(" b/") {
+            let idx = search_at + rel;
+            let a_path = &after_a[..idx];
+            let b_path = &after_a[idx + 3..];
+            if a_path == b_path {
+                return a_path.to_string();
+            }
+            search_at = idx + 1;
+        }
+        // Rename / different paths: first " b/" is the separator (best-effort).
+        if let Some(idx) = after_a.find(" b/") {
+            return after_a[idx + 3..].to_string();
+        }
+        return after_a.to_string();
+    }
+
+    // Legacy fallback for unexpected shapes
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() >= 2 {
+        strip_diff_ab_prefix(parts[parts.len() - 1]).to_string()
+    } else if parts.len() == 1 {
+        strip_diff_ab_prefix(parts[0]).to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Parse a hunk header like "@@ -1,5 +1,7 @@" or "@@ -0,0 +1,10 @@"
+fn parse_hunk_header(header: &str) -> Option<(u32, u32, u32, u32)> {
+    // Format: @@ -old_start,old_lines +new_start,new_lines @@
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let old_part = parts[1].trim_start_matches('-');
+    let new_part = parts[2].trim_start_matches('+');
+
+    let parse_range = |s: &str| -> (u32, u32) {
+        if let Some((start, count)) = s.split_once(',') {
+            (start.parse().unwrap_or(0), count.parse().unwrap_or(0))
+        } else {
+            (s.parse().unwrap_or(0), 1)
+        }
+    };
+
+    let (old_start, old_lines) = parse_range(old_part);
+    let (new_start, new_lines) = parse_range(new_part);
+
+    Some((old_start, old_lines, new_start, new_lines))
+}
+
+/// Parse raw unified diff output into structured DiffFile entries and the raw patch string.
+///
+/// Shared by `get_git_diff` and `get_commit_diff` so the 150-line parser isn't duplicated.
+pub fn parse_unified_diff(raw_output: &str) -> (Vec<DiffFile>, String) {
+    let mut files: Vec<DiffFile> = Vec::new();
+    let mut current_file: Option<DiffFile> = None;
+    let mut current_hunk: Option<DiffHunk> = None;
+    let mut old_line_num: u32 = 0;
+    let mut new_line_num: u32 = 0;
+
+    for line in raw_output.lines() {
+        if line.starts_with("diff --git") {
+            // Save previous hunk and file
+            if let Some(hunk) = current_hunk.take() {
+                if let Some(ref mut file) = current_file {
+                    file.hunks.push(hunk);
+                }
+            }
+            if let Some(file) = current_file.take() {
+                files.push(file);
+            }
+
+            // Parse file paths from "diff --git a/path b/path" (quoted or unquoted)
+            let path = parse_diff_git_new_path(line);
+
+            current_file = Some(DiffFile {
+                path,
+                old_path: None,
+                status: "modified".to_string(),
+                additions: 0,
+                deletions: 0,
+                is_binary: false,
+                hunks: Vec::new(),
+            });
+        } else if line.starts_with("new file mode") {
+            if let Some(ref mut file) = current_file {
+                file.status = "added".to_string();
+            }
+        } else if line.starts_with("deleted file mode") {
+            if let Some(ref mut file) = current_file {
+                file.status = "deleted".to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("rename from ") {
+            if let Some(ref mut file) = current_file {
+                file.old_path = Some(unquote_git_path(rest));
+                file.status = "renamed".to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            if let Some(ref mut file) = current_file {
+                file.path = unquote_git_path(rest);
+            }
+        } else if line.starts_with("Binary files") {
+            if let Some(ref mut file) = current_file {
+                file.is_binary = true;
+            }
+        } else if line.starts_with("@@") {
+            // Save previous hunk
+            if let Some(hunk) = current_hunk.take() {
+                if let Some(ref mut file) = current_file {
+                    file.hunks.push(hunk);
+                }
+            }
+
+            // Parse hunk header
+            if let Some((old_start, old_lines, new_start, new_lines)) = parse_hunk_header(line) {
+                old_line_num = old_start;
+                new_line_num = new_start;
+                current_hunk = Some(DiffHunk {
+                    header: line.to_string(),
+                    old_start,
+                    old_lines,
+                    new_start,
+                    new_lines,
+                    lines: Vec::new(),
+                });
+            }
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            if let Some(ref mut hunk) = current_hunk {
+                hunk.lines.push(DiffLine {
+                    line_type: "addition".to_string(),
+                    content: line[1..].to_string(),
+                    old_line_number: None,
+                    new_line_number: Some(new_line_num),
+                });
+                new_line_num += 1;
+                if let Some(ref mut file) = current_file {
+                    file.additions += 1;
+                }
+            }
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            if let Some(ref mut hunk) = current_hunk {
+                hunk.lines.push(DiffLine {
+                    line_type: "deletion".to_string(),
+                    content: line[1..].to_string(),
+                    old_line_number: Some(old_line_num),
+                    new_line_number: None,
+                });
+                old_line_num += 1;
+                if let Some(ref mut file) = current_file {
+                    file.deletions += 1;
+                }
+            }
+        } else if let Some(stripped) = line.strip_prefix(' ') {
+            if let Some(ref mut hunk) = current_hunk {
+                hunk.lines.push(DiffLine {
+                    line_type: "context".to_string(),
+                    content: stripped.to_string(),
+                    old_line_number: Some(old_line_num),
+                    new_line_number: Some(new_line_num),
+                });
+                old_line_num += 1;
+                new_line_num += 1;
+            }
+        }
+        // Skip other lines (---, +++, index, etc.)
+    }
+
+    // Save final hunk and file
+    if let Some(hunk) = current_hunk.take() {
+        if let Some(ref mut file) = current_file {
+            file.hunks.push(hunk);
+        }
+    }
+    if let Some(file) = current_file.take() {
+        files.push(file);
+    }
+
+    (files, raw_output.to_string())
+}
+
+/// Get detailed diff content for a repository
+///
+/// `diff_type` can be "uncommitted" (working directory vs HEAD) or "branch" (HEAD vs base branch)
+pub fn get_git_diff(
+    repo_path: &str,
+    diff_type: &str,
+    base_branch: Option<&str>,
+    base_remote: Option<&str>,
+) -> Result<GitDiff, String> {
+    let base = base_branch.unwrap_or("main");
+    let qualified_base = base_ref(base_remote, base);
+    let range = format!("{qualified_base}...HEAD");
+    let has_head = has_head_commit(repo_path);
+
+    let (base_ref, target_ref, args): (String, String, Vec<&str>) = match diff_type {
+        "uncommitted" => {
+            let base_ref = if has_head { "HEAD" } else { "empty tree" };
+            let diff_base = if has_head { "HEAD" } else { EMPTY_TREE_HASH };
+            (
+                base_ref.to_string(),
+                "working directory".to_string(),
+                vec!["diff", diff_base, "--unified=3"],
+            )
+        }
+        "branch" => (
+            qualified_base.clone(),
+            "HEAD".to_string(),
+            vec!["diff", "--unified=3", &range],
+        ),
+        _ => return Err(format!("Invalid diff_type: {diff_type}")),
+    };
+
+    // Emit raw UTF-8 paths so frontend patch parsers and parse_unified_diff work
+    // with non-ASCII file names (issue #631).
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(GIT_NO_QUOTE_PATH_ARGS)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git diff: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Git diff failed: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (mut files, raw_patch_base) = parse_unified_diff(&stdout);
+
+    // Build raw patch - start with git diff output
+    let mut raw_patch = raw_patch_base;
+
+    // For uncommitted diffs, also include untracked (new) files
+    if diff_type == "uncommitted" {
+        let untracked_files = get_untracked_files_diff(repo_path);
+        files.extend(untracked_files);
+
+        // Add raw patch for untracked files
+        let untracked_patch = get_untracked_files_raw_patch(repo_path);
+        if !untracked_patch.is_empty() {
+            raw_patch.push_str(&untracked_patch);
+        }
+    }
+
+    // Calculate totals
+    let total_additions: u32 = files.iter().map(|f| f.additions).sum();
+    let total_deletions: u32 = files.iter().map(|f| f.deletions).sum();
+
+    Ok(GitDiff {
+        diff_type: diff_type.to_string(),
+        base_ref,
+        target_ref,
+        total_additions,
+        total_deletions,
+        files,
+        raw_patch,
+    })
+}
+
+fn has_head_commit(repo_path: &str) -> bool {
+    wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// Branch Status
+// ============================================================================
+
+/// Get the branch status for a worktree compared to its base branch
+///
+/// This fetches the latest from origin and compares the current HEAD
+/// to origin/{base_branch} to determine ahead/behind counts.
+pub fn get_branch_status(info: &ActiveWorktreeInfo) -> Result<GitBranchStatus, String> {
+    let repo_path = &info.worktree_path;
+    let base_branch = &info.base_branch;
+    let base_remote = info.base_remote.as_deref();
+
+    // Fetch the latest base branch from the remote it belongs to
+    // This is best-effort; if it fails, we'll compare with stale data
+    let _ = match base_remote {
+        Some(remote) => fetch_origin_branch_from_remote(repo_path, remote, base_branch),
+        None => fetch_origin_branch(repo_path, base_branch),
+    };
+
+    // Get current branch name
+    let current_branch = get_current_branch(repo_path)?;
+
+    // Compare HEAD to <remote>/{base_branch}
+    let origin_ref = base_ref(base_remote, base_branch);
+
+    // Commits we're behind (commits in origin/base that aren't in HEAD)
+    let behind_count = count_commits_between(repo_path, "HEAD", &origin_ref);
+
+    // Commits we're ahead (commits in HEAD that aren't in origin/base)
+    let ahead_count = count_commits_between(repo_path, &origin_ref, "HEAD");
+
+    // Get uncommitted diff stats (working directory changes)
+    let (uncommitted_added, uncommitted_removed) = get_uncommitted_diff_stats(repo_path);
+
+    // Get branch diff stats (changes compared to base branch)
+    let (branch_diff_added, branch_diff_removed) =
+        get_branch_diff_stats(repo_path, base_branch, base_remote);
+
+    // Base branch's own remote sync status
+    // Compare local base branch to origin/base_branch
+    let base_branch_ahead_count = count_commits_between(repo_path, &origin_ref, base_branch);
+    let base_branch_behind_count = count_commits_between(repo_path, base_branch, &origin_ref);
+
+    // Commits unique to this worktree. Explicit remote bases must use their
+    // qualified ref so the remote's own commits are not counted as worktree work.
+    let worktree_base_ref = if base_remote.is_some() {
+        &origin_ref
+    } else {
+        base_branch
+    };
+    let worktree_ahead_count = count_commits_between(repo_path, worktree_base_ref, "HEAD");
+
+    // Commits not yet pushed to the upstream tracking ref
+    // Prefers the remembered PR push target (supports fork PRs where @{upstream} points
+    // at origin but commits live on a fork remote). Falls back to @{upstream}, then
+    // origin/{current_branch}.
+    let unpushed_count = if current_branch != *base_branch {
+        if let (Some(remote), Some(branch)) = (&info.pr_push_remote, &info.pr_push_branch) {
+            if remote == "origin" {
+                let _ = fetch_origin_branch(repo_path, branch);
+            } else {
+                let _ = fetch_origin_branch_from_remote(repo_path, remote, branch);
+            }
+            let push_ref = format!("{remote}/{branch}");
+            if ref_exists(repo_path, &push_ref) {
+                count_commits_between(repo_path, &push_ref, "HEAD")
+            } else {
+                worktree_ahead_count
+            }
+        } else {
+            let upstream_ref = get_upstream_ref(repo_path);
+
+            if let Some(ref upstream) = upstream_ref {
+                // Fetch the remote for the upstream ref (e.g., "fork" from "fork/branch")
+                if let Some(remote) = upstream.split('/').next() {
+                    if remote != "origin" {
+                        let _ = fetch_origin_branch_from_remote(repo_path, remote, &current_branch);
+                    } else {
+                        let _ = fetch_origin_branch(repo_path, &current_branch);
+                    }
+                }
+                count_commits_between(repo_path, upstream, "HEAD")
+            } else {
+                // No upstream configured — try origin/{current_branch}
+                let _ = fetch_origin_branch(repo_path, &current_branch);
+                let origin_current_ref = format!("origin/{current_branch}");
+                if ref_exists(repo_path, &origin_current_ref) {
+                    count_commits_between(repo_path, &origin_current_ref, "HEAD")
+                } else {
+                    // Never pushed — all worktree-unique commits are unpushed
+                    worktree_ahead_count
+                }
+            }
+        }
+    } else {
+        // On the base branch itself, unpushed = base_branch_ahead_count
+        base_branch_ahead_count
+    };
+
+    // Get current timestamp
+    let checked_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Ok(GitBranchStatus {
+        worktree_id: info.worktree_id.clone(),
+        current_branch,
+        base_branch: base_branch.clone(),
+        base_remote: info.base_remote.clone(),
+        behind_count,
+        ahead_count,
+        has_updates: behind_count > 0,
+        checked_at,
+        uncommitted_added,
+        uncommitted_removed,
+        branch_diff_added,
+        branch_diff_removed,
+        base_branch_ahead_count,
+        base_branch_behind_count,
+        worktree_ahead_count,
+        unpushed_count,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn run_test_git(repo: &Path, args: &[&str]) {
+        let output = wsl_aware_command("git", Some(repo))
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn base_ref_defaults_to_origin() {
+        assert_eq!(base_ref(None, "main"), "origin/main");
+    }
+
+    #[test]
+    fn base_ref_uses_the_picked_remote() {
+        // Without this, a worktree started from fork/main is compared against
+        // origin/main and every commit fork is ahead shows up as its own work.
+        assert_eq!(base_ref(Some("fork"), "main"), "fork/main");
+    }
+
+    #[test]
+    fn unpushed_fallback_uses_the_picked_remote_base() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run_test_git(repo, &["init", "--initial-branch", "main"]);
+        run_test_git(repo, &["config", "user.email", "test@example.com"]);
+        run_test_git(repo, &["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("file.txt"), "origin\n").expect("write initial file");
+        run_test_git(repo, &["add", "."]);
+        run_test_git(repo, &["commit", "-m", "origin base"]);
+        run_test_git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        run_test_git(repo, &["checkout", "-b", "fork-base"]);
+        std::fs::write(repo.join("file.txt"), "fork\n").expect("write fork file");
+        run_test_git(repo, &["commit", "-am", "fork base"]);
+        run_test_git(repo, &["update-ref", "refs/remotes/fork/main", "HEAD"]);
+
+        run_test_git(repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "feature\n").expect("write feature file");
+        run_test_git(repo, &["add", "."]);
+        run_test_git(repo, &["commit", "-m", "feature commit"]);
+
+        let status = get_branch_status(&ActiveWorktreeInfo {
+            worktree_id: "test-id".to_string(),
+            worktree_path: repo.to_string_lossy().into_owned(),
+            base_branch: "main".to_string(),
+            base_remote: Some("fork".to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_push_remote: None,
+            pr_push_branch: None,
+        })
+        .expect("branch status");
+
+        assert_eq!(status.worktree_ahead_count, 1);
+        assert_eq!(status.unpushed_count, 1);
+    }
+
+    #[test]
+    fn test_git_branch_status_serialization() {
+        let status = GitBranchStatus {
+            worktree_id: "test-id".to_string(),
+            current_branch: "feature/test".to_string(),
+            base_branch: "main".to_string(),
+            base_remote: None,
+            behind_count: 5,
+            ahead_count: 3,
+            has_updates: true,
+            checked_at: 1234567890,
+            uncommitted_added: 10,
+            uncommitted_removed: 5,
+            branch_diff_added: 150,
+            branch_diff_removed: 42,
+            base_branch_ahead_count: 2,
+            base_branch_behind_count: 0,
+            worktree_ahead_count: 3,
+            unpushed_count: 1,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"has_updates\":true"));
+        assert!(json.contains("\"behind_count\":5"));
+        assert!(json.contains("\"uncommitted_added\":10"));
+        assert!(json.contains("\"branch_diff_added\":150"));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_standard() {
+        // Standard hunk header
+        let result = parse_hunk_header("@@ -1,5 +1,7 @@");
+        assert_eq!(result, Some((1, 5, 1, 7)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_new_file() {
+        // New file (starts at 0,0)
+        let result = parse_hunk_header("@@ -0,0 +1,10 @@");
+        assert_eq!(result, Some((0, 0, 1, 10)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_single_line() {
+        // Single line (no comma, implicit count of 1)
+        let result = parse_hunk_header("@@ -1 +1 @@");
+        assert_eq!(result, Some((1, 1, 1, 1)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_with_function_context() {
+        // Header with function context
+        let result = parse_hunk_header("@@ -10,5 +10,7 @@ fn main() {");
+        assert_eq!(result, Some((10, 5, 10, 7)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_large_numbers() {
+        // Large line numbers
+        let result = parse_hunk_header("@@ -1000,50 +1005,55 @@");
+        assert_eq!(result, Some((1000, 50, 1005, 55)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_delete_file() {
+        // Deleted file (ends at 0,0)
+        let result = parse_hunk_header("@@ -1,10 +0,0 @@");
+        assert_eq!(result, Some((1, 10, 0, 0)));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_too_few_parts() {
+        // Invalid format - fewer than 3 whitespace-separated parts
+        assert_eq!(parse_hunk_header(""), None);
+        assert_eq!(parse_hunk_header("@@"), None);
+        assert_eq!(parse_hunk_header("@@ -1,5"), None);
+    }
+
+    #[test]
+    fn test_parse_hunk_header_mixed_single_and_range() {
+        // Mixed: one side single line, other side range
+        let result = parse_hunk_header("@@ -5 +5,3 @@");
+        assert_eq!(result, Some((5, 1, 5, 3)));
+
+        let result = parse_hunk_header("@@ -5,3 +5 @@");
+        assert_eq!(result, Some((5, 3, 5, 1)));
+    }
+
+    #[test]
+    fn test_diff_file_serialization() {
+        let file = DiffFile {
+            path: "src/main.rs".to_string(),
+            old_path: None,
+            status: "modified".to_string(),
+            additions: 10,
+            deletions: 5,
+            is_binary: false,
+            hunks: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains("\"path\":\"src/main.rs\""));
+        assert!(json.contains("\"status\":\"modified\""));
+        assert!(json.contains("\"additions\":10"));
+        assert!(json.contains("\"deletions\":5"));
+    }
+
+    #[test]
+    fn test_diff_file_with_rename() {
+        let file = DiffFile {
+            path: "src/new_name.rs".to_string(),
+            old_path: Some("src/old_name.rs".to_string()),
+            status: "renamed".to_string(),
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+            hunks: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains("\"old_path\":\"src/old_name.rs\""));
+        assert!(json.contains("\"status\":\"renamed\""));
+    }
+
+    #[test]
+    fn test_diff_line_serialization() {
+        let line = DiffLine {
+            line_type: "addition".to_string(),
+            content: "let x = 42;".to_string(),
+            old_line_number: None,
+            new_line_number: Some(10),
+        };
+
+        let json = serde_json::to_string(&line).unwrap();
+        assert!(json.contains("\"line_type\":\"addition\""));
+        assert!(json.contains("\"new_line_number\":10"));
+        assert!(json.contains("\"old_line_number\":null"));
+    }
+
+    #[test]
+    fn test_diff_hunk_serialization() {
+        let hunk = DiffHunk {
+            header: "@@ -1,5 +1,7 @@".to_string(),
+            old_start: 1,
+            old_lines: 5,
+            new_start: 1,
+            new_lines: 7,
+            lines: vec![
+                DiffLine {
+                    line_type: "context".to_string(),
+                    content: "fn main() {".to_string(),
+                    old_line_number: Some(1),
+                    new_line_number: Some(1),
+                },
+                DiffLine {
+                    line_type: "addition".to_string(),
+                    content: "    let x = 42;".to_string(),
+                    old_line_number: None,
+                    new_line_number: Some(2),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&hunk).unwrap();
+        assert!(json.contains("\"old_start\":1"));
+        assert!(json.contains("\"new_lines\":7"));
+    }
+
+    #[test]
+    fn uncommitted_diff_works_before_first_commit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run_test_git(repo, &["init"]);
+        std::fs::write(repo.join("hello.txt"), "hello\n").expect("write file");
+
+        let diff = get_git_diff(repo.to_str().unwrap(), "uncommitted", None, None)
+            .expect("fresh repo diff should work");
+
+        assert_eq!(diff.base_ref, "empty tree");
+        assert_eq!(diff.target_ref, "working directory");
+        assert_eq!(diff.total_additions, 1);
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "hello.txt");
+        assert!(diff
+            .raw_patch
+            .contains("diff --git a/hello.txt b/hello.txt"));
+    }
+
+    #[test]
+    fn unescape_git_c_style_decodes_octal_utf8() {
+        // "日本語" in UTF-8 as git octal escapes
+        let escaped = r"\346\227\245\346\234\254\350\252\236.md";
+        assert_eq!(unescape_git_c_style(escaped), "日本語.md");
+    }
+
+    #[test]
+    fn unquote_git_path_handles_quoted_and_plain() {
+        // \346\227\245 is UTF-8 for 日
+        assert_eq!(unquote_git_path(r#""a/\346\227\245.md""#), "a/日.md");
+        assert_eq!(unquote_git_path("a/plain.txt"), "a/plain.txt");
+        assert_eq!(
+            unquote_git_path("\"path with \\\"quote\\\"\""),
+            "path with \"quote\""
+        );
+    }
+
+    #[test]
+    fn parse_diff_git_new_path_handles_quoted_non_ascii() {
+        let line = r#"diff --git "a/\346\227\245\346\234\254\350\252\236.md" "b/\346\227\245\346\234\254\350\252\236.md""#;
+        assert_eq!(parse_diff_git_new_path(line), "日本語.md");
+    }
+
+    #[test]
+    fn parse_diff_git_new_path_handles_spaces() {
+        let line = "diff --git a/file with spaces.txt b/file with spaces.txt";
+        assert_eq!(parse_diff_git_new_path(line), "file with spaces.txt");
+    }
+
+    #[test]
+    fn parse_diff_git_new_path_handles_simple_ascii() {
+        let line = "diff --git a/src/main.rs b/src/main.rs";
+        assert_eq!(parse_diff_git_new_path(line), "src/main.rs");
+    }
+
+    #[test]
+    fn parse_unified_diff_quoted_non_ascii_path() {
+        // Simulate default git core.quotePath=true output for a Japanese filename
+        let patch = concat!(
+            r#"diff --git "a/\346\227\245\346\234\254\350\252\236.md" "b/\346\227\245\346\234\254\350\252\236.md""#,
+            "\n",
+            "new file mode 100644\n",
+            "index 0000000..45b983b\n",
+            r#"--- /dev/null"#,
+            "\n",
+            r#"+++ "b/\346\227\245\346\234\254\350\252\236.md""#,
+            "\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n",
+        );
+        let (files, _) = parse_unified_diff(patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "日本語.md");
+        assert_eq!(files[0].status, "added");
+        assert_eq!(files[0].additions, 1);
+    }
+
+    #[test]
+    fn parse_unified_diff_path_with_spaces() {
+        let patch = concat!(
+            "diff --git a/file with spaces.txt b/file with spaces.txt\n",
+            "index 1234567..89abcde 100644\n",
+            "--- a/file with spaces.txt\n",
+            "+++ b/file with spaces.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+        );
+        let (files, _) = parse_unified_diff(patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "file with spaces.txt");
+        assert_eq!(files[0].additions, 1);
+        assert_eq!(files[0].deletions, 1);
+    }
+
+    #[test]
+    fn uncommitted_diff_handles_non_ascii_filename() {
+        // Regression for #631: default core.quotePath must not break diffs.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run_test_git(repo, &["init"]);
+        // Explicitly leave quotePath at default (true). Do not set it false.
+        run_test_git(repo, &["config", "core.quotePath", "true"]);
+        run_test_git(repo, &["config", "user.email", "test@example.com"]);
+        run_test_git(repo, &["config", "user.name", "Test"]);
+
+        let filename = "日本語ファイル名.md";
+        std::fs::write(repo.join(filename), "line one\n").expect("write non-ascii file");
+        run_test_git(repo, &["add", "."]);
+        run_test_git(repo, &["commit", "-m", "add japanese file"]);
+        std::fs::write(repo.join(filename), "line one\nline two\n").expect("modify file");
+
+        let diff = get_git_diff(repo.to_str().unwrap(), "uncommitted", None, None)
+            .expect("diff with non-ascii path should succeed");
+
+        assert_eq!(
+            diff.files.len(),
+            1,
+            "expected one changed file, got: {:?}",
+            diff.files
+        );
+        assert_eq!(diff.files[0].path, filename);
+        assert!(
+            diff.raw_patch.contains(filename),
+            "raw_patch should contain unquoted UTF-8 path, got:\n{}",
+            diff.raw_patch
+        );
+        assert!(
+            !diff.raw_patch.contains(r"\346"),
+            "raw_patch must not use octal-escaped paths:\n{}",
+            diff.raw_patch
+        );
+        assert!(diff.total_additions >= 1);
+    }
+
+    #[test]
+    fn uncommitted_diff_handles_untracked_non_ascii_filename() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run_test_git(repo, &["init"]);
+        run_test_git(repo, &["config", "core.quotePath", "true"]);
+
+        let filename = "日本語ファイル名.md";
+        std::fs::write(repo.join(filename), "new content\n").expect("write");
+
+        let diff = get_git_diff(repo.to_str().unwrap(), "uncommitted", None, None)
+            .expect("untracked non-ascii diff should work");
+
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, filename);
+        assert_eq!(diff.files[0].status, "untracked");
+        assert!(diff.raw_patch.contains(filename));
+    }
+}

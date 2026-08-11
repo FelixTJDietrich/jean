@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import type { CliType } from '@/lib/cli-update'
+import { mergeSeenFailedWorkflowRunIds } from '@/components/shared/workflow-run-utils'
 
 export type PreferencePane =
   | 'general'
@@ -11,6 +12,8 @@ export type PreferencePane =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
+  | 'antigravity'
   | 'github'
   | 'coderabbit'
   | 'appearance'
@@ -47,6 +50,7 @@ export type CliUpdateModalType =
   | 'coderabbit'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
   | null
 
 export interface PendingCliUpdate {
@@ -58,6 +62,14 @@ export interface PendingCliUpdate {
   packageManager?: string | null
 }
 
+/** Sticky jean-server update offer for remote / Web Access clients. */
+export interface PendingServerUpdate {
+  latestVersion: string
+  currentVersion: string
+  canUpdate: boolean
+  reason?: string | null
+}
+
 export type CliLoginModalType =
   | 'claude'
   | 'gh'
@@ -67,12 +79,20 @@ export type CliLoginModalType =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
+  | 'antigravity'
   | 'coderabbit'
   | null
 
 interface UIState {
   leftSidebarVisible: boolean
   leftSidebarSize: number // Width in pixels, persisted across sessions
+  /** File browser (worktree explorer) visibility */
+  fileBrowserVisible: boolean
+  /** File browser width in pixels, persisted across sessions */
+  fileBrowserSize: number
+  /** Absolute path of file open in the global FileContentModal (null = closed) */
+  viewingFilePath: string | null
   rightSidebarVisible: boolean
   commandPaletteOpen: boolean
   preferencesOpen: boolean
@@ -90,13 +110,26 @@ interface UIState {
   magicModalOpen: boolean
   resolveConflictsDialogOpen: boolean
   newWorktreeModalOpen: boolean
-  newWorktreeModalDefaultTab: 'quick' | 'issues' | 'prs' | 'security' | null
+  newWorktreeModalDefaultTab:
+    | 'quick'
+    | 'issues'
+    | 'prs'
+    | 'security'
+    | 'branches'
+    | 'linear'
+    | 'sentry'
+    | null
   releaseNotesModalOpen: boolean
   updatePrModalOpen: boolean
   reviewCommentsModalOpen: boolean
   workflowRunsModalOpen: boolean
   workflowRunsModalProjectPath: string | null
   workflowRunsModalBranch: string | null
+  /**
+   * GitHub Actions run database IDs already viewed by the user.
+   * Failed-workflow badges only count IDs not in this list.
+   */
+  seenFailedWorkflowRunIds: number[]
   cliUpdateModalOpen: boolean
   cliUpdateModalType: CliUpdateModalType
   cliLoginModalOpen: boolean
@@ -114,6 +147,8 @@ interface UIState {
   autoInvestigateAdvisoryWorktreeIds: Set<string>
   /** Worktree IDs that should auto-trigger investigate-linear-issue when created */
   autoInvestigateLinearIssueWorktreeIds: Set<string>
+  /** Worktree IDs that should auto-trigger Sentry issue investigation */
+  autoInvestigateSentryIssueWorktreeIds: Set<string>
   /** Counter for background worktree creations (CMD+Click) — skip auto-navigation */
   pendingBackgroundCreations: number
   /** Worktree IDs that should auto-open first session modal when canvas mounts */
@@ -125,6 +160,9 @@ interface UIState {
   /** Whether the chat toolbar is mounted — used to hide the global FloatingDock
    *  because its burger-menu counterpart now lives in the chat toolbar. */
   chatToolbarMounted: boolean
+  /** Whether the full-width review results surface is mounted — used to hide the
+   *  global FloatingDock so it does not overlap the review Send buttons. */
+  reviewSurfaceMounted: boolean
   /** Which worktree the session chat modal is for (for magic command worktree resolution) */
   sessionChatModalWorktreeId: string | null
   /** Per-session primary surface shown inside the chat bounds */
@@ -151,11 +189,27 @@ interface UIState {
   pendingUpdateVersion: string | null
   /** When non-null, shows the update available modal */
   updateModalVersion: string | null
+  /**
+   * App update package installed but not applied yet — title bar shows Restart.
+   * Prevents re-download loops while the old binary is still running (#507).
+   */
+  updateReadyVersion: string | null
+  /** True while downloadAndInstall is in progress */
+  isUpdateInstalling: boolean
+  /**
+   * Pending jean-server update (remote / Web Access) — sticky title-bar
+   * indicator so dismissing the toast does not lose the offer.
+   */
+  pendingServerUpdate: PendingServerUpdate | null
   /** CLI updates detected — shown as badge+popover in title bar */
   availableCliUpdates: PendingCliUpdate[]
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
   setLeftSidebarSize: (size: number) => void
+  toggleFileBrowser: () => void
+  setFileBrowserVisible: (visible: boolean) => void
+  setFileBrowserSize: (size: number) => void
+  setViewingFilePath: (path: string | null) => void
   toggleRightSidebar: () => void
   setRightSidebarVisible: (visible: boolean) => void
   toggleCommandPalette: () => void
@@ -179,7 +233,15 @@ interface UIState {
   setResolveConflictsDialogOpen: (open: boolean) => void
   setNewWorktreeModalOpen: (open: boolean) => void
   setNewWorktreeModalDefaultTab: (
-    tab: 'quick' | 'issues' | 'prs' | 'security' | null
+    tab:
+      | 'quick'
+      | 'issues'
+      | 'prs'
+      | 'security'
+      | 'branches'
+      | 'linear'
+      | 'sentry'
+      | null
   ) => void
   setReleaseNotesModalOpen: (open: boolean) => void
   setUpdatePrModalOpen: (open: boolean) => void
@@ -189,6 +251,8 @@ interface UIState {
     projectPath?: string | null,
     branch?: string | null
   ) => void
+  markFailedWorkflowRunsSeen: (runIds: number[]) => void
+  setSeenFailedWorkflowRunIds: (runIds: number[]) => void
   openCliUpdateModal: (type: Exclude<CliUpdateModalType, null>) => void
   closeCliUpdateModal: () => void
   openCliLoginModal: (
@@ -210,6 +274,8 @@ interface UIState {
   consumeAutoInvestigateAdvisory: (worktreeId: string) => boolean
   markWorktreeForAutoInvestigateLinearIssue: (worktreeId: string) => void
   consumeAutoInvestigateLinearIssue: (worktreeId: string) => boolean
+  markWorktreeForAutoInvestigateSentryIssue: (worktreeId: string) => void
+  consumeAutoInvestigateSentryIssue: (worktreeId: string) => boolean
   markWorktreeForAutoOpenSession: (
     worktreeId: string,
     sessionId?: string
@@ -228,6 +294,7 @@ interface UIState {
   openNewSessionModeModal: (target: NewSessionModeTarget) => void
   closeNewSessionModeModal: () => void
   setChatToolbarMounted: (mounted: boolean) => void
+  setReviewSurfaceMounted: (mounted: boolean) => void
   setGitDiffModalOpen: (open: boolean) => void
   toggleGitDiffSelectedFile: (filePath: string) => void
   clearGitDiffSelectedFiles: () => void
@@ -238,13 +305,29 @@ interface UIState {
   setUIStateInitialized: (initialized: boolean) => void
   setPendingUpdateVersion: (version: string | null) => void
   setUpdateModalVersion: (version: string | null) => void
+  setUpdateReadyVersion: (version: string | null) => void
+  setIsUpdateInstalling: (installing: boolean) => void
+  setPendingServerUpdate: (update: PendingServerUpdate | null) => void
   setAvailableCliUpdates: (updates: PendingCliUpdate[]) => void
   dismissCliUpdateNotice: (type: PendingCliUpdate['type']) => void
   chatSearchOpen: boolean
   setChatSearchOpen: (open: boolean) => void
   githubDashboardOpen: boolean
   setGitHubDashboardOpen: (open: boolean) => void
+  /**
+   * Zen mode: full-screen the active session chat.
+   * Hides session tabs, modal action chrome, and sidebars.
+   */
+  zenMode: boolean
+  toggleZenMode: () => void
+  setZenMode: (enabled: boolean) => void
 }
+
+/** Snapshot of chrome visibility restored when leaving zen mode. */
+let zenModeChromeSnapshot: {
+  leftSidebarVisible: boolean
+  fileBrowserVisible: boolean
+} | null = null
 
 // Store callback outside Zustand state to avoid serialization issues with
 // devtools and deep-comparison utilities (functions are not serializable).
@@ -259,6 +342,9 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       leftSidebarVisible: false,
       leftSidebarSize: 250, // Default width in pixels
+      fileBrowserVisible: false,
+      fileBrowserSize: 280,
+      viewingFilePath: null,
       rightSidebarVisible: false,
       commandPaletteOpen: false,
       preferencesOpen: false,
@@ -283,6 +369,7 @@ export const useUIStore = create<UIState>()(
       workflowRunsModalOpen: false,
       workflowRunsModalProjectPath: null,
       workflowRunsModalBranch: null,
+      seenFailedWorkflowRunIds: [],
       cliUpdateModalOpen: false,
       cliUpdateModalType: null,
       cliLoginModalOpen: false,
@@ -295,6 +382,7 @@ export const useUIStore = create<UIState>()(
       autoInvestigateSecurityAlertWorktreeIds: new Set(),
       autoInvestigateAdvisoryWorktreeIds: new Set(),
       autoInvestigateLinearIssueWorktreeIds: new Set(),
+      autoInvestigateSentryIssueWorktreeIds: new Set(),
       pendingBackgroundCreations: 0,
       autoOpenSessionWorktreeIds: new Set(),
       pendingAutoOpenSessionIds: {},
@@ -304,6 +392,7 @@ export const useUIStore = create<UIState>()(
       sessionTerminalIds: {},
       newSessionModeTarget: null,
       chatToolbarMounted: false,
+      reviewSurfaceMounted: false,
       gitDiffModalOpen: false,
       gitDiffSelectedFiles: new Set<string>(),
       planDialogOpen: false,
@@ -313,9 +402,47 @@ export const useUIStore = create<UIState>()(
       uiStateInitialized: false,
       pendingUpdateVersion: null,
       updateModalVersion: null,
+      updateReadyVersion: null,
+      isUpdateInstalling: false,
+      pendingServerUpdate: null,
       availableCliUpdates: [],
       chatSearchOpen: false,
       githubDashboardOpen: false,
+      zenMode: false,
+      toggleZenMode: () => {
+        const { zenMode } = get()
+        get().setZenMode(!zenMode)
+      },
+      setZenMode: enabled =>
+        set(
+          state => {
+            if (state.zenMode === enabled) return state
+            if (enabled) {
+              zenModeChromeSnapshot = {
+                leftSidebarVisible: state.leftSidebarVisible,
+                fileBrowserVisible: state.fileBrowserVisible,
+              }
+              return {
+                zenMode: true,
+                leftSidebarVisible: false,
+                fileBrowserVisible: false,
+              }
+            }
+            const snap = zenModeChromeSnapshot
+            zenModeChromeSnapshot = null
+            return {
+              zenMode: false,
+              ...(snap
+                ? {
+                    leftSidebarVisible: snap.leftSidebarVisible,
+                    fileBrowserVisible: snap.fileBrowserVisible,
+                  }
+                : {}),
+            }
+          },
+          undefined,
+          'setZenMode'
+        ),
       toggleLeftSidebar: () =>
         set(
           state => ({ leftSidebarVisible: !state.leftSidebarVisible }),
@@ -346,6 +473,39 @@ export const useUIStore = create<UIState>()(
             state.leftSidebarSize === size ? state : { leftSidebarSize: size },
           undefined,
           'setLeftSidebarSize'
+        ),
+
+      toggleFileBrowser: () =>
+        set(
+          state => ({ fileBrowserVisible: !state.fileBrowserVisible }),
+          undefined,
+          'toggleFileBrowser'
+        ),
+
+      setFileBrowserVisible: visible =>
+        set(
+          state =>
+            state.fileBrowserVisible === visible
+              ? state
+              : { fileBrowserVisible: visible },
+          undefined,
+          'setFileBrowserVisible'
+        ),
+
+      setFileBrowserSize: size =>
+        set(
+          state =>
+            state.fileBrowserSize === size ? state : { fileBrowserSize: size },
+          undefined,
+          'setFileBrowserSize'
+        ),
+
+      setViewingFilePath: path =>
+        set(
+          state =>
+            state.viewingFilePath === path ? state : { viewingFilePath: path },
+          undefined,
+          'setViewingFilePath'
         ),
 
       setRightSidebarVisible: visible =>
@@ -558,6 +718,31 @@ export const useUIStore = create<UIState>()(
           'setWorkflowRunsModalOpen'
         ),
 
+      markFailedWorkflowRunsSeen: runIds =>
+        set(
+          state => {
+            if (runIds.length === 0) return state
+            const next = mergeSeenFailedWorkflowRunIds(
+              state.seenFailedWorkflowRunIds,
+              runIds
+            )
+            if (next === state.seenFailedWorkflowRunIds) return state
+            return { seenFailedWorkflowRunIds: next }
+          },
+          undefined,
+          'markFailedWorkflowRunsSeen'
+        ),
+
+      setSeenFailedWorkflowRunIds: runIds =>
+        set(
+          state =>
+            state.seenFailedWorkflowRunIds === runIds
+              ? state
+              : { seenFailedWorkflowRunIds: runIds },
+          undefined,
+          'setSeenFailedWorkflowRunIds'
+        ),
+
       openCliUpdateModal: type =>
         set(
           { cliUpdateModalOpen: true, cliUpdateModalType: type },
@@ -766,6 +951,39 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
+      markWorktreeForAutoInvestigateSentryIssue: worktreeId =>
+        set(
+          state => {
+            if (state.autoInvestigateSentryIssueWorktreeIds.has(worktreeId)) {
+              return state
+            }
+            return {
+              autoInvestigateSentryIssueWorktreeIds: new Set([
+                ...state.autoInvestigateSentryIssueWorktreeIds,
+                worktreeId,
+              ]),
+            }
+          },
+          undefined,
+          'markWorktreeForAutoInvestigateSentryIssue'
+        ),
+
+      consumeAutoInvestigateSentryIssue: worktreeId => {
+        if (!get().autoInvestigateSentryIssueWorktreeIds.has(worktreeId)) {
+          return false
+        }
+        set(
+          state => {
+            const next = new Set(state.autoInvestigateSentryIssueWorktreeIds)
+            next.delete(worktreeId)
+            return { autoInvestigateSentryIssueWorktreeIds: next }
+          },
+          undefined,
+          'consumeAutoInvestigateSentryIssue'
+        )
+        return true
+      },
+
       markWorktreeForAutoOpenSession: (worktreeId, sessionId) =>
         set(
           state => {
@@ -920,6 +1138,13 @@ export const useUIStore = create<UIState>()(
             : { chatToolbarMounted: mounted }
         ),
 
+      setReviewSurfaceMounted: (mounted: boolean) =>
+        set(state =>
+          state.reviewSurfaceMounted === mounted
+            ? state
+            : { reviewSurfaceMounted: mounted }
+        ),
+
       setGitDiffModalOpen: (open: boolean) =>
         set(
           state =>
@@ -1016,6 +1241,48 @@ export const useUIStore = create<UIState>()(
               : { updateModalVersion: version },
           undefined,
           'setUpdateModalVersion'
+        ),
+
+      setUpdateReadyVersion: (version: string | null) =>
+        set(
+          state =>
+            state.updateReadyVersion === version
+              ? state
+              : { updateReadyVersion: version },
+          undefined,
+          'setUpdateReadyVersion'
+        ),
+
+      setIsUpdateInstalling: (installing: boolean) =>
+        set(
+          state =>
+            state.isUpdateInstalling === installing
+              ? state
+              : { isUpdateInstalling: installing },
+          undefined,
+          'setIsUpdateInstalling'
+        ),
+
+      setPendingServerUpdate: (update: PendingServerUpdate | null) =>
+        set(
+          state => {
+            const prev = state.pendingServerUpdate
+            if (prev === update) return state
+            if (
+              prev &&
+              update &&
+              prev.latestVersion === update.latestVersion &&
+              prev.currentVersion === update.currentVersion &&
+              prev.canUpdate === update.canUpdate &&
+              prev.reason === update.reason
+            ) {
+              return state
+            }
+            if (!prev && !update) return state
+            return { pendingServerUpdate: update }
+          },
+          undefined,
+          'setPendingServerUpdate'
         ),
 
       setAvailableCliUpdates: (updates: PendingCliUpdate[]) =>

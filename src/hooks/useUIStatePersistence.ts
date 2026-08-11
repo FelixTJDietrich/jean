@@ -11,11 +11,58 @@ import {
 } from '@/store/terminal-store'
 import { useBrowserStore } from '@/store/browser-store'
 import { browserBackend } from '@/hooks/useBrowserPane'
-import { isNativeApp } from '@/lib/environment'
+import { isLocalBackend } from '@/lib/environment'
 import { invoke } from '@/lib/transport'
 import { logger } from '@/lib/logger'
 import type { BrowserTab } from '@/types/browser'
-import type { UIState } from '@/types/ui-state'
+import type {
+  PendingImage,
+  PendingTextFile,
+  ReadTextResponse,
+} from '@/types/chat'
+import type {
+  PendingImageDraft,
+  PendingTextFileDraft,
+  UIState,
+} from '@/types/ui-state'
+
+/** Serialize ready (non-loading) pending images for UI-state persistence. */
+function serializePendingImages(
+  pendingImages: Record<string, PendingImage[]>
+): Record<string, PendingImageDraft[]> {
+  const out: Record<string, PendingImageDraft[]> = {}
+  for (const [sessionId, images] of Object.entries(pendingImages)) {
+    const ready = images.flatMap(img =>
+      !img.loading && img.path
+        ? [{ id: img.id, path: img.path, filename: img.filename }]
+        : []
+    )
+    if (ready.length > 0) {
+      out[sessionId] = ready
+    }
+  }
+  return out
+}
+
+/**
+ * Serialize pending text-file attachments without embedding full content,
+ * so large pastes do not bloat the UI-state JSON.
+ */
+function serializePendingTextFiles(
+  pendingTextFiles: Record<string, PendingTextFile[]>
+): Record<string, PendingTextFileDraft[]> {
+  const out: Record<string, PendingTextFileDraft[]> = {}
+  for (const [sessionId, textFiles] of Object.entries(pendingTextFiles)) {
+    if (textFiles.length === 0) continue
+    out[sessionId] = textFiles.map(({ id, path, filename, size }) => ({
+      id,
+      path,
+      filename,
+      size,
+    }))
+  }
+  return out
+}
 
 const MAX_PERSISTED_ACTIVE_SESSIONS = 8
 
@@ -83,7 +130,8 @@ export function useUIStatePersistence() {
 
   // Helper to get current UI state from stores
   // NOTE: Durable session-specific state is stored in Session files. Unsent
-  // input drafts remain lightweight UI state so they survive full UI reloads.
+  // input drafts (text + image/text-file attachments) remain lightweight UI
+  // state so they survive full UI reloads.
   const getCurrentUIState = useCallback((): UIState => {
     const {
       activeWorktreeId,
@@ -91,6 +139,8 @@ export function useUIStatePersistence() {
       lastActiveWorktreeId,
       activeSessionIds,
       inputDrafts,
+      pendingImages,
+      pendingTextFiles,
       reviewSidebarVisible,
       lastOpenedPerProject,
     } = useChatStore.getState()
@@ -106,8 +156,12 @@ export function useUIStatePersistence() {
     const {
       leftSidebarSize,
       leftSidebarVisible,
+      fileBrowserSize,
+      fileBrowserVisible,
+      zenMode,
       sessionTerminalIds,
       sessionPrimarySurface,
+      seenFailedWorkflowRunIds,
     } = useUIStore.getState()
     const {
       terminals,
@@ -120,21 +174,25 @@ export function useUIStatePersistence() {
       modalTerminalWidth,
       modalTerminalHeight,
     } = useTerminalStore.getState()
-    const shouldPersistTerminalRuntime = !isNativeApp()
+    const shouldPersistTerminalRuntime = !isLocalBackend()
     const terminalInstancesForPersist = shouldPersistTerminalRuntime
       ? Object.fromEntries(
-          Object.entries(terminals)
-            .map(([worktreeId, list]) => [
-              worktreeId,
-              list.map(terminal => ({
-                id: terminal.id,
-                command: terminal.command,
-                command_args: terminal.commandArgs ?? null,
-                label: terminal.label,
-                kind: terminal.kind ?? 'panel',
-              })),
-            ])
-            .filter(([, list]) => (list as unknown[]).length > 0)
+          Object.entries(terminals).flatMap(([worktreeId, list]) => {
+            if (list.length === 0) return []
+            return [
+              [
+                worktreeId,
+                list.map(terminal => ({
+                  id: terminal.id,
+                  command: terminal.command,
+                  command_args: terminal.commandArgs ?? null,
+                  label: terminal.label,
+                  kind: terminal.kind ?? 'panel',
+                  session_id: terminal.sessionId,
+                })),
+              ] as const,
+            ]
+          })
         )
       : {}
     const browserState = useBrowserStore.getState()
@@ -154,8 +212,13 @@ export function useUIStatePersistence() {
       expanded_folder_ids: Array.from(expandedFolderIds),
       left_sidebar_size: leftSidebarSize,
       left_sidebar_visible: leftSidebarVisible,
+      file_browser_size: fileBrowserSize,
+      file_browser_visible: fileBrowserVisible,
+      zen_mode: zenMode,
       active_session_ids: limitActiveSessionIds(activeSessionIds),
       input_drafts: inputDrafts,
+      pending_images: serializePendingImages(pendingImages),
+      pending_text_files: serializePendingTextFiles(pendingTextFiles),
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
       // Modal terminal drawer state
@@ -213,6 +276,7 @@ export function useUIStatePersistence() {
           { worktree_id: entry.worktreeId, session_id: entry.sessionId },
         ])
       ),
+      seen_failed_workflow_run_ids: seenFailedWorkflowRunIds,
       version: 1, // Reset for first release
     }
   }, [])
@@ -287,6 +351,26 @@ export function useUIStatePersistence() {
       useUIStore.getState().setLeftSidebarVisible(uiState.left_sidebar_visible)
     }
 
+    // Restore file browser size (must be at least 150px to be valid)
+    if (uiState.file_browser_size != null && uiState.file_browser_size >= 150) {
+      logger.debug('Restoring file browser size', {
+        size: uiState.file_browser_size,
+      })
+      useUIStore.getState().setFileBrowserSize(uiState.file_browser_size)
+    }
+
+    // Restore file browser visibility
+    if (uiState.file_browser_visible !== undefined) {
+      logger.debug('Restoring file browser visibility', {
+        visible: uiState.file_browser_visible,
+      })
+      useUIStore.getState().setFileBrowserVisible(uiState.file_browser_visible)
+    }
+
+    if (uiState.zen_mode !== undefined) {
+      useUIStore.getState().setZenMode(uiState.zen_mode)
+    }
+
     // Restore active project first (selectProject clears selectedWorktreeId)
     // This must happen BEFORE restoring the active worktree
     if (uiState.active_project_id) {
@@ -359,6 +443,105 @@ export function useUIStatePersistence() {
       useChatStore.setState({ inputDrafts })
     }
 
+    // Restore unsent image attachments (files already on disk)
+    const pendingImagesDraft = uiState.pending_images ?? {}
+    if (Object.keys(pendingImagesDraft).length > 0) {
+      const restoredImages: Record<string, PendingImage[]> = {}
+      for (const [sessionId, images] of Object.entries(pendingImagesDraft)) {
+        const valid = images.flatMap(img =>
+          img.id && img.path && img.filename
+            ? [{ id: img.id, path: img.path, filename: img.filename }]
+            : []
+        )
+        if (valid.length > 0) restoredImages[sessionId] = valid
+      }
+      if (Object.keys(restoredImages).length > 0) {
+        logger.debug('Restoring pending images', {
+          sessions: Object.keys(restoredImages).length,
+        })
+        useChatStore.setState({ pendingImages: restoredImages })
+      }
+    }
+
+    // Restore unsent pasted-text attachments; re-read content from disk when
+    // the persisted payload omitted it (normal path to keep UI state small).
+    const pendingTextFilesDraft = uiState.pending_text_files ?? {}
+    if (Object.keys(pendingTextFilesDraft).length > 0) {
+      const restoredTextFiles: Record<string, PendingTextFile[]> = {}
+      const needsContentHydration: {
+        sessionId: string
+        id: string
+        path: string
+      }[] = []
+
+      for (const [sessionId, textFiles] of Object.entries(
+        pendingTextFilesDraft
+      )) {
+        const valid: PendingTextFile[] = []
+        for (const tf of textFiles) {
+          if (!tf.id || !tf.path || !tf.filename) continue
+          const content = tf.content ?? ''
+          valid.push({
+            id: tf.id,
+            path: tf.path,
+            filename: tf.filename,
+            size: tf.size ?? 0,
+            content,
+          })
+          if (!tf.content) {
+            needsContentHydration.push({
+              sessionId,
+              id: tf.id,
+              path: tf.path,
+            })
+          }
+        }
+        if (valid.length > 0) restoredTextFiles[sessionId] = valid
+      }
+
+      if (Object.keys(restoredTextFiles).length > 0) {
+        logger.debug('Restoring pending text files', {
+          sessions: Object.keys(restoredTextFiles).length,
+          hydrate: needsContentHydration.length,
+        })
+        useChatStore.setState({ pendingTextFiles: restoredTextFiles })
+      }
+
+      if (needsContentHydration.length > 0) {
+        // Independent per-file disk reads; Zustand functional updates are safe
+        // when completions interleave.
+        void Promise.all(
+          needsContentHydration.map(async item => {
+            try {
+              const result = await invoke<ReadTextResponse>(
+                'read_pasted_text',
+                {
+                  path: item.path,
+                }
+              )
+              useChatStore
+                .getState()
+                .updatePendingTextFile(
+                  item.sessionId,
+                  item.id,
+                  result.content,
+                  result.size
+                )
+            } catch (error) {
+              // File may have been cleaned up; drop the orphaned attachment.
+              logger.warn('Failed to restore pasted text content; removing', {
+                path: item.path,
+                error: String(error),
+              })
+              useChatStore
+                .getState()
+                .removePendingTextFile(item.sessionId, item.id)
+            }
+          })
+        )
+      }
+    }
+
     // NOTE: Other session-specific state is loaded from Session files by the
     // useSessionStatePersistence hook.
 
@@ -406,7 +589,7 @@ export function useUIStatePersistence() {
     }
 
     const restoreTerminalRuntimeState = async (shouldCancel: () => boolean) => {
-      if (isNativeApp() || shouldCancel()) return
+      if (isLocalBackend() || shouldCancel()) return
 
       // PHASE 1: Always restore the *user-intent* UI flags for terminal
       // surfaces. These are independent of whether any PTYs survived the
@@ -535,10 +718,10 @@ export function useUIStatePersistence() {
         if (shouldCancel()) return
         const { disposeTerminal } = await import('@/lib/terminal-instances')
         if (shouldCancel()) return
-        for (const id of staleInstanceIds) {
-          if (shouldCancel()) return
-          await disposeTerminal(id).catch(() => undefined)
-        }
+        // Independent terminal dispose; order does not matter
+        await Promise.all(
+          staleInstanceIds.map(id => disposeTerminal(id).catch(() => undefined))
+        )
         return
       }
 
@@ -555,16 +738,21 @@ export function useUIStatePersistence() {
       }
 
       for (const [worktreeId, list] of Object.entries(persistedTerminals)) {
-        const liveList = list
-          .filter(terminal => liveTerminalIds.has(terminal.id))
-          .map(terminal => ({
-            id: terminal.id,
-            worktreeId,
-            command: terminal.command ?? null,
-            commandArgs: terminal.command_args ?? null,
-            label: terminal.label,
-            kind: terminal.kind ?? 'panel',
-          })) satisfies TerminalInstance[]
+        const liveList = list.flatMap(terminal =>
+          liveTerminalIds.has(terminal.id)
+            ? [
+                {
+                  id: terminal.id,
+                  worktreeId,
+                  command: terminal.command ?? null,
+                  commandArgs: terminal.command_args ?? null,
+                  label: terminal.label,
+                  kind: terminal.kind ?? 'panel',
+                  sessionId: terminal.session_id ?? undefined,
+                },
+              ]
+            : []
+        ) satisfies TerminalInstance[]
 
         if (liveList.length === 0) {
           restoredModalOpen[worktreeId] = false
@@ -572,7 +760,9 @@ export function useUIStatePersistence() {
         }
 
         restoredTerminals[worktreeId] = liveList
-        const livePanelIds = liveList.filter(isPanelTerminal).map(t => t.id)
+        const livePanelIds = liveList.flatMap(t =>
+          isPanelTerminal(t) ? [t.id] : []
+        )
         const persistedActiveId = uiState.terminal_active_ids?.[worktreeId]
         if (persistedActiveId && livePanelIds.includes(persistedActiveId)) {
           restoredActiveIds[worktreeId] = persistedActiveId
@@ -699,6 +889,16 @@ export function useUIStatePersistence() {
       useProjectsStore
         .getState()
         .setGitHubDashboardFavoriteProjectIds(githubDashboardFavoriteProjectIds)
+    }
+
+    const seenFailedWorkflowRunIds = uiState.seen_failed_workflow_run_ids ?? []
+    if (seenFailedWorkflowRunIds.length > 0) {
+      logger.debug('Restoring seen failed workflow run IDs', {
+        count: seenFailedWorkflowRunIds.length,
+      })
+      useUIStore
+        .getState()
+        .setSeenFailedWorkflowRunIds(seenFailedWorkflowRunIds)
     }
 
     // Restore browser pane state (per-worktree tabs + 3-surface visibility)
@@ -861,13 +1061,20 @@ export function useUIStatePersistence() {
       useProjectsStore.getState().githubDashboardFavoriteProjectIds
     let prevLeftSidebarSize = useUIStore.getState().leftSidebarSize
     let prevLeftSidebarVisible = useUIStore.getState().leftSidebarVisible
+    let prevFileBrowserSize = useUIStore.getState().fileBrowserSize
+    let prevFileBrowserVisible = useUIStore.getState().fileBrowserVisible
+    let prevZenMode = useUIStore.getState().zenMode
     let prevSessionTerminalIds = useUIStore.getState().sessionTerminalIds
     let prevSessionPrimarySurface = useUIStore.getState().sessionPrimarySurface
+    let prevSeenFailedWorkflowRunIds =
+      useUIStore.getState().seenFailedWorkflowRunIds
     let prevWorktreeId = useChatStore.getState().activeWorktreeId
     let prevWorktreePath = useChatStore.getState().activeWorktreePath
     let prevLastActiveWorktreeId = useChatStore.getState().lastActiveWorktreeId
     let prevActiveSessionIds = useChatStore.getState().activeSessionIds
     let prevInputDrafts = useChatStore.getState().inputDrafts
+    let prevPendingImages = useChatStore.getState().pendingImages
+    let prevPendingTextFiles = useChatStore.getState().pendingTextFiles
     let prevReviewSidebarVisible = useChatStore.getState().reviewSidebarVisible
     let prevLastOpenedPerProject = useChatStore.getState().lastOpenedPerProject
     let prevTerminalInstances = useTerminalStore.getState().terminals
@@ -940,29 +1147,44 @@ export function useUIStatePersistence() {
       const sizeChanged = state.leftSidebarSize !== prevLeftSidebarSize
       const visibilityChanged =
         state.leftSidebarVisible !== prevLeftSidebarVisible
+      const fileBrowserSizeChanged =
+        state.fileBrowserSize !== prevFileBrowserSize
+      const fileBrowserVisibilityChanged =
+        state.fileBrowserVisible !== prevFileBrowserVisible
+      const zenModeChanged = state.zenMode !== prevZenMode
       const sessionTerminalIdsChanged =
         state.sessionTerminalIds !== prevSessionTerminalIds
       const sessionPrimarySurfaceChanged =
         state.sessionPrimarySurface !== prevSessionPrimarySurface
+      const seenFailedWorkflowRunIdsChanged =
+        state.seenFailedWorkflowRunIds !== prevSeenFailedWorkflowRunIds
 
       if (
         sizeChanged ||
         visibilityChanged ||
+        fileBrowserSizeChanged ||
+        fileBrowserVisibilityChanged ||
+        zenModeChanged ||
         sessionTerminalIdsChanged ||
-        sessionPrimarySurfaceChanged
+        sessionPrimarySurfaceChanged ||
+        seenFailedWorkflowRunIdsChanged
       ) {
         prevLeftSidebarSize = state.leftSidebarSize
         prevLeftSidebarVisible = state.leftSidebarVisible
+        prevFileBrowserSize = state.fileBrowserSize
+        prevFileBrowserVisible = state.fileBrowserVisible
+        prevZenMode = state.zenMode
         prevSessionTerminalIds = state.sessionTerminalIds
         prevSessionPrimarySurface = state.sessionPrimarySurface
+        prevSeenFailedWorkflowRunIds = state.seenFailedWorkflowRunIds
         const currentState = getCurrentUIState()
         debouncedSaveRef.current?.(currentState)
       }
     })
 
     // Subscribe to chat-store changes (active worktree, sessions, input drafts,
-    // and worktree-scoped state). Other session-specific state is handled by
-    // useSessionStatePersistence.
+    // draft attachments, and worktree-scoped state). Other session-specific
+    // state is handled by useSessionStatePersistence.
     const unsubChat = useChatStore.subscribe(state => {
       // Check if active worktree or active sessions changed
       const worktreeChanged =
@@ -971,6 +1193,9 @@ export function useUIStatePersistence() {
         state.lastActiveWorktreeId !== prevLastActiveWorktreeId
       const sessionsChanged = state.activeSessionIds !== prevActiveSessionIds
       const inputDraftsChanged = state.inputDrafts !== prevInputDrafts
+      const pendingImagesChanged = state.pendingImages !== prevPendingImages
+      const pendingTextFilesChanged =
+        state.pendingTextFiles !== prevPendingTextFiles
       const reviewSidebarChanged =
         state.reviewSidebarVisible !== prevReviewSidebarVisible
       const lastOpenedChanged =
@@ -980,6 +1205,8 @@ export function useUIStatePersistence() {
         worktreeChanged ||
         sessionsChanged ||
         inputDraftsChanged ||
+        pendingImagesChanged ||
+        pendingTextFilesChanged ||
         reviewSidebarChanged ||
         lastOpenedChanged
       ) {
@@ -988,6 +1215,8 @@ export function useUIStatePersistence() {
         prevLastActiveWorktreeId = state.lastActiveWorktreeId
         prevActiveSessionIds = state.activeSessionIds
         prevInputDrafts = state.inputDrafts
+        prevPendingImages = state.pendingImages
+        prevPendingTextFiles = state.pendingTextFiles
         prevReviewSidebarVisible = state.reviewSidebarVisible
         prevLastOpenedPerProject = state.lastOpenedPerProject
         const currentState = getCurrentUIState()
@@ -1063,7 +1292,7 @@ export function useUIStatePersistence() {
         bottomHeightChanged
       ) {
         // Detect tab removals — close their backing webviews
-        if (tabsChanged && isNativeApp()) {
+        if (tabsChanged && isLocalBackend()) {
           const prevIds = new Set<string>()
           for (const list of Object.values(prevBrowserTabs)) {
             for (const t of list) prevIds.add(t.id)

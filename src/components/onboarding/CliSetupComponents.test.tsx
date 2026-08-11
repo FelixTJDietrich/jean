@@ -1,9 +1,20 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  AuthLoginState,
   normalizeManualCliVersionInput,
   SetupState,
 } from './CliSetupComponents'
+
+vi.mock('@/components/chat/StandaloneTerminalSurface', () => ({
+  StandaloneTerminalSurface: ({
+    terminalId,
+  }: {
+    terminalId: string
+  }) => (
+    <div data-testid="standalone-terminal-surface" data-terminal-id={terminalId} />
+  ),
+}))
 
 describe('manual CLI version helpers', () => {
   it('normalizes whitespace and optional v prefix', () => {
@@ -70,5 +81,49 @@ describe('SetupState manual version check', () => {
     await screen.findByText(/Version not found/i)
     expect(onVersionChange).not.toHaveBeenCalledWith('9.9.9')
     expect(screen.getByRole('button', { name: /install/i })).toBeDisabled()
+  })
+})
+
+describe('AuthLoginState completion', () => {
+  it('renders the shared terminal surface for login', () => {
+    render(
+      <AuthLoginState
+        cliName="Cursor CLI"
+        terminalId="cursor-login-test"
+        command="agent"
+        commandArgs={['login']}
+        onComplete={vi.fn()}
+      />
+    )
+
+    expect(screen.getByTestId('standalone-terminal-surface')).toHaveAttribute(
+      'data-terminal-id',
+      'cursor-login-test'
+    )
+    expect(
+      screen.getByText(/provider list may take a few seconds/i)
+    ).toBeTruthy()
+  })
+
+  it('only advances once when completion is clicked repeatedly', () => {
+    const onComplete = vi.fn()
+
+    render(
+      <AuthLoginState
+        cliName="Cursor CLI"
+        terminalId="cursor-login-test"
+        command="agent"
+        commandArgs={['login']}
+        onComplete={onComplete}
+      />
+    )
+
+    const completeButton = screen.getByRole('button', {
+      name: "I've Completed Login",
+    })
+    fireEvent.click(completeButton)
+    fireEvent.click(completeButton)
+
+    expect(onComplete).toHaveBeenCalledOnce()
   })
 })

@@ -14,9 +14,9 @@ import type {
   OpencodeInstallProgress,
   OpencodeReleaseInfo,
 } from '@/types/opencode-cli'
-import { hasBackend } from '@/lib/environment'
+import { hasBackendTransport } from '@/lib/environment'
 
-const isTauri = hasBackend
+const isTauri = hasBackendTransport
 
 export const opencodeCliQueryKeys = {
   all: ['opencode-cli'] as const,
@@ -166,6 +166,29 @@ export function useAvailableOpencodeModels(options?: { enabled?: boolean }) {
   })
 }
 
+/**
+ * Force-refresh OpenCode models from the CLI (`opencode models --refresh`).
+ * Updates the shared models query cache on success.
+ */
+export function useRefreshOpencodeModels() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (): Promise<string[]> => {
+      if (!isTauri()) return []
+      try {
+        return await invoke<string[]>('refresh_opencode_models')
+      } catch (error) {
+        logger.error('Failed to refresh OpenCode models', { error })
+        throw error
+      }
+    },
+    onSuccess: models => {
+      queryClient.setQueryData(opencodeCliQueryKeys.models(), models)
+    },
+  })
+}
+
 export function useInstallOpencodeCli() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -213,6 +236,10 @@ export function useOpencodeInstallProgress(): [
 }
 export const useOpenCodeInstallProgress = useOpencodeInstallProgress
 
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_opencode_cli_version_exists', { version })
+}
+
 export function useOpencodeCliSetup() {
   const status = useOpencodeCliStatus()
   const versions = useAvailableOpencodeVersions()
@@ -230,8 +257,6 @@ export function useOpencodeCliSetup() {
     })
   }
 
-  const checkManualVersion = (version: string) =>
-    invoke<boolean>('check_opencode_cli_version_exists', { version })
 
   return {
     status: status.data,

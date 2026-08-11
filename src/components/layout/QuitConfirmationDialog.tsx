@@ -12,12 +12,22 @@ import {
 } from '@/components/ui/alert-dialog'
 import { logger } from '@/lib/logger'
 
+async function handleQuitAnyway() {
+  if (!isNativeApp()) return
+  try {
+    const { destroyAppWindow } = await import('@/lib/window-close')
+    await destroyAppWindow()
+  } catch (error) {
+    logger.error('Failed to destroy window', { error })
+  }
+}
+
 /**
  * Dialog that appears when user tries to quit while sessions are running.
  * Only shown in production mode (dev mode allows immediate quit).
  *
  * Listens for the 'quit-confirmation-requested' custom event dispatched
- * by useMainWindowEventListeners when running sessions are detected.
+ * by useNativeWindowCloseGuard / window-close when running sessions are detected.
  */
 export function QuitConfirmationDialog() {
   const [open, setOpen] = useState(false)
@@ -36,16 +46,6 @@ export function QuitConfirmationDialog() {
     }
   }, [])
 
-  const handleQuit = async () => {
-    if (!isNativeApp()) return
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      await getCurrentWindow().destroy()
-    } catch (error) {
-      logger.error('Failed to destroy window', { error })
-    }
-  }
-
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
       <AlertDialogContent>
@@ -58,7 +58,7 @@ export function QuitConfirmationDialog() {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={handleQuit}>
+          <AlertDialogAction onClick={handleQuitAnyway}>
             Quit Anyway
           </AlertDialogAction>
         </AlertDialogFooter>

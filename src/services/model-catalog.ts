@@ -132,6 +132,7 @@ function getBundledReasoning(
   if (backend !== 'claude' || model === 'haiku') return undefined
   const usesEffort =
     model.includes('fable-5') ||
+    model.includes('opus-5') ||
     model.includes('sonnet-5') ||
     model.includes('opus-4-8') ||
     model.includes('opus-4-7') ||
@@ -164,7 +165,9 @@ const fallbackModelCatalog: ModelCatalog = {
   updated_at: 'bundled',
   defaults: {
     claude: 'claude-opus-4-8[1m]',
-    codex: 'gpt-5.5',
+    codex: 'gpt-5.6-sol',
+    opencode: 'opencode/gpt-5.6-sol',
+    grok: 'grok/grok-4.5',
   },
   backends: {
     claude: {
@@ -418,9 +421,9 @@ export function getCatalogModelOptions(
       ? []
       : getCatalogModelOptions(fallbackModelCatalog, backend)
   }
-  return models
-    .filter(model => !model.hidden)
-    .map(model => ({ value: model.id, label: model.label }))
+  return models.flatMap(model =>
+    model.hidden ? [] : [{ value: model.id, label: model.label }]
+  )
 }
 
 export function getCatalogDefaultModelOptions(

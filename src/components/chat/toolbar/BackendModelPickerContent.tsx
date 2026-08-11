@@ -1,5 +1,12 @@
 import { Check, RefreshCw, Star, Zap } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Input } from '@/components/ui/input'
 import {
   Command,
@@ -16,11 +23,16 @@ import { Kbd } from '@/components/ui/kbd'
 import { toast } from 'sonner'
 import type { CliBackend, CustomCliProfile } from '@/types/preferences'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
-import { useAvailableOpencodeModels } from '@/services/opencode-cli'
+import {
+  useAvailableOpencodeModels,
+  useRefreshOpencodeModels,
+} from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
 import { useAvailablePiModels } from '@/services/pi-cli'
 import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
+import { useAvailableKimiModels } from '@/services/kimi-cli'
+import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
 import {
   getCatalogModelFastInfo,
   useModelCatalog,
@@ -40,7 +52,7 @@ import {
 } from '@/components/chat/toolbar/toolbar-utils'
 import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDerivedState'
 import { useIsMobile } from '@/hooks/use-mobile'
-import { isMacOS } from '@/lib/platform'
+import { getModifierSymbol } from '@/lib/platform'
 
 interface BackendModelPickerContentProps {
   open: boolean
@@ -54,6 +66,8 @@ interface BackendModelPickerContentProps {
   onModelChange: (model: string) => void
   onBackendModelChange: (backend: CliBackend, model: string) => void
   onRequestClose: () => void
+  /** Called after a model is applied and the picker has been asked to close. */
+  onAfterSelect?: (backend: CliBackend, model: string) => void
   defaultModelOption?: { value: string; label: string }
   searchPlaceholder?: string
   className?: string
@@ -68,10 +82,11 @@ export function BackendModelPickerContent({
   installedBackends,
   customCliProfiles,
   sessionHasMessages: _sessionHasMessages,
-  providerLocked,
+  providerLocked: _providerLocked,
   onModelChange,
   onBackendModelChange,
   onRequestClose,
+  onAfterSelect,
   defaultModelOption,
   searchPlaceholder,
   className,
@@ -83,7 +98,9 @@ export function BackendModelPickerContent({
   const [highlightedValue, setHighlightedValue] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
   const isMobile = useIsMobile()
-  const fastShortcutLabel = isMacOS ? '⌘F' : 'Ctrl F'
+  const fastModifier = getModifierSymbol()
+  const fastShortcutLabel =
+    fastModifier === 'Ctrl' ? 'Ctrl F' : `${fastModifier}F`
 
   // Sessions with messages can now switch backends because the backend gets a
   // hidden Jean-local handoff prompt on provider changes.
@@ -92,6 +109,7 @@ export function BackendModelPickerContent({
   const { data: prefs } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
   const refreshModelCatalog = useRefreshModelCatalog()
+  const refreshOpencodeModels = useRefreshOpencodeModels()
   const patchPreferences = usePatchPreferences()
   const favoriteModels = useMemo(
     () => prefs?.favorite_models ?? [],
@@ -149,6 +167,12 @@ export function BackendModelPickerContent({
   const { data: availableGrokModels } = useAvailableGrokModels({
     enabled: installedBackends.includes('grok'),
   })
+  const { data: availableKimiModels } = useAvailableKimiModels({
+    enabled: installedBackends.includes('kimi'),
+  })
+  const { data: availableAntigravityModels } = useAvailableAntigravityModels({
+    enabled: installedBackends.includes('antigravity'),
+  })
 
   const opencodeModelOptions = useMemo(() => {
     if (opencodeModelsError) return []
@@ -192,6 +216,22 @@ export function BackendModelPickerContent({
       })),
     [availableGrokModels]
   )
+  const kimiModelOptions = useMemo(
+    () =>
+      availableKimiModels?.map(model => ({
+        value: `kimi/${model.id}`,
+        label: model.label,
+      })),
+    [availableKimiModels]
+  )
+  const antigravityModelOptions = useMemo(
+    () =>
+      availableAntigravityModels?.map(model => ({
+        value: `antigravity/${model.id}`,
+        label: model.label,
+      })),
+    [availableAntigravityModels]
+  )
 
   const { backendModelSections: baseBackendModelSections } =
     useToolbarDerivedState({
@@ -203,47 +243,79 @@ export function BackendModelPickerContent({
       piModelOptions,
       commandcodeModelOptions,
       grokModelOptions,
+      kimiModelOptions,
       customCliProfiles,
       installedBackends,
     })
 
-  const backendModelSections = useMemo(
-    () =>
-      defaultModelOption
-        ? baseBackendModelSections.map(section => ({
-            ...section,
-            options: [defaultModelOption, ...section.options],
-          }))
-        : baseBackendModelSections,
-    [baseBackendModelSections, defaultModelOption]
+  const backendModelSections = useMemo(() => {
+    let sections = baseBackendModelSections
+    // useToolbarDerivedState only knows the static Antigravity fallback list;
+    // surface CLI-reported models first and keep static entries as fallbacks.
+    if (antigravityModelOptions?.length) {
+      const dynamicValues = new Set(
+        antigravityModelOptions.map(option => option.value)
+      )
+      sections = sections.map(section =>
+        section.backend === 'antigravity'
+          ? {
+              ...section,
+              options: [
+                ...antigravityModelOptions,
+                ...section.options.filter(
+                  option => !dynamicValues.has(option.value)
+                ),
+              ],
+            }
+          : section
+      )
+    }
+    if (defaultModelOption) {
+      sections = sections.map(section => ({
+        ...section,
+        options: [defaultModelOption, ...section.options],
+      }))
+    }
+    return sections
+  }, [antigravityModelOptions, baseBackendModelSections, defaultModelOption])
+
+  const installedBackendsSet = useMemo(
+    () => new Set(installedBackends),
+    [installedBackends]
   )
 
   const sidebarBackends = useMemo(
     () =>
-      backendModelSections
-        .filter(section => installedBackends.includes(section.backend))
-        .map(section => section.backend),
-    [backendModelSections, installedBackends]
+      backendModelSections.flatMap(section =>
+        installedBackendsSet.has(section.backend) ? [section.backend] : []
+      ),
+    [backendModelSections, installedBackendsSet]
   )
 
   const showSidebar = sidebarBackends.length > 1
 
-  // Sync active backend with locked selection / when picker opens
+  // Clear search only when the picker opens — not on every sidebarBackends
+  // identity change (that array is rebuilt often and wiping search mid-type
+  // left Cmd+F acting on the unfiltered first catalog row).
+  useEffect(() => {
+    if (!open) return
+    setSearch('')
+  }, [open])
+
+  // Sync active backend with locked selection / when picker opens.
+  // Never leave activeBackend on an uninstalled backend (empty model list).
   useEffect(() => {
     if (!open) return
     if (isLocked) {
       setActiveBackend(selectedBackend)
-    } else {
-      setActiveBackend(prev =>
-        sidebarBackends.includes(prev) ? prev : selectedBackend
-      )
+      return
     }
+    setActiveBackend(prev => {
+      if (sidebarBackends.includes(prev)) return prev
+      if (sidebarBackends.includes(selectedBackend)) return selectedBackend
+      return sidebarBackends[0] ?? selectedBackend
+    })
   }, [open, isLocked, selectedBackend, sidebarBackends])
-
-  // Reset search whenever active backend changes or picker opens
-  useEffect(() => {
-    setSearch('')
-  }, [activeBackend, open])
 
   const activeSection = useMemo(
     () =>
@@ -291,30 +363,45 @@ export function BackendModelPickerContent({
     []
   )
 
-  useEffect(() => {
-    if (!open) return
-    setHighlightedValue(current => {
-      const currentStillVisible = filteredOptions.some(
-        option => getOptionCommandValue(activeBackend, option.value) === current
-      )
-      if (currentStillVisible) return current
+  // Derive a valid highlight from the current option list (avoids effect chain
+  // when activeBackend / filteredOptions change after open or search).
+  const resolvedHighlightedValue = useMemo(() => {
+    if (!open) return highlightedValue
+    const currentStillVisible = filteredOptions.some(
+      option =>
+        getOptionCommandValue(activeBackend, option.value) === highlightedValue
+    )
+    if (currentStillVisible) return highlightedValue
+    const firstOption = filteredOptions[0]
+    return firstOption
+      ? getOptionCommandValue(activeBackend, firstOption.value)
+      : ''
+  }, [
+    activeBackend,
+    filteredOptions,
+    getOptionCommandValue,
+    highlightedValue,
+    open,
+  ])
 
-      const firstOption = filteredOptions[0]
-      return firstOption
-        ? getOptionCommandValue(activeBackend, firstOption.value)
-        : ''
-    })
-  }, [activeBackend, filteredOptions, getOptionCommandValue, open])
-
-  const highlightedOption = useMemo(
-    () =>
-      filteredOptions.find(
-        option =>
-          getOptionCommandValue(activeBackend, option.value) ===
-          highlightedValue
-      ) ?? filteredOptions[0],
-    [activeBackend, filteredOptions, getOptionCommandValue, highlightedValue]
-  )
+  const highlightedOption = useMemo(() => {
+    const match = filteredOptions.find(
+      option =>
+        getOptionCommandValue(activeBackend, option.value) ===
+        resolvedHighlightedValue
+    )
+    if (match) return match
+    // Only fall back to the first visible option when we have a resolved
+    // highlight target. An empty resolved value means "nothing selected"
+    // (e.g. search with zero matches) — do not invent a fast-mode target.
+    if (!resolvedHighlightedValue) return undefined
+    return filteredOptions[0]
+  }, [
+    activeBackend,
+    filteredOptions,
+    getOptionCommandValue,
+    resolvedHighlightedValue,
+  ])
 
   useEffect(() => {
     if (!open) return
@@ -342,10 +429,12 @@ export function BackendModelPickerContent({
         onBackendModelChange(backend, resolved)
       }
       onRequestClose()
+      onAfterSelect?.(backend, resolved)
     },
     [
       isFastRemembered,
       modelCatalog,
+      onAfterSelect,
       onBackendModelChange,
       onModelChange,
       onRequestClose,
@@ -357,6 +446,7 @@ export function BackendModelPickerContent({
     (backend: CliBackend) => {
       if (isLocked && backend !== selectedBackend) return
       setActiveBackend(backend)
+      setSearch('')
       window.requestAnimationFrame(() => {
         searchInputRef.current?.focus()
       })
@@ -364,16 +454,20 @@ export function BackendModelPickerContent({
     [isLocked, selectedBackend]
   )
 
-  const handleRefreshModelCatalog = useCallback(async () => {
+  const handleRefreshModels = useCallback(async () => {
     const toastId = toast.loading('Refreshing model list...')
 
     try {
-      await refreshModelCatalog.mutateAsync()
+      if (activeBackend === 'opencode') {
+        await refreshOpencodeModels.mutateAsync()
+      } else {
+        await refreshModelCatalog.mutateAsync()
+      }
       toast.success('Model list refreshed', { id: toastId })
     } catch (error) {
       toast.error(`Failed to refresh model list: ${error}`, { id: toastId })
     }
-  }, [refreshModelCatalog])
+  }, [activeBackend, refreshModelCatalog, refreshOpencodeModels])
 
   const handleUseHighlightedFastMode = useCallback(() => {
     if (!highlightedOption) return false
@@ -392,17 +486,36 @@ export function BackendModelPickerContent({
       onBackendModelChange(activeBackend, fastInfo.fastModel)
     }
     onRequestClose()
+    onAfterSelect?.(activeBackend, fastInfo.fastModel)
     return true
   }, [
     activeBackend,
     highlightedOption,
     modelCatalog,
+    onAfterSelect,
     onBackendModelChange,
     onModelChange,
     onRequestClose,
     selectedBackend,
     setFastRemembered,
   ])
+
+  const onUseHighlightedFastMode = useEffectEvent(() => {
+    handleUseHighlightedFastMode()
+  })
+
+  const onBackendDigitShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (!(event.metaKey || event.ctrlKey)) return
+    if (event.altKey || event.shiftKey) return
+    const match = event.code.match(/^Digit([1-9])$/)
+    if (!match) return
+    const idx = Number(match[1]) - 1
+    const backend = sidebarBackends[idx]
+    if (!backend) return
+    event.preventDefault()
+    event.stopPropagation()
+    handleBackendButtonClick(backend)
+  })
 
   useEffect(() => {
     if (!open) return
@@ -413,41 +526,38 @@ export function BackendModelPickerContent({
 
       event.preventDefault()
       event.stopPropagation()
-      handleUseHighlightedFastMode()
+      onUseHighlightedFastMode()
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [handleUseHighlightedFastMode, open])
+  }, [open])
 
   useEffect(() => {
     if (!open || sidebarBackends.length <= 1) return
-    const handler = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return
-      if (event.altKey || event.shiftKey) return
-      const match = event.code.match(/^Digit([1-9])$/)
-      if (!match) return
-      const idx = Number(match[1]) - 1
-      const backend = sidebarBackends[idx]
-      if (!backend) return
-      event.preventDefault()
-      event.stopPropagation()
-      handleBackendButtonClick(backend)
-    }
+    const handler = (event: KeyboardEvent) => onBackendDigitShortcut(event)
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [open, sidebarBackends, handleBackendButtonClick])
+  }, [open, sidebarBackends.length])
 
+  // Always surface the active Claude custom provider in the model picker so
+  // mid-session switches stay discoverable (provider is changed via the
+  // dedicated Provider control, not locked after the first message).
   const showProviderHint =
-    Boolean(providerLocked) &&
-    activeBackend === 'claude' &&
-    customCliProfiles.length > 0
+    activeBackend === 'claude' && customCliProfiles.length > 0
 
   const placeholder =
     searchPlaceholder ??
     `Search ${getBackendPlainLabel(activeBackend)} models...`
 
-  const canRefreshModelCatalog =
-    activeBackend === 'claude' || activeBackend === 'codex'
+  // Claude/Codex use the CDN model catalog; OpenCode refreshes via CLI.
+  const canRefreshModels =
+    activeBackend === 'claude' ||
+    activeBackend === 'codex' ||
+    activeBackend === 'opencode'
+  const isRefreshingModels =
+    activeBackend === 'opencode'
+      ? refreshOpencodeModels.isPending
+      : refreshModelCatalog.isPending
 
   const sidebar = showSidebar ? (
     <SidebarBackends
@@ -467,7 +577,7 @@ export function BackendModelPickerContent({
         {!isMobile && sidebar}
         <Command
           shouldFilter={false}
-          value={highlightedValue}
+          value={resolvedHighlightedValue}
           onValueChange={setHighlightedValue}
           className="flex h-full min-w-0 flex-1 flex-col"
         >
@@ -476,7 +586,15 @@ export function BackendModelPickerContent({
               ref={searchInputRef}
               value={search}
               spellCheck={false}
-              onChange={event => setSearch(event.target.value)}
+              onChange={event => {
+                const next = event.target.value
+                setSearch(next)
+                // Drop the previous highlight so the next render re-resolves to
+                // the first option that matches the new query (or nothing).
+                // Without this, a prior highlight can survive a filter change
+                // and Cmd+F would act on a model no longer on screen.
+                setHighlightedValue('')
+              }}
               onKeyDown={event => {
                 if (event.key === 'Escape') {
                   event.preventDefault()
@@ -486,22 +604,22 @@ export function BackendModelPickerContent({
               placeholder={placeholder}
               className="h-9 text-base md:text-sm"
             />
-            {canRefreshModelCatalog && (
+            {canRefreshModels && (
               <button
                 type="button"
                 aria-label="Refresh model list"
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-                disabled={refreshModelCatalog.isPending}
+                disabled={isRefreshingModels}
                 onClick={event => {
                   event.preventDefault()
                   event.stopPropagation()
-                  void handleRefreshModelCatalog()
+                  void handleRefreshModels()
                 }}
               >
                 <RefreshCw
                   className={cn(
                     'h-4 w-4',
-                    refreshModelCatalog.isPending && 'animate-spin'
+                    isRefreshingModels && 'animate-spin'
                   )}
                 />
               </button>
@@ -695,7 +813,7 @@ function SidebarBackends({
   onSelect: (backend: CliBackend) => void
 }) {
   const isVertical = orientation === 'vertical'
-  const modKey = isMacOS ? '⌘' : '⌃'
+  const modKey = getModifierSymbol()
   const showHints = isVertical && backends.length > 1
 
   return (

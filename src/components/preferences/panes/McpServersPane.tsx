@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { CheckCircle, Loader2, ShieldAlert, XCircle } from 'lucide-react'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
@@ -25,6 +25,7 @@ import { useChatStore } from '@/store/chat-store'
 import type { McpHealthStatus } from '@/types/chat'
 import type { CliBackend } from '@/types/preferences'
 import { SettingsSection } from '../SettingsSection'
+import { AgentBrowserSection } from './AgentBrowserSection'
 import { JeanMcpSection } from './JeanMcpSection'
 
 function mcpAuthHint(backend: CliBackend): string {
@@ -35,6 +36,8 @@ function mcpAuthHint(backend: CliBackend): string {
       return "Run 'opencode mcp auth' in your terminal to authenticate"
     case 'cursor':
       return "Run 'cursor-agent mcp login <server>' in your terminal to authenticate"
+    case 'grok':
+      return "Run 'grok mcp doctor <server>' or open /mcps in the Grok TUI to authenticate"
     default:
       return "Run 'claude /mcp' in your terminal to authenticate"
   }
@@ -150,6 +153,10 @@ export const McpServersPane: React.FC = () => {
   }, [checkHealth, installedBackends])
 
   const enabledServers = preferences?.default_enabled_mcp_servers ?? []
+  const enabledServersSet = useMemo(
+    () => new Set(preferences?.default_enabled_mcp_servers ?? []),
+    [preferences?.default_enabled_mcp_servers]
+  )
   const knownServers = preferences?.known_mcp_servers ?? []
 
   // Auto-enable newly discovered (non-disabled) servers, but not ones the user has previously disabled
@@ -164,9 +171,9 @@ export const McpServersPane: React.FC = () => {
     if (enabledMigration.changed) currentEnabled = enabledMigration.migrated
     if (knownMigration.changed) currentKnown = knownMigration.migrated
 
-    const allServerKeys = mcpServers
-      .filter(s => !s.disabled)
-      .map(s => mcpKey(s.backend, s.name))
+    const allServerKeys = mcpServers.flatMap(s =>
+      s.disabled ? [] : [mcpKey(s.backend, s.name)]
+    )
     const newServers = getNewServersToAutoEnable(
       mcpServers,
       currentEnabled,
@@ -206,13 +213,15 @@ export const McpServersPane: React.FC = () => {
   return (
     <div className="space-y-6">
       <JeanMcpSection />
+      <AgentBrowserSection />
       <SettingsSection
         title="Default MCP Servers"
         anchorId="pref-mcp-section-default-servers"
       >
         <p className="text-sm text-muted-foreground">
           Selected servers will be enabled by default in new sessions. You can
-          override per-session from the toolbar.
+          override per-session from the toolbar. Antigravity loads its
+          configured servers automatically.
         </p>
 
         {isLoading ? (
@@ -248,10 +257,11 @@ export const McpServersPane: React.FC = () => {
                       id={`mcp-${backend}-${server.name}`}
                       checked={
                         !server.disabled &&
-                        enabledServers.includes(mcpKey(backend, server.name))
+                        (backend === 'antigravity' ||
+                          enabledServersSet.has(mcpKey(backend, server.name)))
                       }
                       onCheckedChange={() => handleToggle(backend, server.name)}
-                      disabled={server.disabled}
+                      disabled={server.disabled || backend === 'antigravity'}
                     />
                     <Label
                       htmlFor={`mcp-${backend}-${server.name}`}
@@ -273,7 +283,11 @@ export const McpServersPane: React.FC = () => {
                       backend={backend}
                     />
                     <span className="text-xs text-muted-foreground">
-                      {server.disabled ? 'disabled' : server.scope}
+                      {server.disabled
+                        ? 'disabled'
+                        : backend === 'antigravity'
+                          ? 'automatic'
+                          : server.scope}
                     </span>
                   </div>
                 ))}

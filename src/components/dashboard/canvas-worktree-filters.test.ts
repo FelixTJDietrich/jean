@@ -4,6 +4,7 @@ import {
   CANVAS_FILTER_TABS,
   getCanvasFilterTabCount,
   matchesCanvasFilterTab,
+  shouldShowCanvasWorktreeSection,
 } from './canvas-worktree-filters'
 
 function worktree(overrides: Partial<Worktree>): Worktree {
@@ -51,5 +52,23 @@ describe('canvas worktree filters', () => {
     expect(getCanvasFilterTabCount(worktrees, 'all')).toBe(2)
     expect(getCanvasFilterTabCount(worktrees, 'issues')).toBe(1)
     expect(getCanvasFilterTabCount(worktrees, 'auto_fix')).toBe(1)
+  })
+
+  it('shows ready worktrees even when they have no sessions', () => {
+    const base = worktree({
+      id: 'base',
+      name: 'main',
+      branch: 'main',
+      session_type: 'base',
+    })
+    const regular = worktree({ id: 'regular' })
+
+    expect(shouldShowCanvasWorktreeSection(base)).toBe(true)
+    expect(shouldShowCanvasWorktreeSection(regular)).toBe(true)
+    expect(
+      shouldShowCanvasWorktreeSection(
+        worktree({ id: 'deleting', status: 'deleting' })
+      )
+    ).toBe(false)
   })
 })

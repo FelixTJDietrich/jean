@@ -4,22 +4,34 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import useStreamingEvents from './useStreamingEvents'
 import { useChatStore } from '@/store/chat-store'
+import { preferencesQueryKeys } from '@/services/preferences'
+import type { AppPreferences } from '@/types/preferences'
 
-const { mockInvoke, mockListen, mockSaveWorktreePr, registeredListeners } =
-  vi.hoisted(() => ({
-    mockInvoke: vi.fn().mockResolvedValue(undefined),
-    mockListen: vi.fn(),
-    mockSaveWorktreePr: vi.fn(),
-    registeredListeners: new Map<
-      string,
-      (event: { payload: unknown }) => void
-    >(),
-  }))
+const {
+  mockInvoke,
+  mockListen,
+  mockSaveWorktreePr,
+  mockPlayNotificationSound,
+  registeredListeners,
+} = vi.hoisted(() => ({
+  mockInvoke: vi.fn().mockResolvedValue(undefined),
+  mockListen: vi.fn(),
+  mockSaveWorktreePr: vi.fn(),
+  mockPlayNotificationSound: vi.fn(),
+  registeredListeners: new Map<
+    string,
+    (event: { payload: unknown }) => void
+  >(),
+}))
 
 vi.mock('@/lib/transport', () => ({
   invoke: mockInvoke,
   listen: mockListen,
   useWsConnectionStatus: () => true,
+}))
+
+vi.mock('@/lib/sounds', () => ({
+  playNotificationSound: mockPlayNotificationSound,
 }))
 
 vi.mock('@/services/projects', () => ({
@@ -30,6 +42,17 @@ vi.mock('@/services/projects', () => ({
     list: () => ['projects'],
   },
 }))
+
+function seedWaitingSoundPrefs(
+  queryClient: QueryClient,
+  waitingSound: AppPreferences['waiting_sound'] = 'workwork'
+) {
+  queryClient.setQueryData(preferencesQueryKeys.preferences(), {
+    waiting_sound: waitingSound,
+    web_access_sounds_enabled: true,
+    desktop_notifications_enabled: false,
+  } as AppPreferences)
+}
 
 function createQueryClient() {
   return new QueryClient({
@@ -68,6 +91,7 @@ function setupListenMock() {
 describe('useStreamingEvents Codex MCP elicitation', () => {
   beforeEach(() => {
     setupListenMock()
+    mockPlayNotificationSound.mockClear()
 
     useChatStore.setState({
       enabledMcpServers: {},
@@ -128,6 +152,7 @@ describe('useStreamingEvents Codex MCP elicitation', () => {
 
   it('queues Codex MCP elicitation when server is not enabled for the session', async () => {
     const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient)
     const wrapper = createWrapper(queryClient)
 
     renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
@@ -173,6 +198,287 @@ describe('useStreamingEvents Codex MCP elicitation', () => {
     expect(useChatStore.getState().waitingForInputSessionIds['session-1']).toBe(
       true
     )
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('workwork', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+
+  it('does not play waiting sound when MCP elicitation is auto-accepted', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient)
+    const wrapper = createWrapper(queryClient)
+
+    useChatStore.setState({
+      enabledMcpServers: {
+        'session-1': ['notion'],
+      },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(
+        registeredListeners.has('chat:codex_mcp_elicitation_request')
+      ).toBe(true)
+    )
+
+    registeredListeners.get('chat:codex_mcp_elicitation_request')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          rpc_id: 42,
+          server_name: 'notion',
+          message: 'Need auth',
+          mode: 'url',
+          url: 'https://example.com',
+        },
+      },
+    })
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('respond_codex_mcp_elicitation', {
+        sessionId: 'session-1',
+        rpcId: 42,
+        action: 'accept',
+      })
+    )
+
+    expect(mockPlayNotificationSound).not.toHaveBeenCalled()
+  })
+})
+
+describe('useStreamingEvents mid-run waiting sounds', () => {
+  beforeEach(() => {
+    setupListenMock()
+    mockPlayNotificationSound.mockClear()
+
+    useChatStore.setState({
+      pendingCodexPermissionRequests: {},
+      pendingCodexCommandApprovalRequests: {},
+      pendingCodexUserInputRequests: {},
+      pendingCodexDynamicToolCallRequests: {},
+      waitingForInputSessionIds: {},
+      activeToolCalls: {},
+      streamingContentBlocks: {},
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+    })
+  })
+
+  it('plays waiting sound on Codex permission request', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient)
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:codex_permission_request')).toBe(
+        true
+      )
+    )
+
+    registeredListeners.get('chat:codex_permission_request')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          request_id: 'perm-1',
+          permissions: ['network'],
+        },
+      },
+    })
+
+    expect(useChatStore.getState().waitingForInputSessionIds['session-1']).toBe(
+      true
+    )
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('workwork', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+
+  it('plays waiting sound on Codex command approval request', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient, 'jobsdone')
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(
+        registeredListeners.has('chat:codex_command_approval_request')
+      ).toBe(true)
+    )
+
+    registeredListeners.get('chat:codex_command_approval_request')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          request_id: 'cmd-1',
+          command: 'rm -rf /',
+        },
+      },
+    })
+
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('jobsdone', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+
+  it('plays waiting sound on Codex dynamic tool call request', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient)
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(
+        registeredListeners.has('chat:codex_dynamic_tool_call_request')
+      ).toBe(true)
+    )
+
+    registeredListeners.get('chat:codex_dynamic_tool_call_request')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          request_id: 'tool-1',
+          tool_name: 'custom_tool',
+        },
+      },
+    })
+
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('workwork', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+
+  it('plays waiting sound once for a new Codex user input request', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient)
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:codex_user_input_request')).toBe(
+        true
+      )
+    )
+
+    const event = {
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          rpc_id: 42,
+          item_id: 'question-1',
+          questions: [
+            {
+              id: 'model',
+              question: 'How should I continue?',
+              options: [{ label: 'Wait' }, { label: 'Use Codex' }],
+            },
+          ],
+        },
+      },
+    }
+    const listener = registeredListeners.get('chat:codex_user_input_request')
+    listener?.(event)
+    listener?.(event)
+
+    expect(mockPlayNotificationSound).toHaveBeenCalledTimes(1)
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('workwork', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+
+  it('does not play when waiting_sound is none', async () => {
+    const queryClient = createQueryClient()
+    seedWaitingSoundPrefs(queryClient, 'none')
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:codex_permission_request')).toBe(
+        true
+      )
+    )
+
+    registeredListeners.get('chat:codex_permission_request')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          request_id: 'perm-1',
+          permissions: ['network'],
+        },
+      },
+    })
+
+    expect(mockPlayNotificationSound).toHaveBeenCalledWith('none', {
+      webAccessSoundsEnabled: true,
+    })
+  })
+})
+
+describe('useStreamingEvents Codex user input', () => {
+  beforeEach(() => {
+    setupListenMock()
+    mockPlayNotificationSound.mockClear()
+
+    useChatStore.setState({
+      pendingCodexUserInputRequests: {},
+      waitingForInputSessionIds: {},
+      activeToolCalls: {},
+      streamingContentBlocks: {},
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+    })
+  })
+
+  it('upserts a repeated request instead of rendering a second prompt', async () => {
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:codex_user_input_request')).toBe(
+        true
+      )
+    )
+
+    const event = {
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        request: {
+          rpc_id: 42,
+          item_id: 'question-1',
+          questions: [
+            {
+              id: 'model',
+              question: 'How should I continue?',
+              options: [{ label: 'Wait' }, { label: 'Use Codex' }],
+            },
+          ],
+        },
+      },
+    }
+    const listener = registeredListeners.get('chat:codex_user_input_request')
+    listener?.(event)
+    listener?.(event)
+
+    expect(
+      useChatStore.getState().pendingCodexUserInputRequests['session-1']
+    ).toHaveLength(1)
+    expect(useChatStore.getState().activeToolCalls['session-1']).toHaveLength(1)
+    expect(useChatStore.getState().streamingContentBlocks['session-1']).toEqual(
+      [{ type: 'tool_use', tool_call_id: 'question-1' }]
+    )
   })
 })
 
@@ -193,6 +499,7 @@ describe('useStreamingEvents cancellation sanitization', () => {
     useChatStore.setState({
       streamingContents: {},
       streamingContentBlocks: {},
+      streamingReplayContentBlocks: {},
       streamingThinkingContent: {},
       activeToolCalls: {},
       sendingSessionIds: {},
@@ -591,6 +898,71 @@ describe('useStreamingEvents cancellation sanitization', () => {
     expect(useChatStore.getState().isSessionReviewing('session-1')).toBe(true)
   })
 
+  it('does not restore input when cancelling an already-running prompt with no streamed content yet', async () => {
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    queryClient.setQueryData(['chat', 'session', 'session-1'], {
+      id: 'session-1',
+      name: 'Test',
+      order: 0,
+      created_at: 1,
+      updated_at: 1,
+      messages: [
+        {
+          id: 'current-user',
+          session_id: 'session-1',
+          role: 'user',
+          content: 'already running',
+          timestamp: 3,
+          tool_calls: [],
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      streamingContents: {},
+      streamingContentBlocks: {},
+      streamingThinkingContent: {},
+      activeToolCalls: {},
+      sendingSessionIds: { 'session-1': true },
+      sendStartedAt: { 'session-1': 1000 },
+      sessionWorktreeMap: { 'session-1': 'worktree-1' },
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+      lastSentMessages: { 'session-1': 'already running' },
+      inputDrafts: { 'session-1': '' },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:cancelled')).toBe(true)
+    )
+
+    registeredListeners.get('chat:cancelled')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        undo_send: false,
+        emitted_at_ms: 2000,
+      },
+    })
+
+    const session = queryClient.getQueryData<{
+      messages: { id: string; role: string; content: string }[]
+    }>(['chat', 'session', 'session-1'])
+
+    // Prompt already started — keep the user message, do not put it back in input.
+    expect(session?.messages.map(message => message.id)).toEqual([
+      'current-user',
+      'cancelled-session-1-2000',
+    ])
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe('')
+    expect(useChatStore.getState().lastSentMessages['session-1']).toBe(
+      undefined
+    )
+  })
+
   it('restores an instant-cancelled prompt while keeping prior history visible', async () => {
     const queryClient = createQueryClient()
     const wrapper = createWrapper(queryClient)
@@ -919,6 +1291,70 @@ describe('useStreamingEvents cancellation sanitization', () => {
     )
   })
 
+  it('ignores late untagged chunks after a tagged cancellation', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    queryClient.setQueryData(['chat', 'session', 'session-1'], {
+      id: 'session-1',
+      name: 'Test',
+      order: 0,
+      created_at: 1,
+      updated_at: 1,
+      messages: [],
+    })
+
+    useChatStore.setState({
+      streamingContents: { 'session-1': 'Partial response.' },
+      streamingContentBlocks: {
+        'session-1': [{ type: 'text', text: 'Partial response.' }],
+      },
+      sendingSessionIds: { 'session-1': true },
+      sendStartedAt: { 'session-1': 1000 },
+      sessionWorktreeMap: { 'session-1': 'worktree-1' },
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:cancelled')).toBe(true)
+    )
+
+    registeredListeners.get('chat:cancelled')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        undo_send: false,
+        emitted_at_ms: 2000,
+        run_id: 'run-old',
+      },
+    })
+
+    // Session persistence may restore is_reviewing=false before a delayed
+    // backend chunk arrives, so cancellation filtering cannot rely on it.
+    useChatStore.getState().setSessionReviewing('session-1', false)
+
+    const chunkListener = registeredListeners.get('chat:chunk')
+    expect(chunkListener).toBeDefined()
+    chunkListener?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Late untagged Grok chunk.',
+      },
+    })
+
+    expect(useChatStore.getState().sendingSessionIds['session-1']).toBeUndefined()
+    expect(useChatStore.getState().streamingContents['session-1']).toBeUndefined()
+  })
+
   it('continues ignoring cancelled run chunks after accepting a new run chunk', async () => {
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0)
@@ -1160,6 +1596,178 @@ describe('useStreamingEvents replay dedupe', () => {
         { type: 'text', text: 'After tool.' },
       ]
     )
+    expect(
+      useChatStore.getState().streamingReplayContentBlocks['session-1']
+    ).toBeUndefined()
+  })
+
+  it('does not double snapshot content when Grok re-emits tool_block for the same id', async () => {
+    // Reproduces web reconnect while Grok is mid-turn: the running snapshot is
+    // hydrated with dedupe blocks, then the WS buffer replays tool_use/tool_block
+    // pairs — including a second tool_block for the same id from tool_call_update.
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:tool_block')).toBe(true)
+    )
+
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Before tool. ',
+      },
+    })
+    registeredListeners.get('chat:tool_block')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        tool_call_id: 'tool-1',
+      },
+    })
+    // Grok ACP tool_call_update re-emits the same tool_block.
+    registeredListeners.get('chat:tool_block')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        tool_call_id: 'tool-1',
+      },
+    })
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'After tool.',
+      },
+    })
+
+    expect(useChatStore.getState().streamingContents['session-1']).toBe(
+      'Before tool. After tool.'
+    )
+    expect(useChatStore.getState().streamingContentBlocks['session-1']).toEqual(
+      [
+        { type: 'text', text: 'Before tool. ' },
+        { type: 'tool_use', tool_call_id: 'tool-1' },
+        { type: 'text', text: 'After tool.' },
+      ]
+    )
+    // Must not become: Before, tool, After, Before, tool, After
+    const blocks = useChatStore.getState().streamingContentBlocks['session-1']
+    const textBlocks = blocks?.filter(b => b.type === 'text') ?? []
+    expect(textBlocks).toHaveLength(2)
+  })
+
+  it('keeps deduplicating snapshot output when replay contains unpersisted thinking', async () => {
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:thinking')).toBe(true)
+    )
+
+    registeredListeners.get('chat:thinking')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Reasoning omitted from the running snapshot.',
+      },
+    })
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Before tool. ',
+      },
+    })
+    registeredListeners.get('chat:tool_block')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        tool_call_id: 'tool-1',
+      },
+    })
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'After tool.',
+      },
+    })
+
+    expect(useChatStore.getState().streamingContents['session-1']).toBe(
+      'Before tool. After tool.'
+    )
+    expect(useChatStore.getState().streamingContentBlocks['session-1']).toEqual(
+      [
+        { type: 'text', text: 'Before tool. ' },
+        { type: 'tool_use', tool_call_id: 'tool-1' },
+        { type: 'text', text: 'After tool.' },
+      ]
+    )
+    expect(
+      useChatStore.getState().streamingReplayContentBlocks['session-1']
+    ).toBeUndefined()
+  })
+
+  it('does not duplicate a steered prompt already present in the running snapshot', async () => {
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    useChatStore.setState({
+      streamingContentBlocks: {
+        'session-1': [
+          { type: 'text', text: 'Before steering.' },
+          { type: 'user_input', text: 'Also fix the header.' },
+          { type: 'text', text: 'After steering.' },
+        ],
+      },
+      streamingReplayContentBlocks: {
+        'session-1': [
+          { type: 'text', text: 'Before steering.' },
+          { type: 'user_input', text: 'Also fix the header.' },
+          { type: 'text', text: 'After steering.' },
+        ],
+      },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:steered')).toBe(true)
+    )
+
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Before steering.',
+      },
+    })
+    registeredListeners.get('chat:steered')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        text: 'Also fix the header.',
+      },
+    })
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'After steering.',
+      },
+    })
+
+    expect(useChatStore.getState().streamingContentBlocks['session-1']).toEqual([
+      { type: 'text', text: 'Before steering.' },
+      { type: 'user_input', text: 'Also fix the header.' },
+      { type: 'text', text: 'After steering.' },
+    ])
     expect(
       useChatStore.getState().streamingReplayContentBlocks['session-1']
     ).toBeUndefined()

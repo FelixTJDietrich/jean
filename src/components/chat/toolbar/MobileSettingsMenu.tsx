@@ -1,16 +1,24 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import {
   Brain,
   Check,
   ChevronRight,
   CircleDot,
-  ClipboardCopy,
+  Copy,
   ExternalLink,
   FolderOpen,
   Github,
   GitMerge,
   GitPullRequest,
   GitPullRequestArrow,
+  Globe,
   Paperclip,
   Play,
   Plug,
@@ -37,7 +45,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import type { CustomCliProfile, CliBackend } from '@/types/preferences'
+import type {
+  CliBackend,
+  CodexProviderProfile,
+  CustomCliProfile,
+} from '@/types/preferences'
 import type {
   EffortLevel,
   McpServerInfo,
@@ -62,8 +74,11 @@ import {
   CODEX_EFFORT_LEVEL_OPTIONS,
   EFFORT_LEVEL_OPTIONS,
   GROK_EFFORT_LEVEL_OPTIONS,
+  KIMI_EFFORT_LEVEL_OPTIONS,
+  ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
+  withAdaptiveEffortOption,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   getPrStatusDisplay,
@@ -85,20 +100,30 @@ import { useProjectsStore } from '@/store/projects-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useUIStore } from '@/store/ui-store'
 import {
+  usePorts,
   useProjects,
   useWorktree,
   type GitHubRemote,
+  type PackageScript,
 } from '@/services/projects'
 import { useGitHubPRs } from '@/services/github'
+import { resolveStackedOnPr } from '@/components/chat/worktree-branch-badge'
 import { chatQueryKeys } from '@/services/chat'
 import { getResumeCommand } from '@/components/chat/session-card-utils'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
-import type { PackageScript } from '@/services/projects'
+import { resolvePortUrl } from '@/components/browser/default-tab-url'
+
+/** Stable defaults so omit/undefined doesn't allocate a new [] each render. */
+const EMPTY_CODEX_PROVIDERS: CodexProviderProfile[] = []
+const EMPTY_RUN_SCRIPTS: string[] = []
+const EMPTY_PACKAGE_SCRIPTS: PackageScript[] = []
+const EMPTY_FAVORITE_PACKAGE_SCRIPTS: string[] = []
 
 interface MobileSettingsMenuProps {
   isDisabled: boolean
   providerLocked?: boolean
   selectedBackend: CliBackend
+  selectedModel: string
   selectedProvider: string | null
   backendModelLabel: ReactNode
   backendModelLabelText: string
@@ -110,11 +135,17 @@ interface MobileSettingsMenuProps {
   isCodex: boolean
   modelReasoning?: ModelReasoningCapability | null
   customCliProfiles: CustomCliProfile[]
+  customCodexProviders?: CodexProviderProfile[]
 
   onOpenBackendModelPicker: () => void
   handleProviderChange: (value: string) => void
   handleEffortLevelChange: (value: string) => void
   handleThinkingLevelChange: (value: string) => void
+  /**
+   * Bump this after a mobile model pick so the reasoning (effort/thinking)
+   * sheet opens without reopening the gear menu (issue #574).
+   */
+  openReasoningSheetSignal?: number
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
@@ -152,6 +183,7 @@ interface MobileSettingsMenuProps {
 export function MobileSettingsMenu({
   isDisabled,
   selectedBackend,
+  selectedModel,
   selectedProvider,
   backendModelLabel,
   backendModelLabelText,
@@ -163,10 +195,12 @@ export function MobileSettingsMenu({
   isCodex,
   modelReasoning,
   customCliProfiles,
+  customCodexProviders = EMPTY_CODEX_PROVIDERS,
   onOpenBackendModelPicker,
   handleProviderChange,
   handleEffortLevelChange,
   handleThinkingLevelChange,
+  openReasoningSheetSignal = 0,
   loadedIssueContexts,
   loadedPRContexts,
   loadedSecurityContexts,
@@ -188,17 +222,23 @@ export function MobileSettingsMenu({
   prDisplayStatus,
   worktreeId,
   onAttach,
-  runScripts = [],
+  runScripts = EMPTY_RUN_SCRIPTS,
   onRunCommand,
-  packageScripts = [],
-  favoritePackageScripts = [],
+  packageScripts = EMPTY_PACKAGE_SCRIPTS,
+  favoritePackageScripts = EMPTY_FAVORITE_PACKAGE_SCRIPTS,
   onRunPackageScript,
   onToggleFavoritePackageScript,
 }: MobileSettingsMenuProps) {
   const isPi = selectedBackend === 'pi'
   const isGrok = selectedBackend === 'grok'
+  const isKimi = selectedBackend === 'kimi'
+  const isAntigravity = selectedBackend === 'antigravity'
   const singleRunScript =
     runScripts.length === 1 ? (runScripts[0] ?? null) : null
+  const enabledMcpServersSet = useMemo(
+    () => new Set(enabledMcpServers),
+    [enabledMcpServers]
+  )
   const favoritePackageScriptSet = useMemo(
     () => new Set(favoritePackageScripts),
     [favoritePackageScripts]
@@ -215,24 +255,30 @@ export function MobileSettingsMenu({
   const usesEffortControl =
     modelReasoning?.type === 'effort' ||
     (modelReasoning === undefined &&
-      (useAdaptiveThinking || isCodex || isPi || isGrok))
+      (useAdaptiveThinking || isCodex || isPi || isGrok || isKimi || isAntigravity))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels
-      : isPi
-        ? PI_EFFORT_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : isAntigravity
+        ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
+        : isPi
+        ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
         : isCodex
-          ? CODEX_EFFORT_LEVEL_OPTIONS
-          : isGrok
-            ? GROK_EFFORT_LEVEL_OPTIONS
-            : EFFORT_LEVEL_OPTIONS
+          ? withAdaptiveEffortOption(CODEX_EFFORT_LEVEL_OPTIONS, selectedModel)
+          : isKimi
+            ? withAdaptiveEffortOption(KIMI_EFFORT_LEVEL_OPTIONS, selectedModel)
+            : isGrok
+              ? withAdaptiveEffortOption(GROK_EFFORT_LEVEL_OPTIONS, selectedModel)
+              : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
-      ? modelReasoning.levels
-      : THINKING_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : withAdaptiveEffortOption(THINKING_LEVEL_OPTIONS, selectedModel)
+  const effortOptionValues = new Set(effortLevelOptions.map(o => o.value))
+  const thinkingOptionValues = new Set(thinkingLevelOptions.map(o => o.value))
   const displayedEffortLevel =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels.some(o => o.value === selectedEffortLevel)
+      ? effortOptionValues.has(selectedEffortLevel)
         ? selectedEffortLevel
         : modelReasoning.default
       : isCodex || isPi
@@ -247,9 +293,9 @@ export function MobileSettingsMenu({
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
-  const displayedThinkingLevel =
-    modelReasoning?.type === 'thinking' &&
-    !modelReasoning.levels.some(o => o.value === selectedThinkingLevel)
+  const displayedThinkingLevel = thinkingOptionValues.has(selectedThinkingLevel)
+    ? selectedThinkingLevel
+    : modelReasoning?.type === 'thinking'
       ? modelReasoning.default
       : selectedThinkingLevel
   const displayedThinkingLabel =
@@ -264,22 +310,41 @@ export function MobileSettingsMenu({
   const queryClient = useQueryClient()
   const [menuOpen, setMenuOpen] = useState(false)
   const [effortSheetOpen, setEffortSheetOpen] = useState(false)
+  const [thinkingSheetOpen, setThinkingSheetOpen] = useState(false)
   const [mcpSheetOpen, setMcpSheetOpen] = useState(false)
   const [scriptsSheetOpen, setScriptsSheetOpen] = useState(false)
   const [resumeCommand, setResumeCommand] = useState<string | null>(null)
-  const providerDisplayName = getProviderDisplayName(selectedProvider)
+  // Keep radio/checkbox selections from dismissing the gear menu so users can
+  // chain model/effort/provider/MCP changes without reopening (issue #574).
+  const keepMenuOpenOnSelect = useCallback((event: Event) => {
+    event.preventDefault()
+  }, [])
+  const providerDisplayName = getProviderDisplayName(
+    selectedProvider,
+    selectedBackend
+  )
+  const showClaudeProviders =
+    customCliProfiles.length > 0 && selectedBackend === 'claude'
+  const showCodexProviders =
+    customCodexProviders.length > 0 && selectedBackend === 'codex'
+  const showProviderMenu = showClaudeProviders || showCodexProviders
   const { data: worktree } = useWorktree(worktreeId ?? null)
   const { data: projects } = useProjects()
   const project = worktree
     ? projects?.find(p => p.id === worktree.project_id)
     : null
+  const { data: ports = [] } = usePorts(worktree?.path ?? null)
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open', {
     enabled: menuOpen && !!project?.path,
   })
-  const stackedOnPR =
+  const stackedOnPR = resolveStackedOnPr(
     worktree?.base_branch && worktree.base_branch !== project?.default_branch
-      ? openPRs?.find(pr => pr.headRefName === worktree.base_branch)
-      : undefined
+      ? worktree.base_branch
+      : null,
+    openPRs,
+    project?.default_branch
+  )
+  const hasOpenSection = !!worktreeId || ports.length > 0
 
   const openBackendModelPicker = () => {
     setMenuOpen(false)
@@ -291,6 +356,11 @@ export function MobileSettingsMenu({
     requestAnimationFrame(() => setEffortSheetOpen(true))
   }
 
+  const openThinkingPicker = () => {
+    setMenuOpen(false)
+    requestAnimationFrame(() => setThinkingSheetOpen(true))
+  }
+
   const openMcpPicker = () => {
     setMenuOpen(false)
     requestAnimationFrame(() => setMcpSheetOpen(true))
@@ -300,6 +370,24 @@ export function MobileSettingsMenu({
     setMenuOpen(false)
     requestAnimationFrame(() => setScriptsSheetOpen(true))
   }
+
+  // After mobile model selection, auto-open effort/thinking so users don't
+  // have to reopen the settings cog (issue #574).
+  const lastReasoningSheetSignalRef = useRef(0)
+  useEffect(() => {
+    if (!openReasoningSheetSignal) return
+    if (openReasoningSheetSignal === lastReasoningSheetSignalRef.current) return
+    lastReasoningSheetSignalRef.current = openReasoningSheetSignal
+    if (hideReasoningControl) return
+    setMenuOpen(false)
+    if (usesEffortControl) {
+      setThinkingSheetOpen(false)
+      requestAnimationFrame(() => setEffortSheetOpen(true))
+    } else {
+      setEffortSheetOpen(false)
+      requestAnimationFrame(() => setThinkingSheetOpen(true))
+    }
+  }, [openReasoningSheetSignal, hideReasoningControl, usesEffortControl])
 
   const getActiveResumeCommand = useCallback(() => {
     if (!worktreeId) return null
@@ -442,7 +530,7 @@ export function MobileSettingsMenu({
           align={isMobile ? 'end' : 'start'}
           className="w-72"
         >
-          {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
+          {showProviderMenu && (
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
@@ -452,30 +540,57 @@ export function MobileSettingsMenu({
                 </span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
-                <DropdownMenuRadioGroup
-                  value={selectedProvider ?? '__anthropic__'}
-                  onValueChange={handleProviderChange}
-                >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
-                  </DropdownMenuRadioItem>
-                  {customCliProfiles.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        Custom Providers
-                      </DropdownMenuLabel>
-                      {customCliProfiles.map(profile => (
-                        <DropdownMenuRadioItem
-                          key={profile.name}
-                          value={profile.name}
-                        >
-                          {profile.name}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuRadioGroup>
+                {showClaudeProviders ? (
+                  <DropdownMenuRadioGroup
+                    value={selectedProvider ?? '__anthropic__'}
+                    onValueChange={handleProviderChange}
+                  >
+                    <DropdownMenuRadioItem
+                      value="__anthropic__"
+                      onSelect={keepMenuOpenOnSelect}
+                    >
+                      Anthropic
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">
+                      Custom Providers
+                    </DropdownMenuLabel>
+                    {customCliProfiles.map(profile => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                        onSelect={keepMenuOpenOnSelect}
+                      >
+                        {profile.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                ) : (
+                  <DropdownMenuRadioGroup
+                    value={selectedProvider ?? '__default__'}
+                    onValueChange={handleProviderChange}
+                  >
+                    <DropdownMenuRadioItem
+                      value="__default__"
+                      onSelect={keepMenuOpenOnSelect}
+                    >
+                      Default (OpenAI)
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">
+                      Custom Providers
+                    </DropdownMenuLabel>
+                    {customCodexProviders.map(profile => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                        onSelect={keepMenuOpenOnSelect}
+                      >
+                        {profile.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                )}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
           )}
@@ -521,6 +636,7 @@ export function MobileSettingsMenu({
                     <DropdownMenuRadioItem
                       key={option.value}
                       value={option.value}
+                      onSelect={keepMenuOpenOnSelect}
                     >
                       {option.label}
                       <span className="ml-auto pl-4 text-xs text-muted-foreground">
@@ -531,6 +647,15 @@ export function MobileSettingsMenu({
                 </DropdownMenuRadioGroup>
               </DropdownMenuSubContent>
             </DropdownMenuSub>
+          ) : isMobile ? (
+            <DropdownMenuItem onSelect={openThinkingPicker}>
+              <Brain className="h-4 w-4 text-muted-foreground" />
+              <span>Thinking</span>
+              <span className="ml-auto w-16 text-right text-xs text-muted-foreground">
+                {displayedThinkingLabel}
+              </span>
+              <ChevronRight className="ml-2 h-4 w-4 shrink-0 text-foreground" />
+            </DropdownMenuItem>
           ) : (
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className="[&>svg:last-child]:!ml-2">
@@ -549,6 +674,7 @@ export function MobileSettingsMenu({
                     <DropdownMenuRadioItem
                       key={option.value}
                       value={option.value}
+                      onSelect={keepMenuOpenOnSelect}
                     >
                       {option.label}
                       <span className="ml-auto pl-4 text-xs text-muted-foreground">
@@ -619,18 +745,22 @@ export function MobileSettingsMenu({
                           <DropdownMenuCheckboxItem
                             key={`${backend}-${server.name}`}
                             checked={
-                              !server.disabled &&
-                              enabledMcpServers.includes(key)
+                              !server.disabled && enabledMcpServersSet.has(key)
                             }
                             onCheckedChange={() => onToggleMcpServer(key)}
-                            disabled={server.disabled}
+                            onSelect={keepMenuOpenOnSelect}
+                            disabled={server.disabled || backend === 'antigravity'}
                             className={
                               server.disabled ? 'opacity-50' : undefined
                             }
                           >
                             {server.name}
                             <span className="ml-auto pl-4 text-xs text-muted-foreground">
-                              {server.disabled ? 'disabled' : server.scope}
+                              {server.disabled
+                                ? 'disabled'
+                                : backend === 'antigravity'
+                                  ? 'automatic'
+                                  : server.scope}
                             </span>
                           </DropdownMenuCheckboxItem>
                         )
@@ -642,7 +772,7 @@ export function MobileSettingsMenu({
             </DropdownMenuSub>
           ) : (
             <DropdownMenuItem disabled>
-              <Plug className="mr-2 h-4 w-4 text-muted-foreground" />
+              <Plug className="h-4 w-4 text-muted-foreground" />
               <span>MCP</span>
               <span className="ml-auto text-xs text-muted-foreground">
                 None
@@ -680,9 +810,9 @@ export function MobileSettingsMenu({
                     Run
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
-                    {runScripts.map((cmd, i) => (
+                    {runScripts.map(cmd => (
                       <DropdownMenuItem
-                        key={i}
+                        key={cmd}
                         onSelect={() => handleRunCommand(cmd)}
                         className="font-mono text-xs"
                       >
@@ -709,20 +839,50 @@ export function MobileSettingsMenu({
           )}
           {resumeCommand && (
             <DropdownMenuItem onSelect={handleCopyResumeCommand}>
-              <ClipboardCopy className="h-4 w-4" />
-              Resume Command
+              <Copy className="h-4 w-4" />
+              Native Resume Command
             </DropdownMenuItem>
           )}
-          {worktreeId && (
-            <DropdownMenuItem
-              onSelect={() => {
-                setMenuOpen(false)
-                handleOpenGitHub()
-              }}
-            >
-              <Github className="h-4 w-4" />
-              GitHub
-            </DropdownMenuItem>
+
+          {hasOpenSection && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-xs text-muted-foreground">
+                Open
+              </DropdownMenuLabel>
+              {worktreeId && (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    setMenuOpen(false)
+                    handleOpenGitHub()
+                  }}
+                >
+                  <Github className="h-4 w-4" />
+                  GitHub
+                  <ExternalLink className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" />
+                </DropdownMenuItem>
+              )}
+              {ports.map(port => {
+                const host = port.host?.trim() || 'localhost'
+                const url = resolvePortUrl(port)
+                const label = port.label?.trim()
+                  ? `${port.label} (${host}:${port.port})`
+                  : `${host}:${port.port}`
+                return (
+                  <DropdownMenuItem
+                    key={`${host}:${port.port}:${port.label}`}
+                    onSelect={() => {
+                      setMenuOpen(false)
+                      openExternal(url)
+                    }}
+                  >
+                    <Globe className="h-4 w-4" />
+                    <span className="truncate">{label}</span>
+                    <ExternalLink className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" />
+                  </DropdownMenuItem>
+                )
+              })}
+            </>
           )}
 
           {hasLinkedPr && (
@@ -768,7 +928,8 @@ export function MobileSettingsMenu({
                 >
                   <GitPullRequestArrow className="h-4 w-4 text-muted-foreground" />
                   <span className="truncate">
-                    Stacked on #{stackedOnPR.number} {stackedOnPR.title}
+                    Stacked on #{stackedOnPR.number}
+                    {stackedOnPR.title ? ` ${stackedOnPR.title}` : ''}
                   </span>
                 </DropdownMenuItem>
               )}
@@ -796,6 +957,8 @@ export function MobileSettingsMenu({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -829,6 +992,8 @@ export function MobileSettingsMenu({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -863,6 +1028,8 @@ export function MobileSettingsMenu({
                         #{ctx.number} {ctx.packageName} ({ctx.severity})
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -900,6 +1067,8 @@ export function MobileSettingsMenu({
                         {ctx.ghsaId} — {ctx.summary}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -939,6 +1108,8 @@ export function MobileSettingsMenu({
                       </span>
                       {ctx.url && (
                         <button
+                          type="button"
+                        aria-label="Open external link"
                           className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                           onClick={e => {
                             e.stopPropagation()
@@ -1017,6 +1188,53 @@ export function MobileSettingsMenu({
                     <span className="block text-xs text-muted-foreground">
                       {option.description}
                     </span>
+                  </span>
+                  {selected && <Check className="h-4 w-4 shrink-0" />}
+                </button>
+              )
+            })}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={thinkingSheetOpen} onOpenChange={setThinkingSheetOpen}>
+        <SheetContent
+          side="bottom"
+          className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
+          showCloseButton={false}
+        >
+          <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
+            <SheetTitle>Select thinking</SheetTitle>
+            <SheetDescription>
+              Choose how much thinking the model should use.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="overflow-y-auto px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+            {thinkingLevelOptions.map(option => {
+              const selected = option.value === displayedThinkingLevel
+              const detail =
+                'tokens' in option ? option.tokens : option.description
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={cn(
+                    'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent',
+                    selected && 'bg-accent'
+                  )}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    handleThinkingLevelChange(option.value)
+                    setThinkingSheetOpen(false)
+                  }}
+                >
+                  <span className="flex-1">
+                    <span className="block font-medium">{option.label}</span>
+                    {detail ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {detail}
+                      </span>
+                    ) : null}
                   </span>
                   {selected && <Check className="h-4 w-4 shrink-0" />}
                 </button>
@@ -1105,12 +1323,12 @@ export function MobileSettingsMenu({
                   {(grouped[backend] ?? []).map(server => {
                     const key = mcpKey(backend, server.name)
                     const enabled =
-                      !server.disabled && enabledMcpServers.includes(key)
+                      !server.disabled && enabledMcpServersSet.has(key)
                     return (
                       <button
                         key={key}
                         type="button"
-                        disabled={server.disabled}
+                        disabled={server.disabled || backend === 'antigravity'}
                         aria-pressed={enabled}
                         className={cn(
                           'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent disabled:opacity-50',
@@ -1122,6 +1340,11 @@ export function MobileSettingsMenu({
                           <span className="block truncate font-medium">
                             {server.name}
                           </span>
+                          {backend === 'antigravity' && !server.disabled && (
+                            <span className="block text-xs text-muted-foreground">
+                              Loaded automatically by Antigravity
+                            </span>
+                          )}
                           <span className="block text-xs text-muted-foreground">
                             {server.disabled ? 'Disabled' : server.scope}
                           </span>

@@ -17,7 +17,6 @@ import { DevModeBanner } from './DevModeBanner'
 import { SidebarWidthProvider } from './SidebarWidthContext'
 import { MainWindowContent } from './MainWindowContent'
 import { CommandPalette } from '@/components/command-palette/CommandPalette'
-import { QuitConfirmationDialog } from './QuitConfirmationDialog'
 import { BranchConflictDialog } from '@/components/worktree/BranchConflictDialog'
 import { TeardownOutputDialog } from '@/components/worktree/TeardownOutputDialog'
 import { WindowResizeHandles } from './WindowResizeHandles'
@@ -26,6 +25,21 @@ import { WindowResizeHandles } from './WindowResizeHandles'
 const LeftSideBar = lazy(() =>
   import('./LeftSideBar').then(mod => ({
     default: mod.LeftSideBar,
+  }))
+)
+const FileBrowserSidebar = lazy(() =>
+  import('@/components/file-browser').then(mod => ({
+    default: mod.FileBrowserSidebar,
+  }))
+)
+const MobileFileBrowser = lazy(() =>
+  import('@/components/file-browser').then(mod => ({
+    default: mod.MobileFileBrowser,
+  }))
+)
+const FileContentModal = lazy(() =>
+  import('@/components/chat/FileContentModal').then(mod => ({
+    default: mod.FileContentModal,
   }))
 )
 const PreferencesDialog = lazy(() =>
@@ -160,14 +174,17 @@ const CloseWorktreeDialog = lazy(() =>
 )
 import { FloatingDock } from '@/components/ui/floating-dock'
 import { Toaster } from '@/components/ui/sonner'
+import { MobileLeftSidebar } from './MobileLeftSidebar'
 import { BrowserSidePane } from '@/components/browser/BrowserSidePane'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
 import { useBrowserEvents } from '@/hooks/useBrowserPane'
 import { useToasterOffset } from '@/hooks/useToasterOffset'
 import { useWindowMaximized } from '@/hooks/use-window-maximized'
 import { useTerminalThemeSync } from '@/hooks/useTerminalThemeSync'
+import { useSwipeBack } from '@/hooks/useSwipeBack'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
+import { useChatStore } from '@/store/chat-store'
 import { useMainWindowEventListeners } from '@/hooks/useMainWindowEventListeners'
 import { useGlobalInputSanitizer } from '@/hooks/useGlobalInputSanitizer'
 import { useCloseSessionOrWorktreeKeybinding } from '@/services/chat'
@@ -195,6 +212,9 @@ import { isLinux, isWindows } from '@/lib/platform'
 // Left sidebar resize constraints (pixels)
 const MIN_SIDEBAR_WIDTH = 150
 const MAX_SIDEBAR_WIDTH = 500
+// File browser sidebar resize constraints (pixels)
+const MIN_FILE_BROWSER_WIDTH = 180
+const MAX_FILE_BROWSER_WIDTH = 520
 
 function useRetainedMount(active: boolean) {
   const [shouldMount, setShouldMount] = useState(active)
@@ -215,6 +235,13 @@ export function MainWindow() {
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const leftSidebarSize = useUIStore(state => state.leftSidebarSize)
   const setLeftSidebarSize = useUIStore(state => state.setLeftSidebarSize)
+  const setLeftSidebarVisible = useUIStore(state => state.setLeftSidebarVisible)
+  const fileBrowserVisible = useUIStore(state => state.fileBrowserVisible)
+  const fileBrowserSize = useUIStore(state => state.fileBrowserSize)
+  const setFileBrowserSize = useUIStore(state => state.setFileBrowserSize)
+  const setFileBrowserVisible = useUIStore(state => state.setFileBrowserVisible)
+  const viewingFilePath = useUIStore(state => state.viewingFilePath)
+  const setViewingFilePath = useUIStore(state => state.setViewingFilePath)
   const preferencesOpen = useUIStore(state => state.preferencesOpen)
   const commitModalOpen = useUIStore(state => state.commitModalOpen)
   const onboardingOpen = useUIStore(state => state.onboardingOpen)
@@ -222,7 +249,6 @@ export function MainWindow() {
   const jeanMcpIntroOpen = useUIStore(state => state.jeanMcpIntroOpen)
   const openInModalOpen = useUIStore(state => state.openInModalOpen)
   const remotePickerOpen = useUIStore(state => state.remotePickerOpen)
-  const magicModalOpen = useUIStore(state => state.magicModalOpen)
   const resolveConflictsDialogOpen = useUIStore(
     state => state.resolveConflictsDialogOpen
   )
@@ -241,6 +267,8 @@ export function MainWindow() {
   const updateModalVersion = useUIStore(state => state.updateModalVersion)
   const githubDashboardOpen = useUIStore(state => state.githubDashboardOpen)
   const newSessionModeTarget = useUIStore(state => state.newSessionModeTarget)
+  const sessionChatModalOpen = useUIStore(state => state.sessionChatModalOpen)
+  const activeWorktreePath = useChatStore(state => state.activeWorktreePath)
   const selectedWorktreeId = useProjectsStore(state => state.selectedWorktreeId)
   const addProjectDialogOpen = useProjectsStore(
     state => state.addProjectDialogOpen
@@ -256,6 +284,17 @@ export function MainWindow() {
 
   const isMobile = useIsMobile()
   const isTouch = useIsTouchDevice()
+  const canSwipeOpenSidebar =
+    isMobile &&
+    !activeWorktreePath &&
+    !leftSidebarVisible &&
+    !sessionChatModalOpen
+  const swipeOpenSidebar = useSwipeBack({
+    onSwipeBack: useCallback(() => {
+      useUIStore.getState().setLeftSidebarVisible(true)
+    }, []),
+    enabled: canSwipeOpenSidebar,
+  })
   const swipeDown = useSwipeDown({
     onSwipeDown: useCallback(() => {
       useUIStore.getState().setCommandPaletteOpen(true)
@@ -271,7 +310,7 @@ export function MainWindow() {
     : null
 
   // Compute window title based on selected project/worktree
-  // On mobile, show only project name (worktree name is in the content header)
+  // On mobile, show only the project name to fit the compact title bar.
   const windowTitle = useMemo(() => {
     if (!project || !worktree) return 'Jean'
     if (isMobile) return project.name
@@ -281,13 +320,15 @@ export function MainWindow() {
     return `${project.name} › ${worktree.name}${branchSuffix}`
   }, [project, worktree, isMobile])
 
-  // Compute polling info - null if no worktree or data not loaded
+  // Compute polling info - null if no worktree or data not loaded.
+  // Must use the worktree's own base_branch (e.g. v4.x), not the project
+  // default (next/main), or status shows false behind counts and huge diffs.
   const pollingInfo: WorktreePollingInfo | null = useMemo(() => {
     if (!worktree || !project) return null
     return {
       worktreeId: worktree.id,
       worktreePath: worktree.path,
-      baseBranch: project.default_branch ?? 'main',
+      baseBranch: worktree.base_branch ?? project.default_branch ?? 'main',
       prNumber: worktree.pr_number,
       prUrl: worktree.pr_url,
     }
@@ -308,6 +349,7 @@ export function MainWindow() {
 
   // Ref for the sidebar element to update width directly during drag
   const sidebarRef = useRef<HTMLDivElement>(null)
+  const fileBrowserRef = useRef<HTMLDivElement>(null)
 
   // Set up global event listeners (keyboard shortcuts, etc.)
   useMainWindowEventListeners()
@@ -410,6 +452,36 @@ export function MainWindow() {
     [leftSidebarSize, setLeftSidebarSize]
   )
 
+  const handleFileBrowserResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      const startX = e.clientX
+      const startWidth = fileBrowserSize
+      let currentWidth = startWidth
+
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = moveEvent.clientX - startX
+        currentWidth = Math.min(
+          MAX_FILE_BROWSER_WIDTH,
+          Math.max(MIN_FILE_BROWSER_WIDTH, startWidth + delta)
+        )
+        if (fileBrowserRef.current) {
+          fileBrowserRef.current.style.width = `${currentWidth}px`
+        }
+      }
+
+      const handleMouseUp = () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+        setFileBrowserSize(currentWidth)
+      }
+
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+    },
+    [fileBrowserSize, setFileBrowserSize]
+  )
+
   const shouldRenderPreferencesDialog = useRetainedMount(preferencesOpen)
   const shouldRenderProjectSettingsDialog = useRetainedMount(
     projectSettingsDialogOpen
@@ -431,7 +503,9 @@ export function MainWindow() {
     reviewCommentsModalOpen
   )
   const shouldRenderWorkflowRunsModal = useRetainedMount(workflowRunsModalOpen)
-  const shouldRenderMagicModal = useRetainedMount(magicModalOpen)
+  // Always mount MagicModal so canvas/mobile magic-command dispatches and
+  // prompt-session starters work even when the dialog has never been opened.
+  const shouldRenderMagicModal = true
   const shouldRenderResolveConflictsDialog = useRetainedMount(
     resolveConflictsDialogOpen
   )
@@ -488,8 +562,8 @@ export function MainWindow() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 overflow-hidden pt-8">
-        {/* Left Sidebar with pixel-based width - only render after UI state is initialized */}
-        {leftSidebarVisible && isInitialized && (
+        {/* Desktop: in-flow left sidebar (shifts layout). Only after UI state init. */}
+        {!isMobile && leftSidebarVisible && isInitialized && (
           <SidebarWidthProvider value={leftSidebarSize}>
             <div
               ref={sidebarRef}
@@ -503,9 +577,13 @@ export function MainWindow() {
           </SidebarWidthProvider>
         )}
 
-        {/* Custom resize handle for left sidebar */}
-        {leftSidebarVisible && isInitialized && (
+        {/* Desktop: custom resize handle for left sidebar */}
+        {!isMobile && leftSidebarVisible && isInitialized && (
           <div
+            role="separator"
+            tabIndex={-1}
+            aria-orientation="vertical"
+            aria-label="Resize left sidebar"
             className="relative h-full w-px bg-border"
             onMouseDown={handleResizeStart}
           >
@@ -514,10 +592,64 @@ export function MainWindow() {
           </div>
         )}
 
+        {/* Desktop: file browser sidebar */}
+        {!isMobile && fileBrowserVisible && isInitialized && (
+          <div
+            ref={fileBrowserRef}
+            className="h-full overflow-hidden"
+            style={{ width: fileBrowserSize }}
+          >
+            <Suspense fallback={null}>
+              <FileBrowserSidebar />
+            </Suspense>
+          </div>
+        )}
+
+        {/* Desktop: resize handle for file browser */}
+        {!isMobile && fileBrowserVisible && isInitialized && (
+          <div
+            role="separator"
+            tabIndex={-1}
+            aria-orientation="vertical"
+            aria-label="Resize file browser"
+            className="relative h-full w-px bg-border"
+            onMouseDown={handleFileBrowserResizeStart}
+          >
+            <div className="absolute inset-y-0 -left-1.5 -right-1.5 cursor-col-resize" />
+          </div>
+        )}
+
+        {/* Mobile: overlay drawer — does not shift main content; backdrop dismisses */}
+        {isMobile && isInitialized && (
+          <MobileLeftSidebar
+            open={leftSidebarVisible}
+            onOpenChange={setLeftSidebarVisible}
+            width={leftSidebarSize}
+            isDragging={swipeOpenSidebar.isSwiping}
+            dragOffset={swipeOpenSidebar.translateX}
+            dragTransition={swipeOpenSidebar.transitionStyle}
+          />
+        )}
+
+        {/* Mobile: file browser overlay drawer */}
+        {isMobile && isInitialized && (
+          <Suspense fallback={null}>
+            <MobileFileBrowser
+              open={fileBrowserVisible}
+              onOpenChange={setFileBrowserVisible}
+              width={fileBrowserSize}
+            />
+          </Suspense>
+        )}
+
         {/* Main Content + bottom browser panel stacked vertically */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="relative min-w-0 flex-1 overflow-hidden">
-            <MainWindowContent />
+            <MainWindowContent
+              sidebarSwipeContainerRef={
+                canSwipeOpenSidebar ? swipeOpenSidebar.containerRef : undefined
+              }
+            />
             <FloatingDock />
           </div>
           {/* Browser bottom panel - native-only, pinned to bottom */}
@@ -530,6 +662,13 @@ export function MainWindow() {
 
       {/* Global UI Components (hidden until triggered) */}
       <CommandPalette />
+      {/* Global file viewer/editor (tool clicks + file browser) */}
+      <Suspense fallback={null}>
+        <FileContentModal
+          filePath={viewingFilePath}
+          onClose={() => setViewingFilePath(null)}
+        />
+      </Suspense>
       {shouldRenderPreferencesDialog && (
         <Suspense fallback={null}>
           <PreferencesDialog />
@@ -674,7 +813,6 @@ export function MainWindow() {
           />
         </Suspense>
       )}
-      <QuitConfirmationDialog />
       {shouldRenderGitHubDashboardModal && (
         <Suspense fallback={null}>
           <GitHubDashboardModal />

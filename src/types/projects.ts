@@ -19,9 +19,13 @@ export interface ProjectAutoFixSettings {
   excluded_labels?: string[]
   planning_backend: string
   planning_model?: string | null
+  /** Claude custom CLI profile name for planning (null/undefined = Anthropic). */
+  planning_provider?: string | null
   auto_yolo_enabled?: boolean
   yolo_backend: string
   yolo_model?: string | null
+  /** Claude custom CLI profile name for yolo (null/undefined = Anthropic). */
+  yolo_provider?: string | null
   active_hours_enabled?: boolean
   active_hours_start?: number
   active_hours_end?: number
@@ -79,6 +83,12 @@ export interface Project {
   linear_api_key?: string | null
   /** Linear team ID to filter issues (undefined/null = show all teams) */
   linear_team_id?: string | null
+  /** Sentry auth token override for this project */
+  sentry_auth_token?: string | null
+  /** Sentry organization slug */
+  sentry_organization_slug?: string | null
+  /** Sentry project slug */
+  sentry_project_slug?: string | null
   /** IDs of linked projects for cross-project context sharing */
   linked_project_ids?: string[]
   /** Per-project automated issue fixing settings */
@@ -122,6 +132,8 @@ export interface Worktree {
   branch: string
   /** Base branch this worktree was created from (undefined for legacy worktrees or base sessions) */
   base_branch?: string
+  /** Remote the base branch was taken from when explicitly picked (e.g. "fork" for fork/main) */
+  base_remote?: string
   /** Unix timestamp when worktree was created */
   created_at: number
   /** Output from setup script (if any) */

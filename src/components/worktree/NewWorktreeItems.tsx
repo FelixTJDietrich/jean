@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { cn } from '@/lib/utils'
+import { ItemSelectCheckbox } from './ItemSelectCheckbox'
 import { isNewIssue } from '@/services/github'
 import type {
   GitHubIssue,
@@ -49,6 +50,7 @@ export function SessionTabBar({
     <div className="flex overflow-x-auto border-b border-border scrollbar-hide">
       {tabs.map(tab => (
         <button
+          type="button"
           key={tab.id}
           onClick={() => onTabChange(tab.id)}
           tabIndex={-1}
@@ -78,6 +80,8 @@ export interface IssueItemProps {
   index: number
   isSelected: boolean
   isCreating: boolean
+  isChecked?: boolean
+  onCheckedChange?: (checked: boolean) => void
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
@@ -90,6 +94,8 @@ export function IssueItem({
   index,
   isSelected,
   isCreating,
+  isChecked = false,
+  onCheckedChange,
   onMouseEnter,
   onClick,
   onInvestigate,
@@ -104,9 +110,18 @@ export function IssueItem({
         'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
+        isChecked && !isSelected && 'bg-accent/50',
         isCreating && 'opacity-50'
       )}
     >
+      {onCheckedChange && (
+        <ItemSelectCheckbox
+          checked={isChecked}
+          disabled={isCreating}
+          ariaLabel={`Select issue #${issue.number}`}
+          onCheckedChange={onCheckedChange}
+        />
+      )}
       {isCreating ? (
         <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
       ) : (
@@ -117,47 +132,59 @@ export function IssueItem({
           )}
         />
       )}
-      <button
-        onClick={e => onClick(e.metaKey)}
-        disabled={isCreating}
-        className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">#{issue.number}</span>
-          <span className="text-sm font-medium truncate">{issue.title}</span>
-          {isNewIssue(issue.created_at) && (
-            <span className="shrink-0 rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-600 border border-green-500/20">
-              New
+      <div className="flex-1 min-w-0">
+        <button
+          type="button"
+          onClick={e => onClick(e.metaKey)}
+          disabled={isCreating}
+          className="w-full min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              #{issue.number}
             </span>
-          )}
-        </div>
+            <span className="text-sm font-medium truncate">{issue.title}</span>
+            {isNewIssue(issue.created_at) && (
+              <span className="shrink-0 rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-600 border border-green-500/20">
+                New
+              </span>
+            )}
+          </div>
+        </button>
         {issue.labels.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1">
-            {issue.labels.slice(0, 3).map(label => (
-              <span
-                key={label.name}
-                className={cn(
-                  'px-1.5 py-0.5 text-xs rounded-full',
-                  onLabelClick &&
-                    'cursor-pointer hover:opacity-75 transition-opacity'
-                )}
-                style={{
-                  backgroundColor: `#${label.color}20`,
-                  color: `#${label.color}`,
-                  border: `1px solid #${label.color}40`,
-                }}
-                onClick={
-                  onLabelClick
-                    ? e => {
-                        e.stopPropagation()
-                        onLabelClick(label.name)
-                      }
-                    : undefined
-                }
-              >
-                {label.name}
-              </span>
-            ))}
+            {issue.labels.slice(0, 3).map(label =>
+              onLabelClick ? (
+                <button
+                  key={label.name}
+                  type="button"
+                  className="px-1.5 py-0.5 text-xs rounded-full cursor-pointer hover:opacity-75 transition-opacity"
+                  style={{
+                    backgroundColor: `#${label.color}20`,
+                    color: `#${label.color}`,
+                    border: `1px solid #${label.color}40`,
+                  }}
+                  onClick={e => {
+                    e.stopPropagation()
+                    onLabelClick(label.name)
+                  }}
+                >
+                  {label.name}
+                </button>
+              ) : (
+                <span
+                  key={label.name}
+                  className="px-1.5 py-0.5 text-xs rounded-full"
+                  style={{
+                    backgroundColor: `#${label.color}20`,
+                    color: `#${label.color}`,
+                    border: `1px solid #${label.color}40`,
+                  }}
+                >
+                  {label.name}
+                </span>
+              )
+            )}
             {issue.labels.length > 3 && (
               <span className="text-xs text-muted-foreground">
                 +{issue.labels.length - 3}
@@ -165,7 +192,7 @@ export function IssueItem({
             )}
           </div>
         )}
-      </button>
+      </div>
       <div className="shrink-0 flex items-center gap-1 self-center">
         <ItemActions
           label="Issue"
@@ -186,6 +213,8 @@ export interface PRItemProps {
   isSelected: boolean
   isCreating: boolean
   isStacking: boolean
+  isChecked?: boolean
+  onCheckedChange?: (checked: boolean) => void
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
@@ -200,6 +229,8 @@ export function PRItem({
   isSelected,
   isCreating,
   isStacking,
+  isChecked = false,
+  onCheckedChange,
   onMouseEnter,
   onClick,
   onInvestigate,
@@ -216,9 +247,18 @@ export function PRItem({
         'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
+        isChecked && !isSelected && 'bg-accent/50',
         busy && 'opacity-50'
       )}
     >
+      {onCheckedChange && (
+        <ItemSelectCheckbox
+          checked={isChecked}
+          disabled={busy}
+          ariaLabel={`Select PR #${pr.number}`}
+          onCheckedChange={onCheckedChange}
+        />
+      )}
       {busy ? (
         <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
       ) : (
@@ -233,52 +273,62 @@ export function PRItem({
           )}
         />
       )}
-      <button
-        onClick={e => onClick(e.metaKey)}
-        disabled={busy}
-        className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">#{pr.number}</span>
-          <span className="text-sm font-medium truncate">{pr.title}</span>
-          {pr.isDraft && (
-            <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-              Draft
+      <div className="flex-1 min-w-0">
+        <button
+          type="button"
+          onClick={e => onClick(e.metaKey)}
+          disabled={busy}
+          className="w-full min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">#{pr.number}</span>
+            <span className="text-sm font-medium truncate">{pr.title}</span>
+            {pr.isDraft && (
+              <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                Draft
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs text-muted-foreground truncate">
+              {pr.headRefName} → {pr.baseRefName}
             </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs text-muted-foreground truncate">
-            {pr.headRefName} → {pr.baseRefName}
-          </span>
-        </div>
+          </div>
+        </button>
         {pr.labels.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1">
-            {pr.labels.slice(0, 3).map(label => (
-              <span
-                key={label.name}
-                className={cn(
-                  'px-1.5 py-0.5 text-xs rounded-full',
-                  onLabelClick &&
-                    'cursor-pointer hover:opacity-75 transition-opacity'
-                )}
-                style={{
-                  backgroundColor: `#${label.color}20`,
-                  color: `#${label.color}`,
-                  border: `1px solid #${label.color}40`,
-                }}
-                onClick={
-                  onLabelClick
-                    ? e => {
-                        e.stopPropagation()
-                        onLabelClick(label.name)
-                      }
-                    : undefined
-                }
-              >
-                {label.name}
-              </span>
-            ))}
+            {pr.labels.slice(0, 3).map(label =>
+              onLabelClick ? (
+                <button
+                  key={label.name}
+                  type="button"
+                  className="px-1.5 py-0.5 text-xs rounded-full cursor-pointer hover:opacity-75 transition-opacity"
+                  style={{
+                    backgroundColor: `#${label.color}20`,
+                    color: `#${label.color}`,
+                    border: `1px solid #${label.color}40`,
+                  }}
+                  onClick={e => {
+                    e.stopPropagation()
+                    onLabelClick(label.name)
+                  }}
+                >
+                  {label.name}
+                </button>
+              ) : (
+                <span
+                  key={label.name}
+                  className="px-1.5 py-0.5 text-xs rounded-full"
+                  style={{
+                    backgroundColor: `#${label.color}20`,
+                    color: `#${label.color}`,
+                    border: `1px solid #${label.color}40`,
+                  }}
+                >
+                  {label.name}
+                </span>
+              )
+            )}
             {pr.labels.length > 3 && (
               <span className="text-xs text-muted-foreground">
                 +{pr.labels.length - 3}
@@ -286,7 +336,7 @@ export function PRItem({
             )}
           </div>
         )}
-      </button>
+      </div>
       <div className="shrink-0 flex items-center gap-1 self-center">
         <ItemActions
           label="PR"
@@ -300,11 +350,13 @@ export function PRItem({
         <Tooltip>
           <TooltipTrigger asChild>
             <button
+              type="button"
               onClick={e => {
                 e.stopPropagation()
                 onStack(e.metaKey || e.ctrlKey)
               }}
               disabled={busy}
+              aria-label={`New worktree based on ${pr.headRefName}`}
               className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {isStacking ? (
@@ -328,10 +380,8 @@ export interface BranchItemProps {
   index: number
   isSelected: boolean
   isCreating: boolean
-  isStacking: boolean
   onMouseEnter: () => void
   onClick: (background: boolean) => void
-  onStack: (background: boolean) => void
 }
 
 export function BranchItem({
@@ -339,12 +389,9 @@ export function BranchItem({
   index,
   isSelected,
   isCreating,
-  isStacking,
   onMouseEnter,
   onClick,
-  onStack,
 }: BranchItemProps) {
-  const busy = isCreating || isStacking
   return (
     <div
       data-item-index={index}
@@ -353,42 +400,22 @@ export function BranchItem({
         'group w-full flex items-center gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
-        busy && 'opacity-50'
+        isCreating && 'opacity-50'
       )}
     >
-      {busy ? (
+      {isCreating ? (
         <Loader2 className="h-4 w-4 animate-spin text-muted-foreground flex-shrink-0" />
       ) : (
         <GitBranch className="h-4 w-4 text-muted-foreground flex-shrink-0" />
       )}
       <button
+        type="button"
         onClick={e => onClick(e.metaKey)}
-        disabled={busy}
+        disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
       >
         <span className="text-sm truncate">{branch}</span>
       </button>
-      <div className="shrink-0 flex items-center gap-1 self-center">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={e => {
-                e.stopPropagation()
-                onStack(e.metaKey || e.ctrlKey)
-              }}
-              disabled={busy}
-              className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              {isStacking ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <GitBranchPlus className="h-3.5 w-3.5" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>New worktree based on {branch}</TooltipContent>
-        </Tooltip>
-      </div>
     </div>
   )
 }
@@ -501,6 +528,8 @@ export interface SecurityAlertItemProps {
   index: number
   isSelected: boolean
   isCreating: boolean
+  isChecked?: boolean
+  onCheckedChange?: (checked: boolean) => void
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
@@ -512,6 +541,8 @@ export function SecurityAlertItem({
   index,
   isSelected,
   isCreating,
+  isChecked = false,
+  onCheckedChange,
   onMouseEnter,
   onClick,
   onInvestigate,
@@ -529,9 +560,18 @@ export function SecurityAlertItem({
         'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
+        isChecked && !isSelected && 'bg-accent/50',
         isCreating && 'opacity-50'
       )}
     >
+      {onCheckedChange && (
+        <ItemSelectCheckbox
+          checked={isChecked}
+          disabled={isCreating}
+          ariaLabel={`Select security alert #${alert.number}`}
+          onCheckedChange={onCheckedChange}
+        />
+      )}
       {isCreating ? (
         <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
       ) : (
@@ -543,6 +583,7 @@ export function SecurityAlertItem({
         />
       )}
       <button
+        type="button"
         onClick={e => onClick(e.metaKey)}
         disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
@@ -593,6 +634,8 @@ export interface AdvisoryItemProps {
   index: number
   isSelected: boolean
   isCreating: boolean
+  isChecked?: boolean
+  onCheckedChange?: (checked: boolean) => void
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
@@ -604,6 +647,8 @@ export function AdvisoryItem({
   index,
   isSelected,
   isCreating,
+  isChecked = false,
+  onCheckedChange,
   onMouseEnter,
   onClick,
   onInvestigate,
@@ -621,9 +666,18 @@ export function AdvisoryItem({
         'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
+        isChecked && !isSelected && 'bg-accent/50',
         isCreating && 'opacity-50'
       )}
     >
+      {onCheckedChange && (
+        <ItemSelectCheckbox
+          checked={isChecked}
+          disabled={isCreating}
+          ariaLabel={`Select advisory ${advisory.ghsaId}`}
+          onCheckedChange={onCheckedChange}
+        />
+      )}
       {isCreating ? (
         <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
       ) : (
@@ -637,6 +691,7 @@ export function AdvisoryItem({
         />
       )}
       <button
+        type="button"
         onClick={e => onClick(e.metaKey)}
         disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"

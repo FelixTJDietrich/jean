@@ -17,12 +17,22 @@ describe('getProviderDisplayName', () => {
 })
 
 describe('getSessionProviderDisplayName', () => {
-  it('uses backend labels for codex and opencode sessions', () => {
+  it('uses backend-specific provider labels', () => {
     expect(getSessionProviderDisplayName('codex', null)).toBe('OpenAI')
     expect(getSessionProviderDisplayName('opencode', null)).toBe('OpenCode')
     expect(getSessionProviderDisplayName('opencode', '__anthropic__')).toBe(
       'OpenCode'
     )
+    expect(getSessionProviderDisplayName('grok', null)).toBe('xAI')
+    expect(getSessionProviderDisplayName('kimi', null)).toBe('Kimi Code')
+    expect(getSessionProviderDisplayName('antigravity', null)).toBe('Google')
+  })
+
+  it('shows custom Codex provider names when selected', () => {
+    expect(getSessionProviderDisplayName('codex', 'OpenRouter')).toBe(
+      'OpenRouter'
+    )
+    expect(getSessionProviderDisplayName('codex', '__default__')).toBe('OpenAI')
   })
 
   it('falls back to provider selection for claude sessions', () => {

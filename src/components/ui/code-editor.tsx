@@ -1,166 +1,56 @@
-import { useEffect, useRef, useMemo, useCallback, memo } from 'react'
-import {
-  EditorView,
-  keymap,
-  lineNumbers,
-  highlightActiveLineGutter,
-  drawSelection,
-  highlightActiveLine,
-  rectangularSelection,
-  crosshairCursor,
-  dropCursor,
-} from '@codemirror/view'
-import { EditorState, Compartment } from '@codemirror/state'
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import {
-  syntaxHighlighting,
-  defaultHighlightStyle,
-  type LanguageSupport,
-} from '@codemirror/language'
-import { oneDark } from '@codemirror/theme-one-dark'
-import { javascript } from '@codemirror/lang-javascript'
-import { json } from '@codemirror/lang-json'
-import { html } from '@codemirror/lang-html'
-import { css } from '@codemirror/lang-css'
-import { markdown } from '@codemirror/lang-markdown'
-import { python } from '@codemirror/lang-python'
-import { rust } from '@codemirror/lang-rust'
-import { sql } from '@codemirror/lang-sql'
-import { yaml } from '@codemirror/lang-yaml'
+import { useMemo, memo, useRef } from 'react'
+import { File } from '@pierre/diffs/react'
+import type { FileContents } from '@pierre/diffs'
+import type { EditorOptions } from '@pierre/diffs/edit'
 import { useTheme } from '@/hooks/use-theme'
+import { usePreferences } from '@/services/preferences'
+import { cn } from '@/lib/utils'
+import {
+  PierreEditProvider,
+  PIERRE_UNSAFE_CSS,
+  pierreThemePair,
+} from '@/components/ui/pierre-edit'
 
-// Map language IDs to CodeMirror language support
-function getLanguageSupport(language: string): LanguageSupport | null {
-  switch (language) {
-    case 'typescript':
-    case 'tsx':
-      return javascript({ typescript: true, jsx: language === 'tsx' })
-    case 'javascript':
-    case 'jsx':
-      return javascript({ jsx: language === 'jsx' })
-    case 'json':
-    case 'jsonc':
-      return json()
-    case 'html':
-      return html()
-    case 'css':
-    case 'scss':
-    case 'less':
-      return css()
-    case 'markdown':
-    case 'mdx':
-      return markdown()
-    case 'python':
-      return python()
-    case 'rust':
-      return rust()
-    case 'sql':
-      return sql()
-    case 'yaml':
-      return yaml()
-    default:
-      return null
-  }
-}
-
-// Light theme (simple, matches app background)
-const lightTheme = EditorView.theme({
-  '&': {
-    backgroundColor: 'hsl(var(--muted))',
-    color: 'hsl(var(--foreground))',
-  },
-  '.cm-content': {
-    caretColor: 'hsl(var(--foreground))',
-    fontFamily: 'var(--font-family-mono, ui-monospace, monospace)',
-    fontSize: '12px',
-  },
-  '.cm-cursor': {
-    borderLeftColor: 'hsl(var(--foreground))',
-  },
-  '.cm-activeLine': {
-    backgroundColor: 'hsl(var(--accent) / 0.5)',
-  },
-  '.cm-gutters': {
-    backgroundColor: 'hsl(var(--muted))',
-    color: 'hsl(var(--muted-foreground))',
-    border: 'none',
-  },
-  '.cm-activeLineGutter': {
-    backgroundColor: 'hsl(var(--accent) / 0.5)',
-  },
-  '.cm-selectionBackground, ::selection': {
-    backgroundColor: 'hsl(var(--accent))',
-  },
-  '&.cm-focused .cm-selectionBackground': {
-    backgroundColor: 'hsl(var(--accent))',
-  },
-})
-
-// Dark theme based on oneDark but customized
-const darkTheme = EditorView.theme({
-  '&': {
-    backgroundColor: 'hsl(var(--muted))',
-    color: 'hsl(var(--foreground))',
-  },
-  '.cm-content': {
-    caretColor: 'hsl(var(--foreground))',
-    fontFamily: 'var(--font-family-mono, ui-monospace, monospace)',
-    fontSize: '12px',
-  },
-  '.cm-cursor': {
-    borderLeftColor: 'hsl(var(--foreground))',
-  },
-  '.cm-activeLine': {
-    backgroundColor: 'hsl(var(--accent) / 0.3)',
-  },
-  '.cm-gutters': {
-    backgroundColor: 'hsl(var(--muted))',
-    color: 'hsl(var(--muted-foreground))',
-    border: 'none',
-  },
-  '.cm-activeLineGutter': {
-    backgroundColor: 'hsl(var(--accent) / 0.3)',
-  },
-  '.cm-selectionBackground, ::selection': {
-    backgroundColor: 'hsl(var(--accent))',
-  },
-  '&.cm-focused .cm-selectionBackground': {
-    backgroundColor: 'hsl(var(--accent))',
-  },
-})
-
-interface CodeEditorProps {
-  /** Initial content of the editor */
+export interface CodeEditorProps {
+  /** Initial content of the editor (parent remounts via key when content must reset) */
   value: string
-  /** Language for syntax highlighting */
-  language: string
+  /** Filename used for language detection and editor cache key */
+  fileName?: string
+  /** Language hint when filename is missing */
+  language?: string
   /** Callback when content changes */
   onChange?: (value: string) => void
-  /** Whether the editor is read-only */
+  /** Whether the editor is read-only (renders Pierre File without edit mode) */
   readOnly?: boolean
   /** Additional CSS class */
   className?: string
 }
 
+function guessFileName(language?: string): string {
+  if (!language || language === 'text' || language === 'plaintext') {
+    return 'file.txt'
+  }
+  return `file.${language}`
+}
+
 /**
- * CodeMirror 6 based code editor component
- * Supports syntax highlighting for common languages
+ * Pierre Diffs File + edit-mode code editor.
+ * Lazy-load this component (and `@pierre/diffs/edit`) so the main bundle stays lean.
+ * Remount with a React `key` when external content should replace the document.
  */
 export const CodeEditor = memo(function CodeEditor({
   value,
+  fileName,
   language,
   onChange,
   readOnly = false,
   className,
 }: CodeEditorProps) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const editorRef = useRef<EditorView | null>(null)
-  const themeCompartment = useRef(new Compartment())
-  const languageCompartment = useRef(new Compartment())
-  const readOnlyCompartment = useRef(new Compartment())
   const { theme } = useTheme()
+  const { data: preferences } = usePreferences()
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
 
-  // Resolve 'system' theme to actual dark/light
   const resolvedTheme = useMemo((): 'dark' | 'light' => {
     if (theme === 'system') {
       return window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -170,121 +60,71 @@ export const CodeEditor = memo(function CodeEditor({
     return theme
   }, [theme])
 
-  // Create or update editor
-  useEffect(() => {
-    if (!containerRef.current) return
+  const name = fileName || guessFileName(language)
 
-    // If editor exists, destroy it first
-    if (editorRef.current) {
-      editorRef.current.destroy()
-    }
+  // Capture initial contents only — Pierre edit mode owns the document after attach.
+  // Parent must remount (key change) when `value` should replace the session.
+  const file: FileContents = useMemo(
+    () => ({
+      name,
+      contents: value,
+      cacheKey: name,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial session only
+    [name]
+  )
 
-    const langSupport = getLanguageSupport(language)
-    const isDark = resolvedTheme === 'dark'
-
-    const extensions = [
-      lineNumbers(),
-      highlightActiveLineGutter(),
-      highlightActiveLine(),
-      drawSelection(),
-      dropCursor(),
-      rectangularSelection(),
-      crosshairCursor(),
-      history(),
-      keymap.of([...defaultKeymap, ...historyKeymap]),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      themeCompartment.current.of(isDark ? [oneDark, darkTheme] : lightTheme),
-      languageCompartment.current.of(langSupport ? [langSupport] : []),
-      readOnlyCompartment.current.of(
-        readOnly ? EditorState.readOnly.of(true) : []
+  const options = useMemo(
+    () => ({
+      theme: pierreThemePair(
+        preferences?.syntax_theme_dark,
+        preferences?.syntax_theme_light
       ),
-      EditorView.updateListener.of(update => {
-        if (update.docChanged && onChange) {
-          onChange(update.state.doc.toString())
-        }
-      }),
-      // Enable native clipboard handling
-      EditorView.domEventHandlers({
-        copy: () => false, // Let browser handle copy
-        cut: () => false, // Let browser handle cut
-        paste: () => false, // Let browser handle paste
-      }),
+      themeType: resolvedTheme,
+      overflow: 'wrap' as const,
+      disableFileHeader: true,
+      unsafeCSS: PIERRE_UNSAFE_CSS,
+    }),
+    [
+      resolvedTheme,
+      preferences?.syntax_theme_dark,
+      preferences?.syntax_theme_light,
     ]
+  )
 
-    const state = EditorState.create({
-      doc: value,
-      extensions,
-    })
-
-    editorRef.current = new EditorView({
-      state,
-      parent: containerRef.current,
-    })
-
-    return () => {
-      editorRef.current?.destroy()
-      editorRef.current = null
-    }
-    // We only want to recreate the editor when key props change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Update theme when it changes
-  useEffect(() => {
-    if (!editorRef.current) return
-    const isDark = resolvedTheme === 'dark'
-    editorRef.current.dispatch({
-      effects: themeCompartment.current.reconfigure(
-        isDark ? [oneDark, darkTheme] : lightTheme
-      ),
-    })
-  }, [resolvedTheme])
-
-  // Update language when it changes
-  useEffect(() => {
-    if (!editorRef.current) return
-    const langSupport = getLanguageSupport(language)
-    editorRef.current.dispatch({
-      effects: languageCompartment.current.reconfigure(
-        langSupport ? [langSupport] : []
-      ),
-    })
-  }, [language])
-
-  // Update read-only state when it changes
-  useEffect(() => {
-    if (!editorRef.current) return
-    editorRef.current.dispatch({
-      effects: readOnlyCompartment.current.reconfigure(
-        readOnly ? EditorState.readOnly.of(true) : []
-      ),
-    })
-  }, [readOnly])
-
-  // Update content when value changes externally (e.g., file reload)
-  const updateContent = useCallback((newValue: string) => {
-    if (!editorRef.current) return
-    const currentValue = editorRef.current.state.doc.toString()
-    if (currentValue !== newValue) {
-      editorRef.current.dispatch({
-        changes: {
-          from: 0,
-          to: currentValue.length,
-          insert: newValue,
-        },
-      })
+  const editorOptions = useMemo((): EditorOptions<undefined> => {
+    return {
+      persistState: true,
+      onChange: nextFile => {
+        onChangeRef.current?.(nextFile.contents)
+      },
     }
   }, [])
 
-  // Expose updateContent for external use
-  useEffect(() => {
-    updateContent(value)
-  }, [value, updateContent])
+  const fileSurface = (
+    <File
+      file={file}
+      edit={!readOnly}
+      editorOptions={readOnly ? undefined : editorOptions}
+      options={options}
+      className="h-full min-h-0"
+    />
+  )
 
   return (
     <div
-      ref={containerRef}
-      className={`overflow-hidden rounded-md [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto ${className ?? ''}`}
-    />
+      className={cn(
+        'h-full min-h-0 min-w-0 overflow-auto rounded-md border border-border bg-card',
+        className
+      )}
+    >
+      {readOnly ? (
+        fileSurface
+      ) : (
+        <PierreEditProvider>{fileSurface}</PierreEditProvider>
+      )}
+    </div>
   )
 })
+
+export default CodeEditor

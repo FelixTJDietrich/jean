@@ -29,6 +29,7 @@ import type {
   EffortLevel,
   LabelData,
   QueuedMessage,
+  Backend,
 } from '@/types/chat'
 import { isTauri, projectsQueryKeys } from '@/services/projects'
 import { hasBackendTransport } from '@/lib/environment'
@@ -37,12 +38,16 @@ import type { AppPreferences } from '@/types/preferences'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useTerminalStore } from '@/store/terminal-store'
+import { clearSessionScrollState } from '@/components/chat/session-scroll-state'
 import { isNativeTerminalBackend } from '@/lib/native-cli-session'
 import { getResumeArgs } from '@/components/chat/session-card-utils'
-import type {
-  StoredReviewResults,
-  Worktree,
-} from '@/types/projects'
+import {
+  bareCommandForBackend,
+  isBareCliCommand,
+  preferResolvedCliCommand,
+  resolveBackendCliPath,
+} from '@/services/cli-binary'
+import type { StoredReviewResults, Worktree } from '@/types/projects'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
 
 /** Default number of recent runs loaded on initial session fetch. */
@@ -177,15 +182,25 @@ export async function reconnectNativeCliSession(
     showToast = true,
     markOpened = true,
   } = options ?? {}
-  const resume = getResumeArgs(session)
-  const launch =
+  // When terminal_command is a bare name (e.g. jean-managed grok not on PATH),
+  // resolve to the absolute path from check_*_cli_installed.
+  const resolvedCommand = await resolveBackendCliPath(session.backend)
+  const resume = getResumeArgs(session, { resolvedCommand })
+  let launch =
     resume ??
     (!isNativeTerminalBackend(session.backend)
       ? {
-          command: session.terminal_command ?? '',
+          command: preferResolvedCliCommand(
+            session.terminal_command,
+            bareCommandForBackend(session.backend),
+            resolvedCommand
+          ),
           args: session.terminal_command_args ?? [],
         }
       : null)
+  if (launch && resolvedCommand && isBareCliCommand(launch.command)) {
+    launch = { ...launch, command: resolvedCommand }
+  }
   if (!launch?.command) {
     if (showToast) toast.error('No command available to reconnect this session')
     return
@@ -214,6 +229,7 @@ export async function reconnectNativeCliSession(
       commandArgs: launch.args,
       activate: false,
       openPanel: false,
+      sessionId: session.id,
     }
   )
 
@@ -412,9 +428,13 @@ export async function prefetchSessions(
     })
     queryClient.setQueryData(chatQueryKeys.sessions(worktreeId), sessions)
 
-    // Restore reviewingSessions, waitingForInputSessionIds, sessionLabels, reviewResults,
-    // fixedFindings, and selected execution modes.
+    // Restore reviewingSessions, status overrides, waitingForInputSessionIds,
+    // sessionLabels, reviewResults, fixedFindings, and selected execution modes.
     const reviewingUpdates: Record<string, boolean> = {}
+    const statusOverrideUpdates: Record<
+      string,
+      'idle' | 'review' | 'completed' | 'cancelled'
+    > = {}
     const waitingUpdates: Record<string, boolean> = {}
     const executionModeUpdates: Record<string, ExecutionMode> = {}
     const primarySurfaceUpdates: Record<string, 'chat' | 'terminal'> = {}
@@ -427,8 +447,20 @@ export async function prefetchSessions(
     > = {}
     const fixedFindingsUpdates: Record<string, Set<string>> = {}
     for (const session of sessions.sessions) {
-      if (session.is_reviewing) {
+      const override = session.status_override
+      if (
+        override === 'idle' ||
+        override === 'review' ||
+        override === 'completed' ||
+        override === 'cancelled'
+      ) {
+        statusOverrideUpdates[session.id] = override
+        if (override === 'review') {
+          reviewingUpdates[session.id] = true
+        }
+      } else if (session.is_reviewing) {
         reviewingUpdates[session.id] = true
+        statusOverrideUpdates[session.id] = 'review'
       }
       // Only restore waiting state if the session's last run is actually active,
       // OR if it's a completed run parked for user input (plan approval, or an
@@ -497,6 +529,12 @@ export async function prefetchSessions(
       storeUpdates.reviewingSessions = {
         ...currentState.reviewingSessions,
         ...reviewingUpdates,
+      }
+    }
+    if (Object.keys(statusOverrideUpdates).length > 0) {
+      storeUpdates.sessionStatusOverrides = {
+        ...currentState.sessionStatusOverrides,
+        ...statusOverrideUpdates,
       }
     }
     if (Object.keys(waitingUpdates).length > 0) {
@@ -907,6 +945,7 @@ export function useUpdateSessionState() {
       pendingPermissionDenials,
       pendingCodexCommandApprovalRequests,
       pendingCodexPermissionRequests,
+      pendingOpencodePermissionRequests,
       pendingCodexUserInputRequests,
       pendingCodexMcpElicitationRequests,
       pendingCodexDynamicToolCallRequests,
@@ -951,6 +990,17 @@ export function useUpdateSessionState() {
         item_id: string
         permissions: unknown
         reason?: string | null
+      }[]
+      pendingOpencodePermissionRequests?: {
+        request_id: string
+        opencode_session_id: string
+        permission: string
+        patterns: string[]
+        always: string[]
+        metadata?: unknown
+        tool_call_id?: string | null
+        working_dir?: string | null
+        api_version?: string
       }[]
       pendingCodexUserInputRequests?: {
         rpc_id: number
@@ -1001,6 +1051,7 @@ export function useUpdateSessionState() {
         pendingPermissionDenials,
         pendingCodexCommandApprovalRequests,
         pendingCodexPermissionRequests,
+        pendingOpencodePermissionRequests,
         pendingCodexUserInputRequests,
         pendingCodexMcpElicitationRequests,
         pendingCodexDynamicToolCallRequests,
@@ -1077,6 +1128,7 @@ export function useCloseSession() {
 
       // Clear all session-scoped state
       useChatStore.getState().clearSessionState(sessionId)
+      clearSessionScrollState(sessionId)
       cleanupSessionTerminalForRemovedSession(worktreeId, sessionId)
 
       // Switch to the new active session — but only if the caller hasn't already
@@ -1087,6 +1139,13 @@ export function useCloseSession() {
         if (!currentActive || currentActive === sessionId) {
           useChatStore.getState().setActiveSession(worktreeId, newActiveId)
         }
+      } else {
+        // Keep the worktree modal open and let it render its empty state.
+        useChatStore.setState(state => {
+          if (!(worktreeId in state.activeSessionIds)) return state
+          const { [worktreeId]: _removed, ...rest } = state.activeSessionIds
+          return { activeSessionIds: rest }
+        })
       }
     },
     onError: error => {
@@ -1147,6 +1206,7 @@ export function useArchiveSession() {
 
       // Clear all session-scoped state
       useChatStore.getState().clearSessionState(sessionId)
+      clearSessionScrollState(sessionId)
       cleanupSessionTerminalForRemovedSession(worktreeId, sessionId)
 
       // Switch to the new active session — but only if the caller hasn't already
@@ -1157,6 +1217,13 @@ export function useArchiveSession() {
         if (!currentActive || currentActive === sessionId) {
           useChatStore.getState().setActiveSession(worktreeId, newActiveId)
         }
+      } else {
+        // Keep the worktree modal open and let it render its empty state.
+        useChatStore.setState(state => {
+          if (!(worktreeId in state.activeSessionIds)) return state
+          const { [worktreeId]: _removed, ...rest } = state.activeSessionIds
+          return { activeSessionIds: rest }
+        })
       }
     },
     onError: error => {
@@ -1451,14 +1518,6 @@ export function useCloseSessionOrWorktreeKeybinding(
         sessionId: activeSessionId,
       })
     }
-
-    // Last session: navigate to project view instead of deleting the worktree
-    if (sessionCount <= 1) {
-      logger.debug('Last session closed, navigating to project view', {
-        worktreeId: activeWorktreeId,
-      })
-      useChatStore.getState().clearActiveWorktree()
-    }
   }, [archiveSession, closeSession, queryClient])
 
   useEffect(() => {
@@ -1700,6 +1759,7 @@ export function useSendMessage() {
         sessionId,
         worktreeId,
         model,
+        backend: backend as Backend | undefined,
         executionMode,
         thinkingLevel,
         effortLevel,
@@ -1893,21 +1953,30 @@ export function useSendMessage() {
       }
 
       // Benign race: another queue consumer (backend drain / another client)
-      // started a run for this session first. A run IS active, so keep the
-      // sending state and skip the error banner/toast. The losing message is
-      // requeued: the queue processor's per-call onError handles queued
-      // messages; for direct submits we restore the input draft so the typed
-      // text isn't lost.
+      // started a run for this session first. Queued messages are requeued by
+      // the queue processor's per-call onError. Direct submits restore the
+      // draft so typed text isn't lost.
+      //
+      // After cancel, a brief residual race can still produce this error while
+      // the cancelled worker tears down (#329). Do NOT leave sending sticky —
+      // that makes the session look unrecoverable until the user cancels again.
       if (isDuplicateSendError(error)) {
         logger.warn('Duplicate send rejected — another run is active', {
           sessionId,
           fromQueue: variables.fromQueue ?? false,
         })
         if (!variables.fromQueue) {
-          const { inputDrafts, setInputDraft } = useChatStore.getState()
+          const {
+            inputDrafts,
+            setInputDraft,
+            removeSendingSession,
+            clearExecutingMode,
+          } = useChatStore.getState()
           if (!inputDrafts[sessionId]?.trim()) {
             setInputDraft(sessionId, variables.message)
           }
+          removeSendingSession(sessionId)
+          clearExecutingMode(sessionId)
         }
         // Drop the optimistic user message by refetching authoritative state
         queryClient.invalidateQueries({
@@ -2035,6 +2104,7 @@ export function useClearSessionHistory() {
 
       // Clear all session-scoped state
       useChatStore.getState().clearSessionState(sessionId)
+      clearSessionScrollState(sessionId)
 
       toast.success('Chat history cleared')
     },
@@ -2571,9 +2641,10 @@ export function formatAnswersAsNaturalLanguage(
     const question = questions[answer.questionIndex]
     if (!question) continue
 
-    const selectedLabels = answer.selectedOptions
-      .map(idx => question.options[idx]?.label)
-      .filter(Boolean)
+    const selectedLabels = answer.selectedOptions.flatMap(idx => {
+      const label = question.options[idx]?.label
+      return label ? [label] : []
+    })
 
     if (selectedLabels.length > 0 || answer.customText) {
       let text = `For "${question.question}"`
@@ -2794,6 +2865,19 @@ export async function steerPiTurn(
   message: string
 ): Promise<void> {
   await invoke('steer_pi_turn', { worktreeId, sessionId, message })
+}
+
+/**
+ * Inject a text-only user message into a running Grok ACP turn via
+ * `_x.ai/interject`. Throws when no active Grok turn/connection is available —
+ * callers fall back to queue/cancel+send.
+ */
+export async function steerGrokTurn(
+  worktreeId: string,
+  sessionId: string,
+  message: string
+): Promise<void> {
+  await invoke('steer_grok_turn', { worktreeId, sessionId, message })
 }
 
 /**

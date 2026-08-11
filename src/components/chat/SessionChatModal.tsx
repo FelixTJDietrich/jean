@@ -1,20 +1,23 @@
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type MouseEvent,
+  type MutableRefObject,
   type RefObject,
 } from 'react'
 import {
   Archive,
   ChevronDown,
-  Eye,
-  EyeOff,
+  Copy,
   GitBranchPlus,
   GitPullRequestArrow,
+  Maximize2,
+  Minimize2,
   Pencil,
   RefreshCw,
   Tag,
@@ -47,11 +50,14 @@ import { useBrowserStore } from '@/store/browser-store'
 import { useUIStore } from '@/store/ui-store'
 import {
   useSessions,
+  useCreateSession,
+  useClearSessionHistory,
   useRenameSession,
   useReorderSessions,
   reconnectNativeCliSession,
   canReconnectSession,
 } from '@/services/chat'
+import { resolveBackendCliPath } from '@/services/cli-binary'
 import { usePreferences } from '@/services/preferences'
 import {
   useWorktree,
@@ -66,6 +72,7 @@ import {
   fetchWorktreesStatus,
   triggerImmediateGitPoll,
   performGitPull,
+  performGitSync,
 } from '@/services/git-status'
 import { isBaseSession } from '@/types/projects'
 import type { Session } from '@/types/chat'
@@ -87,13 +94,18 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { DEFAULT_KEYBINDINGS, formatShortcutDisplay } from '@/types/keybindings'
 import {
+  buildNativeClientSessionInput,
   computeSessionCardData,
   getResumeCommand,
+  isActionableWaitingStatus,
   statusConfig,
+  type ManualSessionStatus,
   type SessionCardData,
 } from './session-card-utils'
+import { SessionStatusMenu } from './SessionStatusMenu'
 import {
   buildReorderedSessionIdsWithinStatus,
+  resolveModalSessionId,
   sortSessionCardsForTabs,
 } from './session-tab-order'
 import { useCanvasStoreState } from './hooks/useCanvasStoreState'
@@ -112,9 +124,19 @@ import { pushNeedsRemotePicker, useRemotePicker } from '@/hooks/useRemotePicker'
 import { useIsTouchDevice } from '@/hooks/use-touch-device'
 import { useSwipeBack } from '@/hooks/useSwipeBack'
 import {
+  closeChatTerminal,
+  isChatTerminalOpen,
+  openChatTerminal,
+} from '@/lib/terminal-gesture'
+import {
   MODAL_TERMINAL_PRIMARY_ROW_CLASS,
   MODAL_TERMINAL_SECONDARY_ROW_CLASS,
 } from './modal-terminal-layout'
+import {
+  getStackedBaseBranch,
+  resolveStackedOnPr,
+} from './worktree-branch-badge'
+import { isUnreadSession } from '@/components/unread/unread-utils'
 
 /** Track whether any waiting tabs are off-screen to the left or right */
 function useOffScreenWaiting(
@@ -128,9 +150,9 @@ function useOffScreenWaiting(
     const viewport = viewportRef.current
     if (!viewport) return
 
-    const waitingIds = sortedCards
-      .filter(c => c.status === 'waiting')
-      .map(c => c.session.id)
+    const waitingIds = sortedCards.flatMap(c =>
+      isActionableWaitingStatus(c.status) ? [c.session.id] : []
+    )
 
     if (waitingIds.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -173,6 +195,7 @@ interface SessionChatModalProps {
   worktreePath: string
   isOpen: boolean
   onClose: () => void
+  onRequestCloseWorktree: () => void
 }
 
 export function SessionChatModal({
@@ -180,13 +203,60 @@ export function SessionChatModal({
   worktreePath,
   isOpen,
   onClose,
+  onRequestCloseWorktree,
 }: SessionChatModalProps) {
   const isMobile = useIsMobile()
   const isTouch = useIsTouchDevice()
+  const zenMode = useUIStore(state => state.zenMode)
+  const toggleZenMode = useUIStore(state => state.toggleZenMode)
+  const isModalTerminalOpen = useTerminalStore(
+    state => state.modalTerminalOpen[worktreeId] ?? false
+  )
+  // Left-edge swipe right: close terminal if open, else dismiss modal
+  const swipeBackCallback = useCallback(() => {
+    if (worktreeId && isChatTerminalOpen(worktreeId, 'modal')) {
+      closeChatTerminal(worktreeId, 'modal')
+      return
+    }
+    onClose()
+  }, [worktreeId, onClose])
   const swipe = useSwipeBack({
-    onSwipeBack: onClose,
+    onSwipeBack: swipeBackCallback,
     enabled: isTouch && isOpen,
+    // Closing terminal is an overlay dismiss — no full content slide-off
+    animateToEnd: !isModalTerminalOpen,
   })
+  // Right-edge swipe left: open terminal
+  const swipeOpenTerminalCallback = useCallback(() => {
+    if (!worktreeId) return
+    openChatTerminal(worktreeId, 'modal')
+  }, [worktreeId])
+  const canSwipeOpenTerminal =
+    isTouch && isOpen && !!worktreeId && !isModalTerminalOpen
+  const swipeOpenTerminal = useSwipeBack({
+    onSwipeBack: swipeOpenTerminalCallback,
+    enabled: canSwipeOpenTerminal,
+    animateToEnd: false,
+    visualFeedback: true,
+    edge: 'right',
+  })
+  // Shared host for left-edge (back/close terminal) and right-edge (open terminal)
+  const setSwipeContainerRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      const swipeRef =
+        swipe.containerRef as MutableRefObject<HTMLDivElement | null>
+      const openTerminalRef =
+        swipeOpenTerminal.containerRef as MutableRefObject<HTMLDivElement | null>
+      if (!isTouch) {
+        swipeRef.current = null
+        openTerminalRef.current = null
+        return
+      }
+      swipeRef.current = el
+      openTerminalRef.current = el
+    },
+    [isTouch, swipe.containerRef, swipeOpenTerminal.containerRef]
+  )
   const { data: sessionsData } = useSessions(
     worktreeId || null,
     worktreePath || null
@@ -197,9 +267,6 @@ export function SessionChatModal({
   )
   const { data: preferences } = usePreferences()
   const { data: runScripts = [] } = useRunScripts(worktreePath)
-  const isModalTerminalOpen = useTerminalStore(
-    state => state.modalTerminalOpen[worktreeId] ?? false
-  )
   const modalTerminalDockMode = useTerminalStore(
     state => state.modalTerminalDockMode
   )
@@ -246,16 +313,16 @@ export function SessionChatModal({
 
     viewport.addEventListener('wheel', handleWheel, { passive: false })
     return () => viewport.removeEventListener('wheel', handleWheel)
-  }, [sessions.length])
+  }, [sessions.length, zenMode])
 
   // Active session from store
   const activeSessionId = useChatStore(
     state => state.activeSessionIds[worktreeId]
   )
-  const currentSessionId =
-    activeSessionId && sessions.some(session => session.id === activeSessionId)
-      ? activeSessionId
-      : (sessions[0]?.id ?? null)
+  const currentSessionId = resolveModalSessionId(
+    activeSessionId,
+    sessions.map(session => session.id)
+  )
   const currentSession = sessions.find(s => s.id === currentSessionId) ?? null
   // Canonical store state shared with canvas for consistent status derivation.
   const storeState = useCanvasStoreState()
@@ -303,11 +370,18 @@ export function SessionChatModal({
   const project = worktree
     ? projects?.find(p => p.id === worktree.project_id)
     : null
+  const stackedBaseBranch = getStackedBaseBranch(
+    worktree?.base_branch,
+    worktree?.branch,
+    project?.default_branch,
+    worktree?.base_remote
+  )
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open')
-  const stackedOnPR =
-    worktree?.base_branch && worktree.base_branch !== project?.default_branch
-      ? openPRs?.find(pr => pr.headRefName === worktree.base_branch)
-      : undefined
+  const stackedOnPR = resolveStackedOnPr(
+    stackedBaseBranch,
+    openPRs,
+    project?.default_branch
+  )
   const isBase = worktree ? isBaseSession(worktree) : false
   const { data: gitStatus } = useGitStatus(worktreeId)
   const behindCount =
@@ -358,6 +432,8 @@ export function SessionChatModal({
 
   // Rename session state
   const renameSession = useRenameSession()
+  const createSession = useCreateSession()
+  const clearSessionHistory = useClearSessionHistory()
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(
     null
   )
@@ -468,6 +544,9 @@ export function SessionChatModal({
 
   // CMD+W: close the active session tab, or close modal if last tab
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
+  const [closeConfirmMode, setCloseConfirmMode] = useState<
+    'worktree' | 'session'
+  >('session')
   const pendingCloseAction = useRef<(() => void) | null>(null)
 
   const executeCloseAction = useCallback(() => {
@@ -479,20 +558,27 @@ export function SessionChatModal({
   const removeSessionTab = useCallback(
     (session: Session) => {
       const activeSessions = sessions.filter(s => !s.archived_at)
-      if (activeSessions.length <= 1) {
-        const action = () => {
-          handleDeleteSession(session.id)
+      const sessionIsEmpty = !session.message_count
+      // Confirm any non-empty session when preference is on (default). Only
+      // confirming the last tab allowed held/cascade closes to wipe chats
+      // without a prompt (issue #56). Empty sessions close immediately.
+      const needsConfirm =
+        preferences?.confirm_session_close !== false && !sessionIsEmpty
+
+      const action = () => {
+        if (activeSessions.length > 1) {
+          selectVisualNeighbor(session.id)
         }
-        const sessionIsEmpty = !session.message_count
-        if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
-          pendingCloseAction.current = action
-          setCloseConfirmOpen(true)
-        } else {
-          action()
-        }
-      } else {
-        selectVisualNeighbor(session.id)
+        // The mutation navigates after success when this was the last session.
         handleDeleteSession(session.id)
+      }
+
+      if (needsConfirm) {
+        setCloseConfirmMode('session')
+        pendingCloseAction.current = action
+        setCloseConfirmOpen(true)
+      } else {
+        action()
       }
     },
     [
@@ -518,12 +604,20 @@ export function SessionChatModal({
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
       const activeSessions = sessions.filter(s => !s.archived_at)
+      if (activeSessions.length === 0) {
+        setCloseConfirmMode('worktree')
+        pendingCloseAction.current = () => {
+          onRequestCloseWorktree()
+          onClose()
+        }
+        setCloseConfirmOpen(true)
+        return
+      }
       const action = () => {
         if (activeSessions.length <= 1) {
           if (currentSessionId) {
             handleDeleteSession(currentSessionId)
           }
-          onClose()
         } else if (currentSessionId) {
           selectVisualNeighbor(currentSessionId)
           handleDeleteSession(currentSessionId)
@@ -532,6 +626,7 @@ export function SessionChatModal({
       const currentSession = sessions.find(s => s.id === currentSessionId)
       const sessionIsEmpty = !currentSession?.message_count
       if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
+        setCloseConfirmMode('session')
         pendingCloseAction.current = action
         setCloseConfirmOpen(true)
       } else {
@@ -549,10 +644,11 @@ export function SessionChatModal({
     isOpen,
     sessions,
     currentSessionId,
-    onClose,
     handleDeleteSession,
     selectVisualNeighbor,
     preferences?.confirm_session_close,
+    onRequestCloseWorktree,
+    onClose,
   ])
 
   // Listen for toggle-session-label event (CMD+S)
@@ -590,6 +686,61 @@ export function SessionChatModal({
       intent: 'picker',
     })
   }, [worktreeId, worktreePath])
+
+  const handleClearContext = useCallback(() => {
+    if (!currentSessionId || clearSessionHistory.isPending) return
+    clearSessionHistory.mutate(
+      {
+        worktreeId,
+        worktreePath,
+        sessionId: currentSessionId,
+      },
+      {
+        onSuccess: () =>
+          window.dispatchEvent(new CustomEvent('focus-chat-input')),
+      }
+    )
+  }, [clearSessionHistory, currentSessionId, worktreeId, worktreePath])
+
+  useEffect(() => {
+    if (!isOpen) return
+    window.addEventListener('clear-session-context', handleClearContext)
+    return () =>
+      window.removeEventListener('clear-session-context', handleClearContext)
+  }, [handleClearContext, isOpen])
+
+  const handleOpenInNativeClient = useCallback(
+    (session: Session) => {
+      void (async () => {
+        // Prefer Jean-managed / resolved absolute path so bare names like
+        // `grok` work when the CLI is not on PATH (default jean install).
+        const resolvedCommand = await resolveBackendCliPath(session.backend)
+        const input = buildNativeClientSessionInput(
+          session,
+          worktreeId,
+          worktreePath,
+          { resolvedCommand }
+        )
+        if (!input) {
+          toast.error('No native resume command is available for this session')
+          return
+        }
+
+        createSession.mutate(input, {
+          onSuccess: nativeSession => {
+            useChatStore
+              .getState()
+              .setSelectedBackend(nativeSession.id, input.backend)
+            void reconnectNativeCliSession(nativeSession, worktreeId, {
+              openModal: false,
+              showToast: false,
+            }).then(() => toast.success('Opened in native client'))
+          },
+        })
+      })()
+    },
+    [createSession, worktreeId, worktreePath]
+  )
 
   useEffect(() => {
     if (!isOpen) return
@@ -684,7 +835,7 @@ export function SessionChatModal({
       if (!viewport) return
       const { scrollLeft, clientWidth } = viewport
       for (const card of sortedCards) {
-        if (card.status !== 'waiting') continue
+        if (!isActionableWaitingStatus(card.status)) continue
         const el = viewport.querySelector(
           `[data-session-id="${card.session.id}"]`
         ) as HTMLElement | null
@@ -750,11 +901,19 @@ export function SessionChatModal({
       await performGitPull({
         worktreeId,
         worktreePath,
-        baseBranch: defaultBranch,
+        baseBranch: worktree?.base_branch ?? defaultBranch,
         projectId: project?.id,
+        remote: worktree?.base_remote,
       })
     },
-    [worktreeId, worktreePath, defaultBranch, project?.id]
+    [
+      worktreeId,
+      worktreePath,
+      worktree?.base_branch,
+      worktree?.base_remote,
+      defaultBranch,
+      project?.id,
+    ]
   )
 
   const pickRemoteOrRun = useRemotePicker(worktreePath)
@@ -792,6 +951,48 @@ export function SessionChatModal({
       }
     },
     [pickRemoteOrRun, worktree, worktreePath, project]
+  )
+
+  const gitSyncButton = preferences?.git_sync_button ?? false
+
+  const handleSync = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+
+      const runSync = async (remote?: string) => {
+        await performGitSync({
+          needsPull: behindCount > 0,
+          needsPush: unpushedCount > 0,
+          pull: {
+            worktreeId,
+            worktreePath,
+            baseBranch: worktree?.base_branch ?? defaultBranch,
+            projectId: project?.id,
+            remote: worktree?.base_remote,
+          },
+          prNumber: worktree?.pr_number,
+          pushRemote: remote,
+        })
+      }
+
+      if (unpushedCount > 0 && pushNeedsRemotePicker(worktree?.pr_number)) {
+        pickRemoteOrRun(runSync)
+      } else {
+        void runSync()
+      }
+    },
+    [
+      behindCount,
+      unpushedCount,
+      worktreeId,
+      worktreePath,
+      worktree?.base_branch,
+      worktree?.base_remote,
+      worktree?.pr_number,
+      defaultBranch,
+      project?.id,
+      pickRemoteOrRun,
+    ]
   )
 
   const handleUncommittedDiffClick = useCallback(() => {
@@ -839,39 +1040,38 @@ export function SessionChatModal({
   )
 
   // Close on Escape key
+  const onEscapeClose = useEffectEvent((e: KeyboardEvent) => {
+    if (e.key !== 'Escape') return
+    const target = e.target as HTMLElement
+    const portalAncestor = target?.closest?.(
+      '[data-slot="dialog-portal"], [data-slot="alert-dialog-portal"], [data-slot="sheet-portal"]'
+    )
+    const terminalAncestor = target?.closest?.('[data-terminal-root="true"]')
+    const { planDialogOpen, gitDiffModalOpen, contextViewerOpen } =
+      useUIStore.getState()
+
+    // Don't close if PlanDialog is open — let it handle ESC
+    if (planDialogOpen) return
+    // Don't close if GitDiffModal is open — let it handle ESC
+    if (gitDiffModalOpen) return
+    // Don't close if ContextViewerDialog is open — let it handle ESC
+    if (contextViewerOpen) return
+    // Don't close if CloseWorktreeDialog is open — let it handle ESC
+    if (closeConfirmOpen) return
+    // Don't close if ESC originated inside a child dialog/sheet portal
+    if (portalAncestor) return
+    // Don't close if ESC originated inside the pinned terminal
+    if (terminalAncestor) return
+
+    handleClose()
+  })
+
   useEffect(() => {
     if (!isOpen) return
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const target = e.target as HTMLElement
-        const portalAncestor = target?.closest?.(
-          '[data-slot="dialog-portal"], [data-slot="alert-dialog-portal"], [data-slot="sheet-portal"]'
-        )
-        const terminalAncestor = target?.closest?.(
-          '[data-terminal-root="true"]'
-        )
-        const { planDialogOpen, gitDiffModalOpen, contextViewerOpen } =
-          useUIStore.getState()
-
-        // Don't close if PlanDialog is open — let it handle ESC
-        if (planDialogOpen) return
-        // Don't close if GitDiffModal is open — let it handle ESC
-        if (gitDiffModalOpen) return
-        // Don't close if ContextViewerDialog is open — let it handle ESC
-        if (contextViewerOpen) return
-        // Don't close if CloseWorktreeDialog is open — let it handle ESC
-        if (closeConfirmOpen) return
-        // Don't close if ESC originated inside a child dialog/sheet portal
-        if (portalAncestor) return
-        // Don't close if ESC originated inside the pinned terminal
-        if (terminalAncestor) return
-
-        handleClose()
-      }
-    }
+    const handleKeyDown = (e: KeyboardEvent) => onEscapeClose(e)
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isOpen, handleClose, closeConfirmOpen])
+  }, [isOpen])
 
   if (!isOpen || !worktreeId) return null
 
@@ -879,29 +1079,54 @@ export function SessionChatModal({
     <>
       <div
         key={worktreeId}
-        ref={isTouch ? swipe.containerRef : undefined}
+        ref={setSwipeContainerRef}
         className={cn(
           'absolute inset-0 z-10 flex min-w-0 overflow-hidden bg-background pt-[3px]',
           !isMobile && 'pb-2',
           hasBottomDock ? 'flex-col' : 'flex-row'
         )}
+        data-testid="session-chat-modal-swipe"
         style={
-          isMobile
+          isMobile &&
+          (swipe.isSwiping ||
+            swipe.translateX !== 0 ||
+            swipeOpenTerminal.isSwiping ||
+            swipeOpenTerminal.translateX !== 0)
             ? {
-                transform: `translateX(${swipe.translateX}px)`,
-                transition: swipe.transitionStyle || undefined,
-                willChange: swipe.isSwiping ? 'transform' : undefined,
+                transform: `translateX(${
+                  swipeOpenTerminal.isSwiping ||
+                  swipeOpenTerminal.translateX !== 0
+                    ? swipeOpenTerminal.translateX
+                    : swipe.translateX
+                }px)`,
+                transition:
+                  swipeOpenTerminal.transitionStyle ||
+                  swipe.transitionStyle ||
+                  undefined,
+                willChange:
+                  swipe.isSwiping || swipeOpenTerminal.isSwiping
+                    ? 'transform'
+                    : undefined,
               }
             : undefined
         }
       >
         {isMobile && (
-          <div
-            className={cn(
-              'absolute left-0 top-1/2 z-50 h-10 w-1 -translate-y-1/2 rounded-r-full bg-muted-foreground/20 transition-opacity duration-300',
-              swipe.isSwiping ? 'opacity-0' : 'opacity-100'
+          <>
+            <div
+              className={cn(
+                'absolute left-0 top-1/2 z-50 h-10 w-1 -translate-y-1/2 rounded-r-full bg-muted-foreground/20 transition-opacity duration-300',
+                swipe.isSwiping ? 'opacity-0' : 'opacity-100'
+              )}
+              aria-hidden
+            />
+            {canSwipeOpenTerminal && (
+              <div
+                className="pointer-events-none absolute right-0 top-1/2 z-50 h-10 w-1 -translate-y-1/2 rounded-l-full bg-muted-foreground/20"
+                aria-hidden
+              />
             )}
-          />
+          </>
         )}
         {isModalTerminalOpen && modalTerminalDockMode === 'left' && (
           <ModalTerminalDrawer
@@ -912,35 +1137,37 @@ export function SessionChatModal({
         )}
         <ModalBrowserDrawer worktreeId={worktreeId} dockMode="left" />
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="shrink-0 border-b sm:text-left">
-            <div
-              className={cn(
-                'flex items-center justify-between gap-2 px-4 py-2',
-                MODAL_TERMINAL_PRIMARY_ROW_CLASS
-              )}
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <h2 className="text-sm font-medium min-w-0 flex-1 truncate">
-                  {project && !isMobile && (
-                    <span className="text-muted-foreground font-normal">
-                      <button
-                        type="button"
-                        className="hover:text-foreground transition-colors cursor-pointer text-foreground text-lg font-semibold"
-                        onClick={handleClose}
-                      >
-                        {project.name}
-                      </button>
-                      <span className="mx-1.5 text-muted-foreground/50">›</span>
-                    </span>
-                  )}
-                  {isBase ? 'Base Session' : (worktree?.name ?? 'Worktree')}
-                </h2>
-                {worktree?.base_branch &&
-                  worktree.base_branch !== project?.default_branch && (
+          {!zenMode && (
+            <div className="shrink-0 border-b sm:text-left">
+              <div
+                className={cn(
+                  'flex items-center justify-between gap-2 px-4 py-2',
+                  MODAL_TERMINAL_PRIMARY_ROW_CLASS
+                )}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <h2 className="text-sm font-medium min-w-0 flex-1 truncate">
+                    {project && !isMobile && (
+                      <span className="text-muted-foreground font-normal">
+                        <button
+                          type="button"
+                          className="hover:text-foreground transition-colors cursor-pointer text-foreground text-lg font-semibold"
+                          onClick={handleClose}
+                        >
+                          {project.name}
+                        </button>
+                        <span className="mx-1.5 text-muted-foreground/50">
+                          ›
+                        </span>
+                      </span>
+                    )}
+                    {isBase ? 'Base Session' : (worktree?.name ?? 'Worktree')}
+                  </h2>
+                  {!zenMode && stackedBaseBranch && (
                     <span className="inline-flex shrink min-w-0 items-center gap-1 rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
                       <GitBranchPlus className="h-2.5 w-2.5" />
                       <span className="max-w-16 sm:max-w-40 truncate">
-                        {worktree.base_branch}
+                        {stackedBaseBranch}
                       </span>
                       {stackedOnPR && (
                         <>
@@ -951,193 +1178,238 @@ export function SessionChatModal({
                       )}
                     </span>
                   )}
-                <GitStatusBadges
-                  behindCount={behindCount}
-                  unpushedCount={unpushedCount}
-                  diffAdded={isMobile ? 0 : uncommittedAdded}
-                  diffRemoved={isMobile ? 0 : uncommittedRemoved}
-                  branchDiffAdded={isBase || isMobile ? 0 : branchDiffAdded}
-                  branchDiffRemoved={isBase || isMobile ? 0 : branchDiffRemoved}
-                  onPull={handlePull}
-                  onPush={handlePush}
-                  onDiffClick={handleUncommittedDiffClick}
-                  onBranchDiffClick={handleBranchDiffClick}
-                />
-                {project && (
-                  <div className="hidden items-center gap-2 md:flex">
-                    <NewIssuesBadge
-                      projectPath={project.path}
-                      projectId={project.id}
-                    />
-                    <OpenPRsBadge
-                      projectPath={project.path}
-                      projectId={project.id}
-                    />
-                    <FailedRunsBadge projectPath={project.path} />
-                  </div>
-                )}
-                {worktree && project && (
-                  <WorktreeDropdownMenu
-                    worktree={worktree}
-                    projectId={project.id}
-                    projectPath={project.path}
-                    uncommittedAdded={uncommittedAdded}
-                    uncommittedRemoved={uncommittedRemoved}
-                    branchDiffAdded={isBase ? 0 : branchDiffAdded}
-                    branchDiffRemoved={isBase ? 0 : branchDiffRemoved}
-                    onUncommittedDiffClick={handleUncommittedDiffClick}
-                    onBranchDiffClick={handleBranchDiffClick}
-                  />
-                )}
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                {/* Desktop: inline action buttons */}
-                <div className="hidden sm:flex items-center gap-1">
-                  <OpenInButton
-                    worktreePath={worktreePath}
-                    branch={worktree?.branch}
-                  />
-                  <ScriptsButton
-                    projectId={worktree?.project_id}
-                    worktreePath={worktreePath}
-                    onRun={handlePackageScript}
-                  />
-                  {currentSessionId && (
-                    <DevToolsDropdown
-                      sessionId={currentSessionId}
-                      worktreeId={worktreeId}
-                      worktreePath={worktreePath}
-                      session={currentSession}
+                  {!zenMode && (
+                    <GitStatusBadges
+                      behindCount={behindCount}
+                      unpushedCount={unpushedCount}
+                      diffAdded={isMobile ? 0 : uncommittedAdded}
+                      diffRemoved={isMobile ? 0 : uncommittedRemoved}
+                      branchDiffAdded={isBase || isMobile ? 0 : branchDiffAdded}
+                      branchDiffRemoved={
+                        isBase || isMobile ? 0 : branchDiffRemoved
+                      }
+                      syncMode={gitSyncButton}
+                      onPull={handlePull}
+                      onPush={handlePush}
+                      onSync={handleSync}
+                      onDiffClick={handleUncommittedDiffClick}
+                      onBranchDiffClick={handleBranchDiffClick}
                     />
                   )}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        aria-label="Toggle terminal"
-                        onClick={() => {
-                          useTerminalStore
-                            .getState()
-                            .toggleModalTerminal(worktreeId)
-                        }}
-                      >
-                        <Terminal className="h-3 w-3" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      Terminal{' '}
-                      <kbd className="ml-1 text-[0.625rem] opacity-60">
-                        {terminalShortcut}
-                      </kbd>
-                    </TooltipContent>
-                  </Tooltip>
-                  {isNativeApp() && (
+                  {!zenMode && project && (
+                    <div className="hidden items-center gap-2 md:flex">
+                      <NewIssuesBadge
+                        projectPath={project.path}
+                        projectId={project.id}
+                      />
+                      <OpenPRsBadge
+                        projectPath={project.path}
+                        projectId={project.id}
+                      />
+                      <FailedRunsBadge projectPath={project.path} />
+                    </div>
+                  )}
+                  {!zenMode && worktree && project && (
+                    <WorktreeDropdownMenu
+                      worktree={worktree}
+                      projectId={project.id}
+                      projectPath={project.path}
+                      uncommittedAdded={uncommittedAdded}
+                      uncommittedRemoved={uncommittedRemoved}
+                      branchDiffAdded={isBase ? 0 : branchDiffAdded}
+                      branchDiffRemoved={isBase ? 0 : branchDiffRemoved}
+                      onUncommittedDiffClick={handleUncommittedDiffClick}
+                      onBranchDiffClick={handleBranchDiffClick}
+                    />
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {isMobile && (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2 text-xs"
-                          aria-label="Toggle browser"
-                          onClick={() => {
-                            useBrowserStore.getState().toggleModal(worktreeId)
-                          }}
+                          aria-label={
+                            zenMode ? 'Exit zen mode' : 'Enter zen mode'
+                          }
+                          aria-pressed={zenMode}
+                          data-testid="toggle-zen-mode"
+                          onClick={toggleZenMode}
                         >
-                          <Globe className="h-3 w-3" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Browser</TooltipContent>
-                    </Tooltip>
-                  )}
-                  {runScripts.length === 1 && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          aria-label="Run"
-                          onClick={handleRun}
-                        >
-                          <Play
-                            className={`h-3 w-3 ${hasFailedTerminal ? 'text-red-500' : hasRunningTerminal ? 'text-amber-500 dark:text-yellow-400 animate-icon-glow' : ''}`}
-                          />
+                          {zenMode ? (
+                            <Minimize2 className="h-3 w-3" />
+                          ) : (
+                            <Maximize2 className="h-3 w-3" />
+                          )}
                         </Button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        {hasFailedTerminal
-                          ? 'Crashed'
-                          : hasRunningTerminal
-                            ? 'Running'
-                            : 'Run'}{' '}
+                        {zenMode ? 'Exit zen mode' : 'Zen mode'}{' '}
                         <kbd className="ml-1 text-[0.625rem] opacity-60">
-                          {runShortcut}
+                          {formatShortcutDisplay(
+                            preferences?.keybindings?.toggle_zen_mode ??
+                              DEFAULT_KEYBINDINGS.toggle_zen_mode
+                          )}
                         </kbd>
                       </TooltipContent>
                     </Tooltip>
                   )}
-                  {runScripts.length > 1 && (
-                    <div className="flex items-center">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 rounded-r-none px-2 text-xs"
-                            aria-label="Run first command"
-                            onClick={handleRun}
-                          >
-                            <Play
-                              className={`h-3 w-3 ${hasFailedTerminal ? 'text-red-500' : hasRunningTerminal ? 'text-amber-500 dark:text-yellow-400 animate-icon-glow' : ''}`}
-                            />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {hasFailedTerminal
-                            ? 'Crashed'
-                            : hasRunningTerminal
-                              ? 'Running'
-                              : 'Run first command'}{' '}
-                          <kbd className="ml-1 text-[0.625rem] opacity-60">
-                            {runShortcut}
-                          </kbd>
-                        </TooltipContent>
-                      </Tooltip>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 rounded-l-none border-l border-border/50 px-1 text-xs"
-                            aria-label="Choose run command"
-                          >
-                            <ChevronDown className="h-3 w-3" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          {runScripts.map((cmd, i) => (
-                            <DropdownMenuItem
-                              key={i}
-                              onSelect={() => handleRunCommand(cmd)}
-                              className="font-mono text-xs"
+                  {!zenMode && (
+                    <>
+                      {/* Desktop: inline action buttons */}
+                      <div className="hidden sm:flex items-center gap-1">
+                        <OpenInButton
+                          worktreePath={worktreePath}
+                          branch={worktree?.branch}
+                        />
+                        <ScriptsButton
+                          projectId={worktree?.project_id}
+                          worktreePath={worktreePath}
+                          onRun={handlePackageScript}
+                        />
+                        {currentSessionId && (
+                          <DevToolsDropdown
+                            sessionId={currentSessionId}
+                            worktreeId={worktreeId}
+                            worktreePath={worktreePath}
+                            session={currentSession}
+                          />
+                        )}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              aria-label="Toggle terminal"
+                              onClick={() => {
+                                useTerminalStore
+                                  .getState()
+                                  .toggleModalTerminal(worktreeId)
+                              }}
                             >
-                              {cmd}
-                            </DropdownMenuItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
+                              <Terminal className="h-3 w-3" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Terminal{' '}
+                            <kbd className="ml-1 text-[0.625rem] opacity-60">
+                              {terminalShortcut}
+                            </kbd>
+                          </TooltipContent>
+                        </Tooltip>
+                        {isNativeApp() && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs"
+                                aria-label="Toggle browser"
+                                onClick={() => {
+                                  useBrowserStore
+                                    .getState()
+                                    .toggleModal(worktreeId)
+                                }}
+                              >
+                                <Globe className="h-3 w-3" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Browser</TooltipContent>
+                          </Tooltip>
+                        )}
+                        {runScripts.length === 1 && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs"
+                                aria-label="Run"
+                                onClick={handleRun}
+                              >
+                                <Play
+                                  className={`h-3 w-3 ${hasFailedTerminal ? 'text-red-500' : hasRunningTerminal ? 'text-amber-500 dark:text-yellow-400 animate-icon-glow' : ''}`}
+                                />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {hasFailedTerminal
+                                ? 'Crashed'
+                                : hasRunningTerminal
+                                  ? 'Running'
+                                  : 'Run'}{' '}
+                              <kbd className="ml-1 text-[0.625rem] opacity-60">
+                                {runShortcut}
+                              </kbd>
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                        {runScripts.length > 1 && (
+                          <div className="flex items-center">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 rounded-r-none px-2 text-xs"
+                                  aria-label="Run first command"
+                                  onClick={handleRun}
+                                >
+                                  <Play
+                                    className={`h-3 w-3 ${hasFailedTerminal ? 'text-red-500' : hasRunningTerminal ? 'text-amber-500 dark:text-yellow-400 animate-icon-glow' : ''}`}
+                                  />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                {hasFailedTerminal
+                                  ? 'Crashed'
+                                  : hasRunningTerminal
+                                    ? 'Running'
+                                    : 'Run first command'}{' '}
+                                <kbd className="ml-1 text-[0.625rem] opacity-60">
+                                  {runShortcut}
+                                </kbd>
+                              </TooltipContent>
+                            </Tooltip>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 rounded-l-none border-l border-border/50 px-1 text-xs"
+                                  aria-label="Choose run command"
+                                >
+                                  <ChevronDown className="h-3 w-3" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {runScripts.map(cmd => (
+                                  <DropdownMenuItem
+                                    key={cmd}
+                                    onSelect={() => handleRunCommand(cmd)}
+                                    className="font-mono text-xs"
+                                  >
+                                    {cmd}
+                                  </DropdownMenuItem>
+                                ))}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        )}
+                      </div>
+                      <ModalCloseButton onClick={handleClose} />
+                    </>
                   )}
                 </div>
-                <ModalCloseButton onClick={handleClose} />
               </div>
             </div>
-          </div>
+          )}
 
-          {/* Session tabs */}
-          {sessions.length > 0 && (
+          {/* Session tabs — hidden in zen mode for an immersive chat surface */}
+          {!zenMode && sessions.length > 0 && (
             <div
               className={cn(
                 'relative flex shrink-0 items-center gap-0.5 border-b pr-4',
@@ -1161,7 +1433,7 @@ export function SessionChatModal({
                 />
               )}
               <ScrollArea
-                className="min-w-0 flex-1"
+                className="min-w-0 flex-1 sm:flex-initial"
                 viewportClassName="overflow-x-auto overflow-y-hidden overscroll-x-contain overscroll-y-none touch-pan-x scrollbar-hide [-webkit-overflow-scrolling:touch]"
                 viewportRef={modalTabScrollRef}
               >
@@ -1179,8 +1451,6 @@ export function SessionChatModal({
                         <ContextMenuTrigger asChild>
                           <div
                             data-session-id={session.id}
-                            role="button"
-                            tabIndex={0}
                             draggable={renamingSessionId !== session.id}
                             onDragStart={e =>
                               handleSessionDragStart(e, session.id)
@@ -1192,13 +1462,6 @@ export function SessionChatModal({
                             onDragEnd={() => setDraggedSessionId(null)}
                             onClick={() => handleTabClick(session.id)}
                             onAuxClick={e => handleTabAuxClick(e, session)}
-                            onKeyDown={e => {
-                              if (renamingSessionId === session.id) return
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault()
-                                handleTabClick(session.id)
-                              }
-                            }}
                             onDoubleClick={() =>
                               handleStartRenameImmediate(
                                 session.id,
@@ -1206,18 +1469,24 @@ export function SessionChatModal({
                               )
                             }
                             className={cn(
-                              'group/tab flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 text-xs transition-colors whitespace-nowrap',
+                              'group/tab flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 text-xs transition-colors whitespace-nowrap cursor-pointer',
                               isActive
                                 ? 'bg-muted text-foreground'
                                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
                               draggedSessionId === session.id && 'opacity-60',
-                              status === 'waiting' &&
+                              !isActive &&
+                                !isActionableWaitingStatus(status) &&
+                                isUnreadSession(session) &&
+                                'bg-muted/60 text-foreground/90 hover:bg-muted/80',
+                              isActionableWaitingStatus(status) &&
                                 'bg-yellow-500/10 text-yellow-700 border-yellow-500 hover:bg-yellow-500/20 hover:text-yellow-800 dark:bg-yellow-400/10 dark:text-yellow-300 dark:border-yellow-400 dark:hover:bg-yellow-400/20 dark:hover:text-yellow-200'
                             )}
                           >
                             <StatusIndicator
                               status={config.indicatorStatus}
                               variant={config.indicatorVariant}
+                              shape={config.indicatorShape}
+                              label={config.label}
                               className="h-1.5 w-1.5"
                             />
                             {idx < 9 && (
@@ -1237,6 +1506,7 @@ export function SessionChatModal({
                                 }
                                 onPointerDown={e => e.stopPropagation()}
                                 onClick={e => e.stopPropagation()}
+                                aria-label="Rename session"
                                 className="w-full min-w-0 bg-transparent text-base outline-none md:text-xs"
                               />
                             ) : (
@@ -1253,12 +1523,7 @@ export function SessionChatModal({
                             )}
                             {renamingSessionId !== session.id && (
                               <DismissButton
-                                tooltip={
-                                  sessions.filter(s => !s.archived_at).length <=
-                                  1
-                                    ? 'Close worktree'
-                                    : 'Remove session'
-                                }
+                                tooltip={'Remove session'}
                                 onClick={e => {
                                   e.stopPropagation()
                                   removeSessionTab(session)
@@ -1287,50 +1552,45 @@ export function SessionChatModal({
                             <Tag className="mr-2 h-4 w-4" />
                             {sessionLabel ? 'Remove Label' : 'Add Label'}
                           </ContextMenuItem>
-                          <ContextMenuItem
-                            // "Mark as Idle" only clears the manual reviewing
-                            // flag. When review is driven by AI review_results,
-                            // clearing the flag leaves the session in review —
-                            // no effect — so disable it there.
-                            disabled={
-                              status === 'review' && !!session.review_results
-                            }
-                            onSelect={() => {
-                              const { reviewingSessions, setSessionReviewing } =
-                                useChatStore.getState()
-                              const isReviewing =
-                                reviewingSessions[session.id] ||
-                                !!session.review_results
-                              setSessionReviewing(session.id, !isReviewing)
+                          <SessionStatusMenu
+                            statusOverride={card.statusOverride}
+                            automaticStatus={card.automaticStatus}
+                            onSetStatusOverride={(
+                              next: ManualSessionStatus | null
+                            ) => {
+                              useChatStore
+                                .getState()
+                                .setSessionStatusOverride(session.id, next)
                             }}
-                          >
-                            {status === 'review' ? (
-                              <>
-                                <EyeOff className="mr-2 h-4 w-4" />
-                                Mark as Idle
-                              </>
-                            ) : (
-                              <>
-                                <Eye className="mr-2 h-4 w-4" />
-                                Mark for Review
-                              </>
-                            )}
-                          </ContextMenuItem>
+                          />
                           {resumeCommand && (
-                            <ContextMenuItem
-                              onSelect={() => {
-                                void copyToClipboard(resumeCommand)
-                                  .then(() =>
-                                    toast.success('Resume command copied')
-                                  )
-                                  .catch(() =>
-                                    toast.error('Failed to copy resume command')
-                                  )
-                              }}
-                            >
-                              <Terminal className="mr-2 h-4 w-4" />
-                              Copy Resume Command
-                            </ContextMenuItem>
+                            <>
+                              <ContextMenuItem
+                                disabled={createSession.isPending}
+                                onSelect={() =>
+                                  handleOpenInNativeClient(session)
+                                }
+                              >
+                                <Play className="mr-2 h-4 w-4" />
+                                Open in Native Client
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void copyToClipboard(resumeCommand)
+                                    .then(() =>
+                                      toast.success('Resume command copied')
+                                    )
+                                    .catch(() =>
+                                      toast.error(
+                                        'Failed to copy resume command'
+                                      )
+                                    )
+                                }}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Native Resume Command
+                              </ContextMenuItem>
+                            </>
                           )}
                           {canReconnectSession(session) && (
                             <ContextMenuItem
@@ -1351,6 +1611,18 @@ export function SessionChatModal({
                           >
                             <Archive className="mr-2 h-4 w-4" />
                             Archive Session
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            onSelect={() => {
+                              void copyToClipboard(session.id)
+                                .then(() => toast.success('Session ID copied'))
+                                .catch(() =>
+                                  toast.error('Failed to copy session ID')
+                                )
+                            }}
+                          >
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy Session ID
                           </ContextMenuItem>
                           <ContextMenuSeparator />
                           <ContextMenuItem
@@ -1393,7 +1665,26 @@ export function SessionChatModal({
                   worktreePath={worktreePath}
                 />
               </div>
-            ) : null}
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {sessionsData
+                    ? 'No sessions yet. Create one to start chatting.'
+                    : 'Loading sessions…'}
+                </p>
+                {sessionsData && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCreateSession}
+                  >
+                    <Plus className="mr-2 h-3.5 w-3.5" />
+                    New session
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1440,7 +1731,7 @@ export function SessionChatModal({
         onOpenChange={setCloseConfirmOpen}
         onConfirm={executeCloseAction}
         branchName={worktree?.branch}
-        mode="session"
+        mode={closeConfirmMode}
       />
     </>
   )

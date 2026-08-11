@@ -23,23 +23,40 @@ export function getPrStatusDisplay(status: PrDisplayStatus): {
 }
 
 export function getProviderDisplayName(
-  selectedProvider: string | null
+  selectedProvider: string | null,
+  selectedBackend?: Backend
 ): string {
-  return !selectedProvider || selectedProvider === '__anthropic__'
-    ? 'Anthropic'
-    : selectedProvider
+  if (
+    !selectedProvider ||
+    selectedProvider === '__anthropic__' ||
+    selectedProvider === '__default__'
+  ) {
+    if (selectedBackend === 'codex') return 'Default'
+    return 'Anthropic'
+  }
+  return selectedProvider
 }
 
 export function getSessionProviderDisplayName(
   selectedBackend: Backend | undefined,
   selectedProvider: string | null | undefined
 ): string {
+  if (
+    selectedBackend === 'codex' &&
+    selectedProvider &&
+    selectedProvider !== '__default__'
+  ) {
+    return selectedProvider
+  }
   if (selectedBackend === 'codex') return 'OpenAI'
   if (selectedBackend === 'opencode') return 'OpenCode'
   if (selectedBackend === 'cursor') return 'Cursor'
   if (selectedBackend === 'pi') return 'PI'
   if (selectedBackend === 'commandcode') return 'Command Code'
-  return getProviderDisplayName(selectedProvider ?? null)
+  if (selectedBackend === 'grok') return 'xAI'
+  if (selectedBackend === 'kimi') return 'Kimi Code'
+  if (selectedBackend === 'antigravity') return 'Google'
+  return getProviderDisplayName(selectedProvider ?? null, selectedBackend)
 }
 
 function formatProviderName(provider: string): string {
@@ -251,7 +268,6 @@ export function formatCommandCodeModelLabel(raw: string): string {
 
   return `Command Code · ${formatModelIdTailLabel(value)}`
 }
-
 
 export function formatGrokPromptModelLabel(raw: string): string {
   const value = raw.startsWith('grok/') ? raw.slice('grok/'.length) : raw

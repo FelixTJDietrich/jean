@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@/test/test-utils'
 import { OpenInModal } from './OpenInModal'
 
-const nativeState = vi.hoisted(() => ({ value: true }))
+const localBackendState = vi.hoisted(() => ({ value: true }))
+const nativeOpenAllowedState = vi.hoisted(() => ({ value: false }))
+const remoteEditorLocallyState = vi.hoisted(() => ({ value: false }))
 
 const mocks = vi.hoisted(() => ({
   setOpenInModalOpen: vi.fn(),
@@ -76,7 +78,17 @@ vi.mock('@/services/preferences', () => ({
 }))
 
 vi.mock('@/lib/environment', () => ({
-  isNativeApp: () => nativeState.value,
+  isLocalBackend: () => localBackendState.value,
+  isNativeApp: () =>
+    localBackendState.value || remoteEditorLocallyState.value,
+  canOpenNativeApps: () =>
+    localBackendState.value || nativeOpenAllowedState.value,
+  canOpenRemoteEditorLocally: () => remoteEditorLocallyState.value,
+  canOpenInEditor: () =>
+    localBackendState.value ||
+    nativeOpenAllowedState.value ||
+    remoteEditorLocallyState.value,
+  isNativeOpenAllowed: () => nativeOpenAllowedState.value,
 }))
 
 vi.mock('@/lib/platform', () => ({
@@ -157,16 +169,73 @@ vi.mock('@/services/github', () => ({
 describe('OpenInModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    nativeState.value = true
+    localBackendState.value = true
+    nativeOpenAllowedState.value = false
+    remoteEditorLocallyState.value = false
   })
 
-  it('hides Finder in browser/headless mode', async () => {
-    nativeState.value = false
+  it('hides Finder/editor/terminal in browser/headless mode without native open', async () => {
+    localBackendState.value = false
+    nativeOpenAllowedState.value = false
+    remoteEditorLocallyState.value = false
 
     render(<OpenInModal />)
 
     expect(await screen.findByText('GitHub')).toBeInTheDocument()
     expect(screen.queryByText('Finder')).not.toBeInTheDocument()
+    expect(screen.queryByText('Zed')).not.toBeInTheDocument()
+    expect(screen.queryByText('Ghostty')).not.toBeInTheDocument()
+  })
+
+  it('shows Finder/editor/terminal when the backend allows native open', async () => {
+    // Browser or remote client against a WSL/--allow-native-open headless server.
+    localBackendState.value = false
+    nativeOpenAllowedState.value = true
+    remoteEditorLocallyState.value = false
+
+    render(<OpenInModal />)
+
+    expect(await screen.findByText('Zed')).toBeInTheDocument()
+    expect(screen.getByText('Finder')).toBeInTheDocument()
+    expect(screen.getByText('Ghostty')).toBeInTheDocument()
+  })
+
+  it('shows Zed with E shortcut on remote native connections (local ssh:// open)', async () => {
+    // Native shell + remote Jean: editor remaps to local Zed; Finder/terminal stay host-side.
+    localBackendState.value = false
+    nativeOpenAllowedState.value = false
+    remoteEditorLocallyState.value = true
+
+    render(<OpenInModal />)
+
+    expect(await screen.findByText('Zed')).toBeInTheDocument()
+    expect(screen.getByText('E')).toBeInTheDocument()
+    expect(screen.getByText('GitHub')).toBeInTheDocument()
+    expect(screen.queryByText('Finder')).not.toBeInTheDocument()
+    expect(screen.queryByText('Ghostty')).not.toBeInTheDocument()
+  })
+
+  it('hides Finder/terminal on remote connections without native open or local editor', async () => {
+    // Pure browser/web remote without --allow-native-open.
+    localBackendState.value = false
+    nativeOpenAllowedState.value = false
+    remoteEditorLocallyState.value = false
+
+    render(<OpenInModal />)
+
+    expect(await screen.findByText('GitHub')).toBeInTheDocument()
+    expect(screen.queryByText('Finder')).not.toBeInTheDocument()
+    expect(screen.queryByText(/zed|editor/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ghostty|terminal/i)).not.toBeInTheDocument()
+  })
+
+  it('shows local open targets when connected to the local backend', async () => {
+    render(<OpenInModal />)
+
+    expect(await screen.findByText('Zed')).toBeInTheDocument()
+    expect(screen.getByText('Ghostty')).toBeInTheDocument()
+    expect(screen.getByText('Finder')).toBeInTheDocument()
+    expect(screen.getByText('GitHub')).toBeInTheDocument()
   })
 
   it('shows worktree and loaded security/advisory context URLs', async () => {

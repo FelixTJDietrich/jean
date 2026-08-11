@@ -17,12 +17,17 @@ import {
 } from '@/types/preferences'
 import { triggerImmediateGitPoll } from '@/services/git-status'
 import {
+  getCodexUserInputRequestId,
   isAskUserQuestion,
   isPlanToolCall,
   normalizeCodexQuestions,
+  upsertCodexUserInputRequest,
 } from '@/types/chat'
 import { playNotificationSound } from '@/lib/sounds'
-import { notifyIfBackground } from '@/lib/session-notifications'
+import {
+  notifyIfBackground,
+  notifySessionNeedsAttention,
+} from '@/lib/session-notifications'
 import { findPlanFilePath } from '@/components/chat/tool-call-utils'
 import { generateId } from '@/lib/uuid'
 import {
@@ -42,6 +47,8 @@ import type {
   PermissionDeniedEvent,
   CodexCommandApprovalRequestEvent,
   CodexPermissionRequestEvent,
+  OpenCodePermissionRequestEvent,
+  OpenCodePermissionRepliedEvent,
   CodexUserInputRequestEvent,
   CodexMcpElicitationRequestEvent,
   CodexDynamicToolCallRequestEvent,
@@ -67,6 +74,16 @@ import {
   hasMeaningfulAssistantPayload,
   shouldHydrateCompletedSessionFromBackend,
 } from '@/components/chat/hooks/completion-hydration'
+import {
+  shouldThrottleStreamingFlush,
+  streamingFlushDelayMs,
+} from '@/lib/streaming-flush'
+import {
+  handleCliAuthError,
+  isCliAuthError,
+  isCodexBubblewrapError,
+  rewriteCodexBubblewrapErrorMessage,
+} from '@/lib/cli-auth'
 
 interface UseStreamingEventsParams {
   queryClient: QueryClient
@@ -290,9 +307,15 @@ export default function useStreamingEvents({
     const cancelledRunIds = new Map<string, Set<string>>()
     const cancelledUntaggedSessionIds = new Set<string>()
 
-    // Fire a native OS banner (background-only) for a session lifecycle event,
-    // gated by the desktop_notifications_enabled preference. Body = session name.
-    const notifySession = (sessionId: string, title: string): void => {
+    // Fire a native OS banner for a session lifecycle event, gated by the
+    // desktop_notifications_enabled preference. Body = session name.
+    // Waiting-for-input uses notifySessionNeedsAttention so approvals still
+    // notify when Jean is focused on a different session (issue #626).
+    const notifySession = (
+      sessionId: string,
+      title: string,
+      kind: 'waiting' | 'lifecycle' = 'lifecycle'
+    ): void => {
       const prefs = queryClient.getQueryData<AppPreferences>(
         preferencesQueryKeys.preferences()
       )
@@ -300,7 +323,23 @@ export default function useStreamingEvents({
       const name = queryClient.getQueryData<Session>(
         chatQueryKeys.session(sessionId)
       )?.name
-      notifyIfBackground(title, name)
+      if (kind === 'waiting') {
+        notifySessionNeedsAttention(sessionId, title, name)
+      } else {
+        notifyIfBackground(title, name)
+      }
+    }
+
+    // Play the configured waiting sound (settings preview + chat:done share this).
+    // Used for mid-run Codex approvals so the user hears they need to act.
+    const playWaitingSound = (): void => {
+      const prefs = queryClient.getQueryData<AppPreferences>(
+        preferencesQueryKeys.preferences()
+      )
+      const waitingSound = (prefs?.waiting_sound ?? 'none') as NotificationSound
+      playNotificationSound(waitingSound, {
+        webAccessSoundsEnabled: prefs?.web_access_sounds_enabled ?? true,
+      })
     }
 
     // Hydrate ScheduleWakeup indicator store from backend so reloads do not
@@ -403,11 +442,27 @@ export default function useStreamingEvents({
     // Buffer chunks and flush on animation frames to avoid per-chunk re-renders.
     // Codex app-server sends very frequent deltas; without batching, each delta
     // triggers 2 store mutations + full StreamingMessage re-render.
+    // Once a session's streamed text is long, cap flushes (~30Hz) so WebKitGTK
+    // does not re-parse markdown + repaint at full token rate (issue #129).
     let chunkBuffer: Record<string, string> = {}
     let chunkRafId: number | null = null
+    let chunkTimeoutId: ReturnType<typeof setTimeout> | null = null
+    let lastChunkFlushAt = 0
+
+    function clearChunkFlushSchedule() {
+      if (chunkRafId !== null) {
+        cancelAnimationFrame(chunkRafId)
+        chunkRafId = null
+      }
+      if (chunkTimeoutId !== null) {
+        clearTimeout(chunkTimeoutId)
+        chunkTimeoutId = null
+      }
+    }
 
     function flushChunkBuffer() {
-      chunkRafId = null
+      clearChunkFlushSchedule()
+      lastChunkFlushAt = performance.now()
       for (const [sid, buffered] of Object.entries(chunkBuffer)) {
         // Single atomic set() updates both streamingContents (string fallback,
         // load-bearing for resume/dedupe/error paths) and streamingContentBlocks
@@ -415,6 +470,32 @@ export default function useStreamingEvents({
         appendStreamingChunk(sid, buffered)
       }
       chunkBuffer = {}
+    }
+
+    function scheduleChunkFlush() {
+      if (chunkRafId !== null || chunkTimeoutId !== null) return
+
+      const store = useChatStore.getState()
+      const needsThrottle = Object.entries(chunkBuffer).some(
+        ([sid, buffered]) =>
+          shouldThrottleStreamingFlush(
+            store.streamingContents[sid]?.length ?? 0,
+            buffered.length
+          )
+      )
+
+      if (needsThrottle) {
+        const delay = streamingFlushDelayMs(lastChunkFlushAt, performance.now())
+        if (delay > 0) {
+          chunkTimeoutId = setTimeout(() => {
+            chunkTimeoutId = null
+            flushChunkBuffer()
+          }, delay)
+          return
+        }
+      }
+
+      chunkRafId = requestAnimationFrame(flushChunkBuffer)
     }
 
     const unlistenChunk = listen<ChunkEvent>('chat:chunk', event => {
@@ -446,10 +527,8 @@ export default function useStreamingEvents({
       // Accumulate into buffer
       chunkBuffer[session_id] =
         (chunkBuffer[session_id] ?? '') + replayFilteredContent
-      // Schedule flush on next animation frame (coalesces all chunks in this frame)
-      if (chunkRafId === null) {
-        chunkRafId = requestAnimationFrame(flushChunkBuffer)
-      }
+      // Schedule flush (rAF for short streams; capped interval when long)
+      scheduleChunkFlush()
     })
 
     const unlistenToolUse = listen<ToolUseEvent>('chat:tool_use', event => {
@@ -488,16 +567,64 @@ export default function useStreamingEvents({
 
     // Buffer thinking deltas and flush on animation frames (same pattern as chunks).
     // OpenCode/Codex stream thinking as frequent small deltas; without batching,
-    // each delta triggers a store mutation + re-render.
+    // each delta triggers a store mutation + re-render. Long thinking streams
+    // use the same ~30Hz cap as text chunks (issue #129).
     let thinkingBuffer: Record<string, string> = {}
     let thinkingRafId: number | null = null
+    let thinkingTimeoutId: ReturnType<typeof setTimeout> | null = null
+    let lastThinkingFlushAt = 0
+
+    function clearThinkingFlushSchedule() {
+      if (thinkingRafId !== null) {
+        cancelAnimationFrame(thinkingRafId)
+        thinkingRafId = null
+      }
+      if (thinkingTimeoutId !== null) {
+        clearTimeout(thinkingTimeoutId)
+        thinkingTimeoutId = null
+      }
+    }
 
     function flushThinkingBuffer() {
-      thinkingRafId = null
+      clearThinkingFlushSchedule()
+      lastThinkingFlushAt = performance.now()
       for (const [sid, buffered] of Object.entries(thinkingBuffer)) {
         addThinkingBlock(sid, buffered)
       }
       thinkingBuffer = {}
+    }
+
+    function scheduleThinkingFlush() {
+      if (thinkingRafId !== null || thinkingTimeoutId !== null) return
+
+      const store = useChatStore.getState()
+      const needsThrottle = Object.entries(thinkingBuffer).some(
+        ([sid, buffered]) => {
+          const existing = (store.streamingContentBlocks[sid] ?? [])
+            .filter(
+              (block): block is { type: 'thinking'; thinking: string } =>
+                block.type === 'thinking'
+            )
+            .reduce((sum, block) => sum + block.thinking.length, 0)
+          return shouldThrottleStreamingFlush(existing, buffered.length)
+        }
+      )
+
+      if (needsThrottle) {
+        const delay = streamingFlushDelayMs(
+          lastThinkingFlushAt,
+          performance.now()
+        )
+        if (delay > 0) {
+          thinkingTimeoutId = setTimeout(() => {
+            thinkingTimeoutId = null
+            flushThinkingBuffer()
+          }, delay)
+          return
+        }
+      }
+
+      thinkingRafId = requestAnimationFrame(flushThinkingBuffer)
     }
 
     const unlistenThinking = listen<ThinkingEvent>('chat:thinking', event => {
@@ -509,9 +636,7 @@ export default function useStreamingEvents({
       if (!replayFilteredContent) return
       thinkingBuffer[session_id] =
         (thinkingBuffer[session_id] ?? '') + replayFilteredContent
-      if (thinkingRafId === null) {
-        thinkingRafId = requestAnimationFrame(flushThinkingBuffer)
-      }
+      scheduleThinkingFlush()
     })
 
     // User text injected into a running turn (Codex turn/steer) — render
@@ -522,6 +647,13 @@ export default function useStreamingEvents({
       text: string
     }>('chat:steered', event => {
       const { session_id, text } = event.payload
+      if (
+        useChatStore
+          .getState()
+          .consumeStreamingReplayUserInput(session_id, text)
+      ) {
+        return
+      }
       addUserInputBlock(session_id, text)
     })
 
@@ -660,6 +792,8 @@ export default function useStreamingEvents({
       const next = [...current, request]
       setPendingCodexMcpElicitationRequests(sessionId, next)
       setWaitingForInput(sessionId, true)
+      playWaitingSound()
+      notifySession(sessionId, 'Needs your input', 'waiting')
       persistCodexPendingState(sessionId, worktreeId, {
         pendingCodexMcpElicitationRequests: next,
       })
@@ -677,12 +811,63 @@ export default function useStreamingEvents({
         const next = [...current, request]
         setPendingCodexPermissionRequests(session_id, next)
         setWaitingForInput(session_id, true)
-        notifySession(session_id, 'Needs your input')
+        playWaitingSound()
+        notifySession(session_id, 'Needs your input', 'waiting')
         persistCodexPendingState(session_id, worktree_id, {
           pendingCodexPermissionRequests: next,
         })
       }
     )
+
+    const unlistenOpencodePermissionRequest =
+      listen<OpenCodePermissionRequestEvent>(
+        'chat:opencode_permission_request',
+        event => {
+          const { session_id, worktree_id, request } = event.payload
+          const { setPendingOpencodePermissionRequests, setWaitingForInput } =
+            useChatStore.getState()
+          const current =
+            useChatStore.getState().pendingOpencodePermissionRequests[
+              session_id
+            ] ?? []
+          // Deduplicate by request_id (SSE reconnects can redeliver)
+          if (current.some(r => r.request_id === request.request_id)) {
+            return
+          }
+          const next = [...current, request]
+          setPendingOpencodePermissionRequests(session_id, next)
+          setWaitingForInput(session_id, true)
+          playWaitingSound()
+          notifySession(session_id, 'Needs your input')
+          persistCodexPendingState(session_id, worktree_id, {
+            pendingOpencodePermissionRequests: next,
+          })
+        }
+      )
+
+    const unlistenOpencodePermissionReplied =
+      listen<OpenCodePermissionRepliedEvent>(
+        'chat:opencode_permission_replied',
+        event => {
+          const { session_id, worktree_id, request_id } = event.payload
+          const { setPendingOpencodePermissionRequests, setWaitingForInput } =
+            useChatStore.getState()
+          const current =
+            useChatStore.getState().pendingOpencodePermissionRequests[
+              session_id
+            ] ?? []
+          if (current.length === 0) return
+          const next = current.filter(r => r.request_id !== request_id)
+          if (next.length === current.length) return
+          setPendingOpencodePermissionRequests(session_id, next)
+          if (next.length === 0) {
+            setWaitingForInput(session_id, false)
+          }
+          persistCodexPendingState(session_id, worktree_id, {
+            pendingOpencodePermissionRequests: next,
+          })
+        }
+      )
 
     const unlistenCodexCommandApprovalRequest =
       listen<CodexCommandApprovalRequestEvent>(
@@ -698,7 +883,8 @@ export default function useStreamingEvents({
           const next = [...current, request]
           setPendingCodexCommandApprovalRequests(session_id, next)
           setWaitingForInput(session_id, true)
-          notifySession(session_id, 'Needs your input')
+          playWaitingSound()
+          notifySession(session_id, 'Needs your input', 'waiting')
           persistCodexPendingState(session_id, worktree_id, {
             pendingCodexCommandApprovalRequests: next,
           })
@@ -718,21 +904,24 @@ export default function useStreamingEvents({
         const current =
           useChatStore.getState().pendingCodexUserInputRequests[session_id] ??
           []
-        const next = [...current, request]
+        const next = upsertCodexUserInputRequest(current, request)
         setPendingCodexUserInputRequests(session_id, next)
         setWaitingForInput(session_id, true)
 
         const questions = normalizeCodexQuestions(request.questions)
 
         const toolCall = {
-          id: request.item_id || `codex-user-input-${request.rpc_id}`,
+          id: getCodexUserInputRequestId(request),
           name: 'AskUserQuestion',
           input: { questions },
         }
         addToolCall(session_id, toolCall)
         addToolBlock(session_id, toolCall.id)
 
-        notifySession(session_id, 'Needs your input')
+        if (next === current) return
+
+        playWaitingSound()
+        notifySession(session_id, 'Needs your input', 'waiting')
         persistCodexPendingState(session_id, worktree_id, {
           pendingCodexUserInputRequests: next,
         })
@@ -779,7 +968,8 @@ export default function useStreamingEvents({
           const next = [...current, request]
           setPendingCodexDynamicToolCallRequests(session_id, next)
           setWaitingForInput(session_id, true)
-          notifySession(session_id, 'Needs your input')
+          playWaitingSound()
+          notifySession(session_id, 'Needs your input', 'waiting')
           persistCodexPendingState(session_id, worktree_id, {
             pendingCodexDynamicToolCallRequests: next,
           })
@@ -800,12 +990,18 @@ export default function useStreamingEvents({
       const worktreeId = event.payload.worktree_id
 
       // Flush any buffered chunks/thinking so streaming state is up to date
-      if (chunkRafId !== null) {
-        cancelAnimationFrame(chunkRafId)
+      if (
+        chunkRafId !== null ||
+        chunkTimeoutId !== null ||
+        Object.keys(chunkBuffer).length > 0
+      ) {
         flushChunkBuffer()
       }
-      if (thinkingRafId !== null) {
-        cancelAnimationFrame(thinkingRafId)
+      if (
+        thinkingRafId !== null ||
+        thinkingTimeoutId !== null ||
+        Object.keys(thinkingBuffer).length > 0
+      ) {
         flushThinkingBuffer()
       }
 
@@ -859,20 +1055,47 @@ export default function useStreamingEvents({
       )
 
       // Capture streaming state to local variables BEFORE clearing
-      // This ensures we have the data for the optimistic message
-      const rawContent = streamingContents[sessionId]
+      // This ensures we have the data for the optimistic message.
+      // Prefer backend-authoritative final text when present (Grok sends this
+      // so leading-space word fragments cannot stick as a glued message).
+      const authoritativeContent =
+        typeof event.payload.content === 'string' &&
+        event.payload.content.length > 0
+          ? event.payload.content
+          : null
+      const streamedContent = streamingContents[sessionId]
       const toolCalls = activeToolCalls[sessionId]
-      const contentBlocks = streamingContentBlocks[sessionId]
+      const streamedBlocks = streamingContentBlocks[sessionId]
+      const rawContent = authoritativeContent ?? streamedContent
+      // Keep structural blocks (tools, thinking, mid-turn steers). Replacing with
+      // a single authoritative text block would drop steered `user_input` bubbles
+      // after the turn finishes (Grok/Codex steer).
+      const hasNonTextBlocks = (streamedBlocks ?? []).some(
+        b =>
+          b.type === 'tool_use' ||
+          b.type === 'thinking' ||
+          b.type === 'user_input'
+      )
+      // Text-only turns: replace blocks with authoritative string (spaces intact).
+      // Tool/thinking/steer turns: keep streamed block order; Grok hydration repairs text.
+      const contentBlocks =
+        authoritativeContent != null && !hasNonTextBlocks
+          ? [{ type: 'text' as const, text: authoritativeContent }]
+          : streamedBlocks
       const content = rawContent || getTextContentFromBlocks(contentBlocks)
       const hasMeaningfulPayload = hasMeaningfulAssistantPayload(
         content ?? '',
         contentBlocks ?? [],
         toolCalls ?? []
       )
+      const sessionBackend = queryClient.getQueryData<Session>(
+        chatQueryKeys.session(sessionId)
+      )?.backend
       const needsBackendHydration = shouldHydrateCompletedSessionFromBackend(
         content ?? '',
         contentBlocks ?? [],
-        toolCalls ?? []
+        toolCalls ?? [],
+        { backend: sessionBackend }
       )
 
       if (needsBackendHydration) {
@@ -1029,13 +1252,8 @@ export default function useStreamingEvents({
           }
 
           // Play waiting sound
-          const waitingSound = (preferences?.waiting_sound ??
-            'none') as NotificationSound
-          playNotificationSound(waitingSound, {
-            webAccessSoundsEnabled:
-              preferences?.web_access_sounds_enabled ?? true,
-          })
-          notifySession(sessionId, 'Needs your input')
+          playWaitingSound()
+          notifySession(sessionId, 'Needs your input', 'waiting')
         }
       } else if (event.payload.waiting_for_plan) {
         // Codex/Opencode plan-mode run completed with content — enter plan-waiting state.
@@ -1197,13 +1415,8 @@ export default function useStreamingEvents({
         }
 
         // Play waiting sound
-        const waitingSound = (preferences?.waiting_sound ??
-          'none') as NotificationSound
-        playNotificationSound(waitingSound, {
-          webAccessSoundsEnabled:
-            preferences?.web_access_sounds_enabled ?? true,
-        })
-        notifySession(sessionId, 'Needs your input')
+        playWaitingSound()
+        notifySession(sessionId, 'Needs your input', 'waiting')
       } else {
         // No blocking tools — add optimistic message FIRST, then batch-clear state.
         // This eliminates the flicker gap where neither streaming nor persisted content is visible.
@@ -1296,13 +1509,8 @@ export default function useStreamingEvents({
             )
           }
 
-          const waitingSound = (preferences?.waiting_sound ??
-            'none') as NotificationSound
-          playNotificationSound(waitingSound, {
-            webAccessSoundsEnabled:
-              preferences?.web_access_sounds_enabled ?? true,
-          })
-          notifySession(sessionId, 'Needs your input')
+          playWaitingSound()
+          notifySession(sessionId, 'Needs your input', 'waiting')
         } else {
           // 2. Update last_run_status + session state in caches so UI reflects immediately.
           // CRITICAL: Include waiting_for_input/is_reviewing so
@@ -1522,8 +1730,22 @@ export default function useStreamingEvents({
           .catch(() => undefined)
       }
 
+      // Auth failures from headless CLIs (e.g. Claude "Please run /login")
+      // are not actionable inside chat — rewrite and offer Jean's Login modal.
+      let displayError = error
+      if (isCliAuthError(error)) {
+        const session = queryClient.getQueryData<Session>(
+          chatQueryKeys.session(session_id)
+        )
+        const backend = (session?.backend as CliBackend | undefined) ?? 'claude'
+        displayError = handleCliAuthError(error, backend)
+      } else if (isCodexBubblewrapError(error)) {
+        // Linux sandbox dep: suggest apt install bubblewrap
+        displayError = rewriteCodexBubblewrapErrorMessage(error)
+      }
+
       // Set error state for inline display
-      setError(session_id, error)
+      setError(session_id, displayError)
 
       // Check if CLI produced streaming content BEFORE clearing state.
       // If content was streamed, the CLI ran — don't remove the user message
@@ -1617,12 +1839,18 @@ export default function useStreamingEvents({
         } = event.payload
 
         // Flush any buffered chunks/thinking so streaming state is up to date
-        if (chunkRafId !== null) {
-          cancelAnimationFrame(chunkRafId)
+        if (
+          chunkRafId !== null ||
+          chunkTimeoutId !== null ||
+          Object.keys(chunkBuffer).length > 0
+        ) {
           flushChunkBuffer()
         }
-        if (thinkingRafId !== null) {
-          cancelAnimationFrame(thinkingRafId)
+        if (
+          thinkingRafId !== null ||
+          thinkingTimeoutId !== null ||
+          Object.keys(thinkingBuffer).length > 0
+        ) {
           flushThinkingBuffer()
         }
 
@@ -1701,13 +1929,12 @@ export default function useStreamingEvents({
         // Clear compacting state (safety net)
         useChatStore.getState().setCompacting(session_id, false)
 
-        // Determine if we should restore message to input:
-        // - undo_send from backend, OR
-        // - No content streamed yet (cancelled before any response)
-        // BUT: Don't restore if there are queued messages (user chose "Skip to Next")
-        // Any assistant output (text, tool call, thinking, content block) counts
-        // as a started response — if present, remove it from history and leave
-        // input empty.
+        // Restore message to input ONLY when the prompt never started
+        // (backend undo_send=true: process not registered / pending cancel).
+        // If the prompt is already running, do not restore even when no
+        // assistant content has streamed yet — cancel of a live run leaves
+        // the input empty. Also skip restore when queued messages exist
+        // ("Skip to Next").
         const hasToolCalls = toolCalls && toolCalls.length > 0
         const hasText = sanitizedContent.trim().length > 0
         const hasThinking = !!streamingThinkingContent[session_id]
@@ -1718,8 +1945,7 @@ export default function useStreamingEvents({
         const hasQueuedMessages =
           (useChatStore.getState().messageQueues[session_id] ?? []).length > 0
         const shouldHydrateCancelledFromBackend = !undo_send && !hasContent
-        const shouldRestoreMessage =
-          !hasQueuedMessages && (undo_send || !hasContent)
+        const shouldRestoreMessage = !hasQueuedMessages && undo_send
 
         const removeLatestUserMessageFromCache = () => {
           queryClient.setQueryData<Session>(
@@ -1866,9 +2092,11 @@ export default function useStreamingEvents({
           const runIds = cancelledRunIds.get(session_id) ?? new Set<string>()
           runIds.add(eventRunId)
           cancelledRunIds.set(session_id, runIds)
-        } else {
-          cancelledUntaggedSessionIds.add(session_id)
         }
+        // Some backends (including Grok ACP) do not tag chunks with run_id.
+        // Block their delayed output too; chat:sending clears this guard when a
+        // legitimate next run starts for the session.
+        cancelledUntaggedSessionIds.add(session_id)
 
         // Override reviewing state based on whether visible messages remain.
         const updatedSession = queryClient.getQueryData<Session>(
@@ -2038,7 +2266,7 @@ export default function useStreamingEvents({
       }
     )
 
-    // Handle session setting changes (backend, model, thinking level, execution mode)
+    // Handle session setting changes (backend, model, provider, thinking, execution mode)
     // Broadcast by other clients via broadcast_session_setting command
     const unlistenSettingChanged = listen<{
       session_id: string
@@ -2067,17 +2295,42 @@ export default function useStreamingEvents({
         case 'thinkingLevel':
           store.setThinkingLevel(
             session_id,
-            value as 'off' | 'think' | 'megathink' | 'ultrathink'
+            value as
+              | 'off'
+              | 'adaptive'
+              | 'think'
+              | 'megathink'
+              | 'ultrathink'
           )
           break
         case 'effortLevel':
           store.setEffortLevel(
             session_id,
-            value as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'ultracode'
+            value as
+              | 'off'
+              | 'adaptive'
+              | 'low'
+              | 'medium'
+              | 'high'
+              | 'xhigh'
+              | 'max'
+              | 'ultra'
+              | 'ultracode'
           )
           break
         case 'executionMode':
           store.setExecutionMode(session_id, value as 'plan' | 'build' | 'yolo')
+          break
+        case 'provider':
+          store.setSelectedProvider(
+            session_id,
+            value === '' ||
+              value === '__anthropic__' ||
+              value === '__default__' ||
+              value === 'default'
+              ? null
+              : value
+          )
           break
         case 'waitingForInput':
           if (value === 'false') {
@@ -2104,12 +2357,18 @@ export default function useStreamingEvents({
 
     return () => {
       // Flush any buffered chunks/thinking before tearing down
-      if (chunkRafId !== null) {
-        cancelAnimationFrame(chunkRafId)
+      if (
+        chunkRafId !== null ||
+        chunkTimeoutId !== null ||
+        Object.keys(chunkBuffer).length > 0
+      ) {
         flushChunkBuffer()
       }
-      if (thinkingRafId !== null) {
-        cancelAnimationFrame(thinkingRafId)
+      if (
+        thinkingRafId !== null ||
+        thinkingTimeoutId !== null ||
+        Object.keys(thinkingBuffer).length > 0
+      ) {
         flushThinkingBuffer()
       }
       unlistenSending.then(f => f())
@@ -2122,6 +2381,8 @@ export default function useStreamingEvents({
       unlistenToolEvent.then(f => f())
       unlistenPermissionDenied.then(f => f())
       unlistenCodexPermissionRequest.then(f => f())
+      unlistenOpencodePermissionRequest.then(f => f())
+      unlistenOpencodePermissionReplied.then(f => f())
       unlistenCodexCommandApprovalRequest.then(f => f())
       unlistenCodexUserInputRequest.then(f => f())
       unlistenCodexMcpElicitation.then(f => f())

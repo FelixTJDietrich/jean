@@ -1,0 +1,4645 @@
+//! OpenCode HTTP execution engine (opencode serve).
+
+use super::types::{
+    ContentBlock, OpenCodePermissionRequest, OpenCodePermissionRequestEvent, ToolCall, UsageData,
+};
+use crate::http_server::EmitExt;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::AppHandle;
+
+#[derive(serde::Serialize, Clone)]
+struct ChunkEvent {
+    session_id: String,
+    worktree_id: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+}
+
+#[cfg(test)]
+mod one_shot_structured_output_tests {
+    use super::*;
+
+    #[test]
+    fn detects_provider_rejection_of_structured_output_in_thinking_mode() {
+        let error = "[invalid_request_error] Thinking mode does not support this tool_choice";
+
+        assert!(should_retry_structured_output_as_text(error));
+        assert!(!should_retry_structured_output_as_text("quota exceeded"));
+    }
+
+    #[test]
+    fn text_fallback_prompt_requires_json_matching_the_schema() {
+        let prompt = structured_output_text_prompt("Generate a PR", r#"{"type":"object"}"#);
+
+        assert!(prompt.contains("Generate a PR"));
+        assert!(prompt.contains(r#"{"type":"object"}"#));
+        assert!(prompt.contains("Return only the JSON object"));
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ToolUseEvent {
+    session_id: String,
+    worktree_id: String,
+    id: String,
+    name: String,
+    input: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_tool_use_id: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ToolResultEvent {
+    session_id: String,
+    worktree_id: String,
+    tool_use_id: String,
+    output: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ToolBlockEvent {
+    session_id: String,
+    worktree_id: String,
+    tool_call_id: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ThinkingEvent {
+    session_id: String,
+    worktree_id: String,
+    content: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct DoneEvent {
+    session_id: String,
+    worktree_id: String,
+    /// True when a plan-mode run completed with content (Codex/Opencode only)
+    waiting_for_plan: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ErrorEvent {
+    pub session_id: String,
+    pub worktree_id: String,
+    pub error: String,
+}
+
+/// Response from OpenCode execution.
+pub struct OpenCodeResponse {
+    pub content: String,
+    pub session_id: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub content_blocks: Vec<ContentBlock>,
+    pub cancelled: bool,
+    pub usage: Option<UsageData>,
+}
+
+#[derive(Debug, Clone)]
+enum TrackedPartKind {
+    Text {
+        emitted_len: usize,
+    },
+    Reasoning {
+        emitted_len: usize,
+    },
+    Tool {
+        tool_call_id: String,
+        tool_name: String,
+        emitted_started: bool,
+        /// True once a tool_use event with non-empty input has been emitted.
+        emitted_input: bool,
+        last_output: Option<String>,
+    },
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedPartState {
+    session_id: String,
+    kind: TrackedPartKind,
+}
+
+struct SharedSseSubscriber {
+    jean_session_id: String,
+    worktree_id: String,
+    run_id: String,
+    /// Jean execution mode for the active turn (`plan` / `build` / `yolo`).
+    /// Used to auto-approve OpenCode permission asks in yolo mode (issue #625).
+    execution_mode: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    streamed_any: Arc<AtomicBool>,
+    /// True once the OpenCode session's turn has started (first streamed part
+    /// seen). Steered `prompt_async` injections must wait for this so they never
+    /// race the main blocking `/message` POST and reset its connection.
+    turn_started: Arc<AtomicBool>,
+    /// True when OpenCode emitted `session.idle` (whole session queue drained).
+    /// Reset to false on any streamed part. Used to keep a steered run open
+    /// until every injected prompt has finished.
+    session_idle: Arc<AtomicBool>,
+    /// True once at least one steered prompt was injected into this run. Only
+    /// steered runs wait for `session.idle`; plain runs finalize immediately.
+    steered: Arc<AtomicBool>,
+    /// Upstream provider/session error observed on the SSE stream (e.g.
+    /// `session.error` or `message.updated` with `info.error`). Shared so the
+    /// blocking `/message` POST can surface the real failure instead of hanging
+    /// or looking like a user cancel.
+    upstream_error: Arc<Mutex<Option<String>>>,
+    /// Set when SSE sees a fatal upstream error. Distinct from `cancelled`
+    /// (user cancel) so the run is marked failed rather than cancelled.
+    force_abort: Arc<AtomicBool>,
+    tracked_parts: HashMap<String, TrackedPartState>,
+    /// Ordered list of content blocks accumulated from SSE events.
+    /// Includes intermediate thinking/tool blocks that may not appear in the
+    /// final POST response.
+    accumulated_blocks: Vec<AccumulatedBlock>,
+    accumulated_tool_calls: Vec<ToolCall>,
+}
+
+/// An SSE-accumulated content block, keyed by part_id for updates.
+#[derive(Clone)]
+struct AccumulatedBlock {
+    part_id: String,
+    block: ContentBlock,
+}
+
+impl SharedSseSubscriber {
+    /// Upsert a text block in accumulated_blocks.
+    fn accumulate_text(&mut self, part_id: &str, full_text: &str) {
+        if let Some(ab) = self
+            .accumulated_blocks
+            .iter_mut()
+            .find(|ab| ab.part_id == part_id)
+        {
+            ab.block = ContentBlock::Text {
+                text: full_text.to_string(),
+            };
+        } else {
+            self.accumulated_blocks.push(AccumulatedBlock {
+                part_id: part_id.to_string(),
+                block: ContentBlock::Text {
+                    text: full_text.to_string(),
+                },
+            });
+        }
+    }
+
+    /// Upsert a thinking/reasoning block in accumulated_blocks.
+    fn accumulate_thinking(&mut self, part_id: &str, full_text: &str) {
+        if let Some(ab) = self
+            .accumulated_blocks
+            .iter_mut()
+            .find(|ab| ab.part_id == part_id)
+        {
+            ab.block = ContentBlock::Thinking {
+                thinking: full_text.to_string(),
+            };
+        } else {
+            self.accumulated_blocks.push(AccumulatedBlock {
+                part_id: part_id.to_string(),
+                block: ContentBlock::Thinking {
+                    thinking: full_text.to_string(),
+                },
+            });
+        }
+    }
+
+    /// Add a tool use block and its tool call entry.
+    fn accumulate_tool(
+        &mut self,
+        part_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) {
+        if self
+            .accumulated_blocks
+            .iter()
+            .any(|ab| ab.part_id == part_id)
+        {
+            // Already registered — but update the input if the new one is richer
+            // (e.g., enriched question data replacing an empty/numeric placeholder).
+            if input.is_object() && input.as_object().map_or(false, |o| !o.is_empty()) {
+                if let Some(tc) = self
+                    .accumulated_tool_calls
+                    .iter_mut()
+                    .find(|t| t.id == tool_call_id)
+                {
+                    if !tc.input.is_object() || tc.input.as_object().map_or(true, |o| o.is_empty())
+                    {
+                        tc.input = input;
+                    }
+                }
+            }
+            return;
+        }
+        self.accumulated_blocks.push(AccumulatedBlock {
+            part_id: part_id.to_string(),
+            block: ContentBlock::ToolUse {
+                tool_call_id: tool_call_id.to_string(),
+            },
+        });
+        self.accumulated_tool_calls.push(ToolCall {
+            id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            input,
+            output: None,
+            parent_tool_use_id: None,
+        });
+    }
+
+    /// Update the output for an accumulated tool call.
+    fn accumulate_tool_output(&mut self, tool_call_id: &str, output: &str) {
+        if let Some(tc) = self
+            .accumulated_tool_calls
+            .iter_mut()
+            .find(|t| t.id == tool_call_id)
+        {
+            tc.output = Some(output.to_string());
+        }
+    }
+
+    /// Append a delta to an existing accumulated text block.
+    fn accumulate_text_delta(&mut self, part_id: &str, delta: &str) {
+        if let Some(ab) = self
+            .accumulated_blocks
+            .iter_mut()
+            .find(|ab| ab.part_id == part_id)
+        {
+            match &mut ab.block {
+                ContentBlock::Text { text } => text.push_str(delta),
+                _ => {}
+            }
+        } else {
+            self.accumulated_blocks.push(AccumulatedBlock {
+                part_id: part_id.to_string(),
+                block: ContentBlock::Text {
+                    text: delta.to_string(),
+                },
+            });
+        }
+    }
+
+    /// Append a delta to an existing accumulated thinking block.
+    fn accumulate_thinking_delta(&mut self, part_id: &str, delta: &str) {
+        if let Some(ab) = self
+            .accumulated_blocks
+            .iter_mut()
+            .find(|ab| ab.part_id == part_id)
+        {
+            match &mut ab.block {
+                ContentBlock::Thinking { thinking } => thinking.push_str(delta),
+                _ => {}
+            }
+        } else {
+            self.accumulated_blocks.push(AccumulatedBlock {
+                part_id: part_id.to_string(),
+                block: ContentBlock::Thinking {
+                    thinking: delta.to_string(),
+                },
+            });
+        }
+    }
+
+    /// Record that the session is actively streaming: the turn has started and
+    /// the session is no longer idle. Called on every streamed part so a steered
+    /// prompt that just made the session busy again re-extends the run.
+    fn note_streaming_activity(&self) {
+        self.turn_started.store(true, Ordering::Relaxed);
+        self.session_idle.store(false, Ordering::Relaxed);
+    }
+}
+
+type SharedSseSubscriberHandle = Arc<Mutex<SharedSseSubscriber>>;
+
+#[derive(Clone)]
+struct SharedSseSubscriberEntry {
+    working_dir: String,
+    handle: SharedSseSubscriberHandle,
+}
+
+#[derive(Clone)]
+struct SharedSseListenerState {
+    connected: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    disabled_until: Arc<Mutex<Option<Instant>>>,
+}
+
+const OPENCODE_SSE_BASE_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const OPENCODE_SSE_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const OPENCODE_SSE_SHORT_LIVED_THRESHOLD: Duration = Duration::from_secs(2);
+const OPENCODE_SSE_MAX_SHORT_LIVED_DISCONNECTS: u32 = 3;
+const OPENCODE_SSE_DISABLED_COOLDOWN: Duration = Duration::from_secs(60);
+const OPENCODE_HTTP_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn shared_sse_reconnect_delay(short_lived_disconnects: u32) -> Duration {
+    if short_lived_disconnects == 0 {
+        return OPENCODE_SSE_BASE_RECONNECT_DELAY;
+    }
+    let exp = short_lived_disconnects.saturating_sub(1).min(5);
+    let multiplier = 1_u32.checked_shl(exp).unwrap_or(32);
+    OPENCODE_SSE_BASE_RECONNECT_DELAY
+        .saturating_mul(multiplier)
+        .min(OPENCODE_SSE_MAX_RECONNECT_DELAY)
+}
+
+fn listener_in_cooldown(state: &SharedSseListenerState) -> bool {
+    let guard = lock_recover(&state.disabled_until, "OPENCODE_SSE_DISABLED_UNTIL");
+    matches!(*guard, Some(deadline) if deadline > Instant::now())
+}
+
+fn mark_listener_cooldown(state: &SharedSseListenerState) {
+    let mut guard = lock_recover(&state.disabled_until, "OPENCODE_SSE_DISABLED_UNTIL");
+    *guard = Some(Instant::now() + OPENCODE_SSE_DISABLED_COOLDOWN);
+}
+
+fn clear_listener_cooldown(state: &SharedSseListenerState) {
+    let mut guard = lock_recover(&state.disabled_until, "OPENCODE_SSE_DISABLED_UNTIL");
+    *guard = None;
+}
+
+struct SharedSseCoordinator {
+    subscribers: Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    listeners: Arc<Mutex<HashMap<String, SharedSseListenerState>>>,
+    /// Maps descendant OpenCode session IDs (subagents/children) to a known
+    /// ancestor ID. Walked until a registered primary-session subscriber is found
+    /// so child `session.error` events fail the owning Jean run.
+    session_parents: Arc<Mutex<HashMap<String, String>>>,
+    /// Working directories observed for OpenCode sessions (from SSE envelope
+    /// `directory` or session info). Used so child/subagent aborts target the
+    /// session's own directory rather than the root worktree.
+    session_directories: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Default for SharedSseCoordinator {
+    fn default() -> Self {
+        Self {
+            subscribers: Arc::new(Mutex::new(HashMap::new())),
+            listeners: Arc::new(Mutex::new(HashMap::new())),
+            session_parents: Arc::new(Mutex::new(HashMap::new())),
+            session_directories: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+static SHARED_SSE: Lazy<SharedSseCoordinator> = Lazy::new(SharedSseCoordinator::default);
+
+struct SharedSseSubscription {
+    opencode_session_id: String,
+    handle: SharedSseSubscriberHandle,
+}
+
+impl SharedSseSubscription {
+    fn register(
+        app: &AppHandle,
+        base_url: &str,
+        opencode_session_id: String,
+        jean_session_id: String,
+        worktree_id: String,
+        run_id: String,
+        working_dir: String,
+        execution_mode: Option<String>,
+        cancelled: Arc<AtomicBool>,
+        streamed_any: Arc<AtomicBool>,
+        turn_started: Arc<AtomicBool>,
+        session_idle: Arc<AtomicBool>,
+        steered: Arc<AtomicBool>,
+        upstream_error: Arc<Mutex<Option<String>>>,
+        force_abort: Arc<AtomicBool>,
+    ) -> Self {
+        ensure_shared_sse_listener(app, base_url, &working_dir);
+
+        let subscriber = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id,
+            worktree_id,
+            run_id,
+            execution_mode,
+            cancelled,
+            streamed_any,
+            turn_started,
+            session_idle,
+            steered,
+            upstream_error,
+            force_abort,
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+        let lock_start = Instant::now();
+        let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+        let lock_wait = lock_start.elapsed();
+        log::info!(
+            "OpenCode shared SSE: register start opencode_session={} wait_ms={} subscribers_before={}",
+            opencode_session_id,
+            lock_wait.as_millis(),
+            subscribers.len()
+        );
+        let subscriber_for_map = subscriber.clone();
+        if subscribers
+            .insert(
+                opencode_session_id.clone(),
+                SharedSseSubscriberEntry {
+                    working_dir,
+                    handle: subscriber_for_map,
+                },
+            )
+            .is_some()
+        {
+            log::warn!(
+                "OpenCode shared SSE: replaced existing subscriber for session {}",
+                opencode_session_id
+            );
+        }
+        log::info!(
+            "OpenCode shared SSE: register done opencode_session={} subscribers_after={}",
+            opencode_session_id,
+            subscribers.len()
+        );
+
+        Self {
+            opencode_session_id,
+            handle: subscriber,
+        }
+    }
+
+    /// Extract accumulated content blocks and tool calls from the SSE subscriber.
+    fn take_accumulated(&self) -> (Vec<ContentBlock>, Vec<ToolCall>) {
+        if let Ok(sub) = self.handle.lock() {
+            (
+                sub.accumulated_blocks
+                    .iter()
+                    .map(|ab| ab.block.clone())
+                    .collect(),
+                sub.accumulated_tool_calls.clone(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    }
+}
+
+impl Drop for SharedSseSubscription {
+    fn drop(&mut self) {
+        let lock_start = Instant::now();
+        let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+        let removed = subscribers.remove(&self.opencode_session_id).is_some();
+        let lock_wait = lock_start.elapsed();
+        if removed {
+            log::info!(
+                "OpenCode shared SSE: unsubscribed {} wait_ms={} subscribers_after={}",
+                self.opencode_session_id,
+                lock_wait.as_millis(),
+                subscribers.len()
+            );
+        }
+        // Drop the full descendant closure of this root (child, grandchild, …)
+        // so multi-level chains cannot leak after the primary session ends.
+        let mut parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+        let removed_ids = prune_session_parent_descendants(&mut parents, &self.opencode_session_id);
+        let mut directories =
+            lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS");
+        directories.retain(|id, _| !removed_ids.contains(id));
+    }
+}
+
+/// Remove `root_id` and every transitive descendant from the child→parent map.
+///
+/// OpenCode subagents form trees (`grandchild → child → root`). A shallow prune
+/// that only matches the immediate parent leaves deeper links behind as a slow
+/// leak and a stale-lineage hazard if session IDs are recycled.
+///
+/// Returns the set of session IDs that were pruned (including `root_id`).
+fn prune_session_parent_descendants(
+    parents: &mut HashMap<String, String>,
+    root_id: &str,
+) -> HashSet<String> {
+    let mut remove = HashSet::new();
+    if root_id.is_empty() {
+        return remove;
+    }
+
+    remove.insert(root_id.to_string());
+
+    // Expand until fixpoint: any child of a session marked for removal is also
+    // removed (covers grandchild → child → root and wider trees).
+    loop {
+        let mut added = false;
+        for (child, parent) in parents.iter() {
+            if remove.contains(parent) && remove.insert(child.clone()) {
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    parents.retain(|child, _parent| !remove.contains(child));
+    remove
+}
+
+fn lock_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!("OpenCode shared SSE: recovering poisoned mutex {name}");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn get_or_create_listener_state(working_dir: &str) -> SharedSseListenerState {
+    let mut listeners = lock_recover(&SHARED_SSE.listeners, "OPENCODE_SSE_LISTENERS");
+    listeners
+        .entry(working_dir.to_string())
+        .or_insert_with(|| SharedSseListenerState {
+            connected: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
+            disabled_until: Arc::new(Mutex::new(None)),
+        })
+        .clone()
+}
+
+fn ensure_shared_sse_listener(app: &AppHandle, base_url: &str, working_dir: &str) {
+    let listener_state = get_or_create_listener_state(working_dir);
+
+    if listener_in_cooldown(&listener_state) {
+        log::info!(
+            "OpenCode shared SSE: listener in cooldown for dir={}, skipping spawn (POST fallback will be used)",
+            working_dir
+        );
+        return;
+    }
+
+    if listener_state
+        .running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::info!(
+            "OpenCode shared SSE: listener already running for dir={}",
+            working_dir
+        );
+        return;
+    }
+
+    let app = app.clone();
+    let base_url = base_url.to_string();
+    let working_dir = working_dir.to_string();
+    let subscribers = SHARED_SSE.subscribers.clone();
+    let state_for_thread = listener_state.clone();
+    let connected = listener_state.connected.clone();
+    let running = listener_state.running.clone();
+
+    let spawn_result = std::thread::Builder::new()
+        .name("opencode-shared-sse".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::warn!("OpenCode shared SSE: failed to create tokio runtime: {e}");
+                    connected.store(false, Ordering::SeqCst);
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            rt.block_on(shared_sse_listener_loop(
+                app,
+                base_url,
+                working_dir,
+                subscribers,
+                state_for_thread,
+            ));
+            connected.store(false, Ordering::SeqCst);
+            running.store(false, Ordering::SeqCst);
+        });
+
+    if let Err(e) = spawn_result {
+        listener_state.connected.store(false, Ordering::SeqCst);
+        listener_state.running.store(false, Ordering::SeqCst);
+        log::warn!("OpenCode shared SSE: failed to spawn listener thread: {e}");
+    }
+}
+
+fn is_shared_sse_connected(working_dir: &str) -> bool {
+    let listeners = lock_recover(&SHARED_SSE.listeners, "OPENCODE_SSE_LISTENERS");
+    listeners
+        .get(working_dir)
+        .map(|state| state.connected.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn wait_for_shared_sse_connection(
+    timeout: Duration,
+    working_dir: &str,
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> bool {
+    log::info!(
+        "OpenCode shared SSE: waiting for connection dir={} timeout_ms={}",
+        working_dir,
+        timeout.as_millis()
+    );
+    let wait_start = Instant::now();
+    while wait_start.elapsed() < timeout {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            log::info!(
+                "OpenCode shared SSE: wait aborted by cancel dir={} wait_ms={}",
+                working_dir,
+                wait_start.elapsed().as_millis()
+            );
+            return false;
+        }
+        if is_shared_sse_connected(working_dir) {
+            log::info!(
+                "OpenCode shared SSE: connection ready dir={} wait_ms={}",
+                working_dir,
+                wait_start.elapsed().as_millis()
+            );
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let connected = is_shared_sse_connected(working_dir);
+    log::info!(
+        "OpenCode shared SSE: wait finished dir={} connected={} wait_ms={}",
+        working_dir,
+        connected,
+        wait_start.elapsed().as_millis()
+    );
+    connected
+}
+
+fn emit_chunk_for_subscriber(app: &AppHandle, subscriber: &SharedSseSubscriber, content: &str) {
+    emit_chat_chunk(
+        app,
+        &subscriber.jean_session_id,
+        &subscriber.worktree_id,
+        Some(&subscriber.run_id),
+        content,
+    );
+    subscriber.streamed_any.store(true, Ordering::Relaxed);
+}
+
+fn emit_thinking_for_subscriber(app: &AppHandle, subscriber: &SharedSseSubscriber, content: &str) {
+    emit_chat_thinking(
+        app,
+        &subscriber.jean_session_id,
+        &subscriber.worktree_id,
+        content,
+    );
+    subscriber.streamed_any.store(true, Ordering::Relaxed);
+}
+
+fn emit_tool_use_for_subscriber(
+    app: &AppHandle,
+    subscriber: &SharedSseSubscriber,
+    tool_call_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+) {
+    emit_chat_tool_use(
+        app,
+        &subscriber.jean_session_id,
+        &subscriber.worktree_id,
+        tool_call_id,
+        tool_name,
+        input,
+    );
+    subscriber.streamed_any.store(true, Ordering::Relaxed);
+}
+
+fn emit_tool_result_for_subscriber(
+    app: &AppHandle,
+    subscriber: &SharedSseSubscriber,
+    tool_call_id: &str,
+    output: &str,
+) {
+    emit_chat_tool_result(
+        app,
+        &subscriber.jean_session_id,
+        &subscriber.worktree_id,
+        tool_call_id,
+        output,
+    );
+    subscriber.streamed_any.store(true, Ordering::Relaxed);
+}
+
+/// Look up the (turn_started, session_idle, steered) flags for an OpenCode
+/// session from the shared subscriber map. Returns None if no run is currently
+/// subscribed for that session.
+fn opencode_session_flags(
+    opencode_session_id: &str,
+) -> Option<(Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>)> {
+    let subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+    let entry = subscribers.get(opencode_session_id)?;
+    let sub = lock_recover(&entry.handle, "OPENCODE_SSE_SUBSCRIBER");
+    Some((
+        sub.turn_started.clone(),
+        sub.session_idle.clone(),
+        sub.steered.clone(),
+    ))
+}
+
+/// Block until the OpenCode session's main turn has started streaming (so a
+/// steered `prompt_async` injection never races the blocking `/message` POST and
+/// resets its connection), or until `timeout` elapses. Returns true if the turn
+/// started.
+pub fn wait_opencode_turn_started(opencode_session_id: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some((turn_started, _, _)) = opencode_session_flags(opencode_session_id) {
+            if turn_started.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Mark that a steered prompt was injected into the OpenCode session's active
+/// run, so the run waits for `session.idle` before finalizing instead of
+/// completing as soon as the original blocking `/message` POST returns.
+pub fn mark_opencode_steered(opencode_session_id: &str) {
+    if let Some((_, _, steered)) = opencode_session_flags(opencode_session_id) {
+        steered.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Block (cancel-aware, bounded) until the OpenCode session reaches a STABLE
+/// `session.idle` — i.e. every steered `prompt_async` injection has finished and
+/// no new one has restarted streaming. A freshly injected prompt resets
+/// `session_idle` to false on its first streamed part, so this naturally extends
+/// the run across all injected prompts.
+fn wait_for_opencode_session_idle(
+    session_idle: &Arc<AtomicBool>,
+    cancelled: &Arc<AtomicBool>,
+    opencode_session_id: &str,
+) {
+    const MAX_WAIT: Duration = Duration::from_secs(1800);
+    const GRACE: Duration = Duration::from_millis(500);
+    let deadline = Instant::now() + MAX_WAIT;
+    log::info!(
+        "OpenCode: steered run waiting for session.idle opencode_session={opencode_session_id}"
+    );
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!(
+                "OpenCode: steered run idle-wait timed out opencode_session={opencode_session_id}"
+            );
+            return;
+        }
+        if session_idle.load(Ordering::Relaxed) {
+            // Confirm idle is stable: a steered prompt mid-injection resets the
+            // flag on its first streamed part, so re-check after a short grace.
+            std::thread::sleep(GRACE);
+            if session_idle.load(Ordering::Relaxed) {
+                log::info!(
+                    "OpenCode: steered run reached stable session.idle opencode_session={opencode_session_id}"
+                );
+                return;
+            }
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn has_subscribers_for_working_dir(
+    subscribers: &Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    working_dir: &str,
+) -> bool {
+    let subscribers = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+    subscribers
+        .values()
+        .any(|entry| entry.working_dir == working_dir)
+}
+
+fn emit_chat_chunk(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: Option<&str>,
+    content: &str,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    let _ = app.emit_all(
+        "chat:chunk",
+        &ChunkEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            content: content.to_string(),
+            run_id: run_id.map(ToOwned::to_owned),
+        },
+    );
+}
+
+fn emit_chat_thinking(app: &AppHandle, session_id: &str, worktree_id: &str, content: &str) {
+    if content.is_empty() {
+        return;
+    }
+
+    let _ = app.emit_all(
+        "chat:thinking",
+        &ThinkingEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            content: content.to_string(),
+        },
+    );
+}
+
+fn emit_chat_tool_use(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+) {
+    let _ = app.emit_all(
+        "chat:tool_use",
+        &ToolUseEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            input,
+            parent_tool_use_id: None,
+        },
+    );
+    let _ = app.emit_all(
+        "chat:tool_block",
+        &ToolBlockEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+        },
+    );
+}
+
+fn emit_chat_tool_result(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    tool_call_id: &str,
+    output: &str,
+) {
+    let _ = app.emit_all(
+        "chat:tool_result",
+        &ToolResultEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            tool_use_id: tool_call_id.to_string(),
+            output: output.to_string(),
+        },
+    );
+}
+
+/// Fetch the actual question data from OpenCode's Question API for a "question" tool call.
+///
+/// The SSE `state.input` for question tools often contains an internal value (e.g. `0`)
+/// instead of the actual question schema. This function queries `GET /question` to find the
+/// pending question matching the tool_call_id and returns its `questions` array formatted
+/// as an `AskUserQuestion`-compatible input: `{ "questions": [...] }`.
+///
+/// IMPORTANT: This may be called from the async SSE listener thread. We use
+/// `std::thread::spawn` to run the blocking HTTP call on a dedicated thread to avoid
+/// panicking when `reqwest::blocking::Client` is dropped inside an async context.
+fn fetch_opencode_question_input(
+    working_dir: &str,
+    tool_call_id: &str,
+) -> Option<serde_json::Value> {
+    let base_url = crate::opencode_server::get_current_url()?;
+    let working_dir = working_dir.to_string();
+    let tool_call_id = tool_call_id.to_string();
+
+    // Run the blocking HTTP call on a dedicated thread to avoid dropping
+    // reqwest::blocking::Client inside an async context (which panics).
+    // Retries a few times because the question may not be registered yet when the
+    // SSE event fires.
+    let handle = std::thread::spawn(move || -> Option<serde_json::Value> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+
+        let list_url = format!("{base_url}/question");
+        let query = [("directory", working_dir.as_str())];
+
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+
+            let resp = match client.get(&list_url).query(&query).send() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if !resp.status().is_success() {
+                log::warn!("OpenCode question list failed: status={}", resp.status());
+                continue;
+            }
+
+            let questions: serde_json::Value = match resp.json() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Find the question whose tool.callID matches our tool_call_id
+            if let Some(question) = questions.as_array().and_then(|arr| {
+                arr.iter().find(|q| {
+                    q.get("tool")
+                        .and_then(|t| t.get("callID"))
+                        .and_then(|v| v.as_str())
+                        == Some(&tool_call_id)
+                })
+            }) {
+                if let Some(questions_array) = question.get("questions") {
+                    log::info!(
+                        "OpenCode: enriched question tool input for tool_call_id={tool_call_id} (attempt {attempt})"
+                    );
+                    return Some(serde_json::json!({ "questions": questions_array.clone() }));
+                }
+            }
+        }
+
+        log::warn!("OpenCode: failed to enrich question tool input for tool_call_id={tool_call_id} after 5 attempts");
+        None
+    });
+
+    handle.join().ok().flatten()
+}
+
+/// Rename a single key in a JSON object (no-op if missing or not an object).
+fn rename_json_key(value: &mut serde_json::Value, from: &str, to: &str) {
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(v) = obj.remove(from) {
+            obj.entry(to).or_insert(v);
+        }
+    }
+}
+
+/// Normalize OpenCode tool names and parameter keys to match Claude CLI conventions.
+///
+/// OpenCode uses lowercase tool IDs (`read`, `edit`, `bash`, …) with camelCase
+/// parameters (`filePath`, `oldString`, …), while the frontend expects PascalCase
+/// names (`Read`, `Edit`, `Bash`, …) with snake_case parameters (`file_path`,
+/// `old_string`, …). This function translates both in-place so a single set of
+/// frontend rendering logic handles tools from either backend.
+fn normalize_opencode_tool(name: &str, input: &mut serde_json::Value) -> String {
+    match name {
+        "read" => {
+            rename_json_key(input, "filePath", "file_path");
+            "Read".into()
+        }
+        "edit" => {
+            rename_json_key(input, "filePath", "file_path");
+            rename_json_key(input, "oldString", "old_string");
+            rename_json_key(input, "newString", "new_string");
+            rename_json_key(input, "replaceAll", "replace_all");
+            "Edit".into()
+        }
+        "write" => {
+            rename_json_key(input, "filePath", "file_path");
+            "Write".into()
+        }
+        "bash" => "Bash".into(),
+        "glob" => "Glob".into(),
+        "grep" => {
+            // OpenCode uses "include" for file filter; Claude uses "glob"
+            rename_json_key(input, "include", "glob");
+            "Grep".into()
+        }
+        "task" => "Task".into(),
+        "todowrite" => "TodoWrite".into(),
+        "webfetch" => "WebFetch".into(),
+        "websearch" => "WebSearch".into(),
+        "codesearch" => "CodeSearch".into(),
+        "skill" => "Skill".into(),
+        "plan_exit" => "ExitPlanMode".into(),
+        "plan_enter" => "EnterPlanMode".into(),
+        // OpenCode-only tools and everything else pass through unchanged
+        _ => name.to_string(),
+    }
+}
+
+fn unseen_suffix(full_text: &str, emitted_len: usize) -> &str {
+    if emitted_len >= full_text.len() {
+        // Already emitted past this point (stale snapshot or exact match)
+        ""
+    } else if full_text.is_char_boundary(emitted_len) {
+        &full_text[emitted_len..]
+    } else {
+        // emitted_len lands inside a multi-byte char; skip to avoid corruption
+        ""
+    }
+}
+
+fn choose_model(all_providers: &serde_json::Value) -> Option<(String, String)> {
+    // Best effort: pick first connected provider with first model.
+    let connected = all_providers
+        .get("connected")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let providers = all_providers
+        .get("all")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for provider_id in connected.iter().filter_map(|v| v.as_str()) {
+        for provider in &providers {
+            if provider.get("id").and_then(|v| v.as_str()) != Some(provider_id) {
+                continue;
+            }
+            if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
+                if let Some((model_id, _)) = models.iter().next() {
+                    return Some((provider_id.to_string(), model_id.to_string()));
+                }
+            }
+        }
+    }
+
+    for provider in providers {
+        let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let model_id = provider
+            .get("models")
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.keys().next())
+            .cloned();
+        if let Some(model_id) = model_id {
+            return Some((provider_id.to_string(), model_id));
+        }
+    }
+
+    None
+}
+
+fn parse_provider_model(model: Option<&str>) -> Option<(String, String)> {
+    let raw = model?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // Strip the Jean `opencode/` wrapper prefix ONLY when the remaining string still
+    // contains a `/` — e.g. "opencode/ollama/Qwen" → "ollama/Qwen". For inputs like
+    // "opencode/gpt-5.5", opencode IS the provider, so keep the whole string.
+    let stripped = raw
+        .strip_prefix("opencode/")
+        .filter(|rest| rest.contains('/'))
+        .unwrap_or(raw);
+    let (provider, model_id) = stripped.split_once('/')?;
+    let provider = provider.trim();
+    let model_id = model_id.trim();
+    if provider.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some((provider.to_string(), model_id.to_string()))
+}
+
+/// Returns the bare model ID from a model string (strips `opencode/` prefix if present).
+/// Returns `None` if the string is empty.
+fn bare_model_id(model: &str) -> Option<&str> {
+    let raw = model.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw.strip_prefix("opencode/").unwrap_or(raw))
+}
+
+/// Take (and clear) any upstream error recorded by the SSE listener.
+fn take_upstream_error(upstream_error: &Arc<Mutex<Option<String>>>) -> Option<String> {
+    let mut guard = lock_recover(upstream_error, "OPENCODE_SSE_UPSTREAM_ERROR");
+    guard.take()
+}
+
+/// Formats an OpenCode error object (`ProviderAuthError` | `APIError` |
+/// `UnknownError` | …, or a plain string) into a user-visible message.
+fn format_opencode_error_object(error: &serde_json::Value) -> Option<String> {
+    if let Some(s) = error.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+
+    let data = error.get("data");
+
+    // Provider-level error body (e.g. opencode.ai zen CreditsError message)
+    if let Some(body_str) = data
+        .and_then(|d| d.get("responseBody"))
+        .and_then(|v| v.as_str())
+    {
+        if let Ok(body_json) = serde_json::from_str::<serde_json::Value>(body_str) {
+            if let Some(msg) = body_json
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+            {
+                return Some(msg.to_string());
+            }
+            if let Some(msg) = body_json.get("message").and_then(|v| v.as_str()) {
+                return Some(msg.to_string());
+            }
+        }
+        // Non-JSON response body can still be useful (Ollama / custom providers).
+        let trimmed = body_str.trim();
+        if !trimmed.is_empty() && trimmed.len() < 500 {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(msg) = data.and_then(|d| d.get("message")).and_then(|v| v.as_str()) {
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // Some AI-SDK / custom-provider errors put the message on the error root.
+    if let Some(msg) = error.get("message").and_then(|v| v.as_str()) {
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    error
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|n| n.to_string())
+}
+
+/// Extracts a human-readable error message from an opencode message response when
+/// `info.error` is populated (status 200 OK + parts=[] + error object). Tries the
+/// upstream provider's raw error body first, then `info.error.data.message`, then
+/// `info.error.message` / `info.error.name`.
+fn extract_opencode_error_message(message: &serde_json::Value) -> Option<String> {
+    let error = message.get("info")?.get("error")?;
+    format_opencode_error_object(error)
+}
+
+/// Record a child→parent OpenCode session relationship from `session.created` /
+/// `session.updated` events. Subagent sessions carry `info.parentID`; Jean only
+/// registers the primary session as an SSE subscriber, so this map lets child
+/// provider errors resolve to the owning run.
+fn remember_opencode_session_parent(session_id: &str, parent_id: &str) {
+    let session_id = session_id.trim();
+    let parent_id = parent_id.trim();
+    if session_id.is_empty() || parent_id.is_empty() || session_id == parent_id {
+        return;
+    }
+    let mut parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+    let previous = parents.insert(session_id.to_string(), parent_id.to_string());
+    if previous.as_deref() != Some(parent_id) {
+        log::info!("OpenCode shared SSE: session lineage child={session_id} parent={parent_id}");
+    }
+}
+
+/// Remember the working directory associated with an OpenCode session.
+///
+/// Sourced from the SSE envelope `directory` field (and optionally session info).
+/// Child/subagent sessions can be rooted outside the primary worktree; aborts
+/// must use that directory rather than the root subscriber's.
+fn remember_opencode_session_directory(session_id: &str, directory: &str) {
+    let session_id = session_id.trim();
+    let directory = directory.trim();
+    if session_id.is_empty() || directory.is_empty() {
+        return;
+    }
+    let mut dirs = lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS");
+    let previous = dirs.insert(session_id.to_string(), directory.to_string());
+    if previous.as_deref() != Some(directory) {
+        log::info!(
+            "OpenCode shared SSE: session directory session={session_id} directory={directory}"
+        );
+    }
+}
+
+fn lookup_opencode_session_directory(session_id: &str) -> Option<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS")
+        .get(session_id)
+        .cloned()
+}
+
+/// Resolve an OpenCode session ID to a registered Jean SSE subscriber.
+///
+/// Lookup order:
+/// 1. Exact subscriber match (primary session)
+/// 2. Walk `session_parents` until a registered ancestor is found
+fn resolve_opencode_subscriber(
+    subscribers: &HashMap<String, SharedSseSubscriberEntry>,
+    session_parents: &HashMap<String, String>,
+    opencode_session_id: &str,
+) -> Option<(String, SharedSseSubscriberEntry)> {
+    if opencode_session_id.is_empty() {
+        return None;
+    }
+
+    if let Some(entry) = subscribers.get(opencode_session_id) {
+        return Some((opencode_session_id.to_string(), entry.clone()));
+    }
+
+    let mut current = opencode_session_id;
+    let mut seen = HashSet::new();
+    seen.insert(current.to_string());
+    while let Some(parent) = session_parents.get(current) {
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        if let Some(entry) = subscribers.get(parent) {
+            return Some((parent.clone(), entry.clone()));
+        }
+        current = parent.as_str();
+    }
+
+    None
+}
+
+/// Record an upstream OpenCode error observed on the SSE stream, emit
+/// `chat:error`, flag the run cancelled so the blocking `/message` POST unblocks,
+/// and abort the OpenCode session server-side.
+///
+/// `opencode_session_id` may be a child/subagent session — it is resolved to the
+/// owning primary-session subscriber via parent lineage when needed.
+fn surface_opencode_sse_error(
+    app: &AppHandle,
+    subscribers: &Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    opencode_session_id: &str,
+    error: &serde_json::Value,
+) -> bool {
+    let Some(msg) = format_opencode_error_object(error) else {
+        return false;
+    };
+
+    let (root_session_id, subscriber_handle, root_working_dir) = {
+        let subscribers = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+        let parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+        match resolve_opencode_subscriber(&subscribers, &parents, opencode_session_id) {
+            Some((root_id, entry)) => (root_id, entry.handle.clone(), entry.working_dir.clone()),
+            None => {
+                log::warn!(
+                    "OpenCode shared SSE: upstream error for unknown session={opencode_session_id} (no parent subscriber)"
+                );
+                return false;
+            }
+        }
+    };
+
+    let (jean_session_id, worktree_id, already_set) = {
+        let subscriber = lock_recover(&subscriber_handle, "OPENCODE_SSE_SUBSCRIBER");
+        let mut guard = lock_recover(&subscriber.upstream_error, "OPENCODE_SSE_UPSTREAM_ERROR");
+        let already = guard.is_some();
+        if !already {
+            *guard = Some(msg.clone());
+        }
+        // Unblock the cancellable `/message` wait without marking the run as a
+        // user cancel — `force_abort` is distinct from `cancelled`.
+        subscriber.force_abort.store(true, Ordering::SeqCst);
+        (
+            subscriber.jean_session_id.clone(),
+            subscriber.worktree_id.clone(),
+            already,
+        )
+    };
+
+    if already_set {
+        return true;
+    }
+
+    log::warn!(
+        "OpenCode shared SSE: upstream error event_session={opencode_session_id} root_session={root_session_id} msg={msg}"
+    );
+    let _ = app.emit_all(
+        "chat:error",
+        &ErrorEvent {
+            session_id: jean_session_id,
+            worktree_id,
+            error: msg,
+        },
+    );
+    // Abort both the errored session (may be a child) and the root primary
+    // session so the blocking parent turn cannot keep waiting.
+    //
+    // Each session is aborted with its own working directory. Child/subagent
+    // sessions can be rooted outside the primary worktree — never pass the
+    // root directory for a different session id (that can mis-scope the abort
+    // and leave the subagent burning tokens).
+    if root_session_id != opencode_session_id {
+        let child_working_dir = lookup_opencode_session_directory(opencode_session_id);
+        super::registry::abort_opencode_session(opencode_session_id.to_string(), child_working_dir);
+    }
+    super::registry::abort_opencode_session(root_session_id, Some(root_working_dir));
+    true
+}
+
+/// Resolve `(providerID, modelID)` for an OpenCode message.
+///
+/// Preference order:
+/// 1. Explicit `provider/model` parse (supports multi-slash model IDs like
+///    `ollama/hf.co/org/model:tag` and Jean's `opencode/` wrapper prefix)
+/// 2. Resolve a bare model id across connected providers
+/// 3. Fall back to any available model
+fn resolve_selected_model(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    query: &[(&str, String)],
+    model: Option<&str>,
+) -> Result<(String, String), String> {
+    if let Some(parsed) = parse_provider_model(model) {
+        return Ok(parsed);
+    }
+
+    let providers_url = format!("{base_url}/provider");
+    let providers_resp = client
+        .get(&providers_url)
+        .query(query)
+        .send()
+        .map_err(|e| format!("Failed to query OpenCode providers: {e}"))?;
+    if !providers_resp.status().is_success() {
+        let status = providers_resp.status();
+        let body = providers_resp.text().unwrap_or_default();
+        return Err(format!(
+            "OpenCode provider query failed: status={status}, body={body}"
+        ));
+    }
+    let providers: serde_json::Value = providers_resp
+        .json()
+        .map_err(|e| format!("Failed to parse OpenCode providers response: {e}"))?;
+
+    model
+        .and_then(bare_model_id)
+        .and_then(|bare| find_provider_for_model(&providers, bare))
+        .or_else(|| choose_model(&providers))
+        .ok_or_else(|| "No OpenCode models available. Authenticate a provider first.".to_string())
+}
+
+/// Search the provider list for a provider that owns `target_model_id`.
+/// Prefers connected providers. Returns `(provider_id, model_id)` or `None`.
+pub(crate) fn find_provider_for_model(
+    all_providers: &serde_json::Value,
+    target_model_id: &str,
+) -> Option<(String, String)> {
+    let connected = all_providers
+        .get("connected")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let providers = all_providers
+        .get("all")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Search connected providers first
+    for provider_id in connected.iter().filter_map(|v| v.as_str()) {
+        for provider in &providers {
+            if provider.get("id").and_then(|v| v.as_str()) != Some(provider_id) {
+                continue;
+            }
+            if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
+                if models.contains_key(target_model_id) {
+                    return Some((provider_id.to_string(), target_model_id.to_string()));
+                }
+            }
+        }
+    }
+
+    // Fall back to any provider
+    for provider in &providers {
+        let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
+            if models.contains_key(target_model_id) {
+                return Some((provider_id.to_string(), target_model_id.to_string()));
+            }
+        }
+    }
+
+    None
+}
+
+fn agent_for_execution_mode(execution_mode: Option<&str>) -> &'static str {
+    match execution_mode.unwrap_or("plan") {
+        "plan" => "plan",
+        _ => "build",
+    }
+}
+
+fn variant_for_effort(reasoning_effort: Option<&str>) -> Option<&'static str> {
+    match reasoning_effort {
+        Some("xhigh") => Some("max"),
+        Some("high") => Some("high"),
+        Some("medium") => Some("medium"),
+        Some("low") => Some("low"),
+        _ => None,
+    }
+}
+
+fn should_retry_structured_output_as_text(error: &str) -> bool {
+    error.contains("Thinking mode does not support this tool_choice")
+}
+
+fn structured_output_text_prompt(prompt: &str, schema: &str) -> String {
+    format!(
+        "{prompt}\n\nReturn only the JSON object matching this schema. Do not use markdown fences:\n{schema}"
+    )
+}
+
+/// Build the OpenCode `parts` array by resolving file annotations in the prompt.
+///
+/// - Image annotations → base64-encoded file parts
+/// - Skill annotations → inlined text content
+/// - Pasted text annotations → inlined text content
+fn prepare_opencode_parts(prompt: &str) -> serde_json::Value {
+    let mut cleaned = prompt.to_string();
+    let mut image_parts: Vec<serde_json::Value> = Vec::new();
+
+    // Images: extract paths, read binary, base64-encode as file parts
+    let image_re = Regex::new(r"\[Image attached: (.+?) - Use the Read tool to view this image\]")
+        .expect("Invalid regex");
+    for cap in image_re.captures_iter(prompt) {
+        let path_str = &cap[1];
+        let annotation = &cap[0];
+        cleaned = cleaned.replace(annotation, "");
+
+        let file_path = std::path::Path::new(path_str);
+        match std::fs::read(file_path) {
+            Ok(data) => {
+                let mime = match file_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    "webp" => "image/webp",
+                    _ => "image/png",
+                };
+                let b64 = STANDARD.encode(&data);
+                let filename = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("image.png");
+                image_parts.push(serde_json::json!({
+                    "type": "file",
+                    "mime": mime,
+                    "url": format!("data:{mime};base64,{b64}"),
+                    "filename": filename,
+                }));
+            }
+            Err(e) => {
+                log::warn!("OpenCode: failed to read image {path_str}: {e}");
+                cleaned.push_str(&format!("\n[Image could not be loaded: {path_str}]"));
+            }
+        }
+    }
+
+    // Skills: read text content and inline
+    let skill_re = Regex::new(r"\[Skill: (.+?) - Read and use this skill to guide your response\]")
+        .expect("Invalid regex");
+    for cap in skill_re.captures_iter(prompt) {
+        let path_str = &cap[1];
+        let annotation = cap[0].to_string();
+        let replacement = match std::fs::read_to_string(path_str) {
+            Ok(content) => {
+                let name = std::path::Path::new(path_str)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("skill");
+                format!("<skill name=\"{name}\">\n{content}\n</skill>")
+            }
+            Err(e) => {
+                log::warn!("OpenCode: failed to read skill {path_str}: {e}");
+                format!("[Skill could not be loaded: {path_str}]")
+            }
+        };
+        cleaned = cleaned.replace(&annotation, &replacement);
+    }
+
+    // Pasted text files: read text content and inline
+    let text_re =
+        Regex::new(r"\[Text file attached: (.+?) - Use the Read tool to view this file\]")
+            .expect("Invalid regex");
+    for cap in text_re.captures_iter(prompt) {
+        let path_str = &cap[1];
+        let annotation = cap[0].to_string();
+        let replacement = match std::fs::read_to_string(path_str) {
+            Ok(content) => {
+                let name = std::path::Path::new(path_str)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("pasted-text");
+                format!("<pasted-text name=\"{name}\">\n{content}\n</pasted-text>")
+            }
+            Err(e) => {
+                log::warn!("OpenCode: failed to read text file {path_str}: {e}");
+                format!("[Text file could not be loaded: {path_str}]")
+            }
+        };
+        cleaned = cleaned.replace(&annotation, &replacement);
+    }
+
+    let cleaned = cleaned.trim().to_string();
+    let mut parts = vec![serde_json::json!({ "type": "text", "text": cleaned })];
+    parts.extend(image_parts);
+    serde_json::Value::Array(parts)
+}
+
+// ---------------------------------------------------------------------------
+// SSE streaming support (OpenCode global event stream: GET /event)
+// ---------------------------------------------------------------------------
+// OpenCode SSE wire format:
+//   data: {"directory":"...","payload":{"type":"message.part","properties":{...}}}
+//
+// Part types in properties:
+//   text       → { id, type:"text", text }
+//   tool_call  → { id, type:"tool_call", tool_name, tool_input, tool_call_id, metadata }
+//   tool_result→ { id, type:"tool_result", tool_name, tool_output, tool_call_id, metadata }
+//   (others: file, agent, subtask)
+
+async fn shared_sse_listener_loop(
+    app: AppHandle,
+    base_url: String,
+    working_dir: String,
+    subscribers: Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    state: SharedSseListenerState,
+) {
+    let connected = state.connected.clone();
+    let client = match reqwest::Client::builder().no_proxy().build() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("OpenCode shared SSE: failed to build async client: {e}");
+            return;
+        }
+    };
+
+    let url = format!("{base_url}/event");
+    let query = [("directory", working_dir.clone())];
+    let mut connect_attempt: u64 = 0;
+    let mut short_lived_disconnects: u32 = 0;
+
+    loop {
+        if !has_subscribers_for_working_dir(&subscribers, &working_dir) {
+            connected.store(false, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+
+        if listener_in_cooldown(&state) {
+            log::info!(
+                "OpenCode shared SSE: cooldown active for dir={}, listener exiting",
+                working_dir
+            );
+            connected.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        connect_attempt += 1;
+        log::info!(
+            "OpenCode shared SSE: connecting to {url} dir={} (attempt #{connect_attempt})",
+            working_dir
+        );
+
+        let response = match client
+            .get(&url)
+            .query(&query)
+            .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if content_type.contains("text/event-stream") {
+                    log::info!("OpenCode shared SSE: connected (content-type: {content_type})");
+                    connected.store(true, Ordering::SeqCst);
+                    resp
+                } else {
+                    log::info!(
+                        "OpenCode shared SSE: /event returned 200 but content-type='{content_type}'"
+                    );
+                    connected.store(false, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+            Ok(resp) => {
+                log::info!("OpenCode shared SSE: /event returned {}", resp.status());
+                connected.store(false, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Err(e) => {
+                log::info!("OpenCode shared SSE: /event connection failed: {e}");
+                connected.store(false, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+
+        let mut response = response;
+        let mut buffer = String::new();
+        let mut current_data = String::new();
+        let mut total_chunks: u64 = 0;
+        let mut total_events_emitted: u64 = 0;
+        let mut poll_count: u64 = 0;
+        let connection_started = Instant::now();
+
+        loop {
+            poll_count += 1;
+            let chunk = tokio::select! {
+                c = response.chunk() => c,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    if !has_subscribers_for_working_dir(&subscribers, &working_dir) {
+                        connected.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    if poll_count % 4 == 0 {
+                        log::trace!(
+                            "OpenCode shared SSE: poll #{poll_count} (chunks={total_chunks}, events={total_events_emitted})"
+                        );
+                    }
+                    continue;
+                },
+            };
+
+            match chunk {
+                Ok(Some(bytes)) => {
+                    total_chunks += 1;
+                    let chunk_str = String::from_utf8_lossy(&bytes);
+                    let preview: String = chunk_str.chars().take(300).collect();
+                    log::debug!(
+                        "OpenCode shared SSE: chunk #{total_chunks} ({} bytes): {preview}{}",
+                        bytes.len(),
+                        if chunk_str.len() > 300 { "..." } else { "" }
+                    );
+                    buffer.push_str(&chunk_str);
+
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
+
+                        if line.is_empty() {
+                            if !current_data.is_empty() {
+                                let emitted =
+                                    process_shared_sse_event(&app, &current_data, &subscribers);
+                                if matches!(emitted, Some(true)) {
+                                    total_events_emitted += 1;
+                                }
+                            }
+                            current_data.clear();
+                        } else if let Some(data) = line.strip_prefix("data: ") {
+                            if !current_data.is_empty() {
+                                current_data.push('\n');
+                            }
+                            current_data.push_str(data);
+                        } else if let Some(data) = line.strip_prefix("data:") {
+                            if !current_data.is_empty() {
+                                current_data.push('\n');
+                            }
+                            current_data.push_str(data);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    if !current_data.is_empty() {
+                        let emitted = process_shared_sse_event(&app, &current_data, &subscribers);
+                        if matches!(emitted, Some(true)) {
+                            total_events_emitted += 1;
+                        }
+                        current_data.clear();
+                    }
+                    log::info!(
+                        "OpenCode shared SSE: stream ended after {total_chunks} chunks, {total_events_emitted} events emitted, elapsed_ms={}",
+                        connection_started.elapsed().as_millis()
+                    );
+                    connected.store(false, Ordering::SeqCst);
+                    break;
+                }
+                Err(e) => {
+                    if !current_data.is_empty() {
+                        let emitted = process_shared_sse_event(&app, &current_data, &subscribers);
+                        if matches!(emitted, Some(true)) {
+                            total_events_emitted += 1;
+                        }
+                        current_data.clear();
+                    }
+                    log::info!("OpenCode shared SSE: read error after {total_chunks} chunks: {e}");
+                    connected.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+
+        let elapsed = connection_started.elapsed();
+        if elapsed < OPENCODE_SSE_SHORT_LIVED_THRESHOLD && total_events_emitted == 0 {
+            short_lived_disconnects = short_lived_disconnects.saturating_add(1);
+        } else {
+            short_lived_disconnects = 0;
+            clear_listener_cooldown(&state);
+        }
+
+        if short_lived_disconnects >= OPENCODE_SSE_MAX_SHORT_LIVED_DISCONNECTS {
+            log::warn!(
+                "OpenCode shared SSE: disabling listener for dir={} after {short_lived_disconnects} short-lived disconnects; POST response fallback will be used for {}s",
+                working_dir,
+                OPENCODE_SSE_DISABLED_COOLDOWN.as_secs()
+            );
+            mark_listener_cooldown(&state);
+            connected.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        if has_subscribers_for_working_dir(&subscribers, &working_dir) {
+            let delay = shared_sse_reconnect_delay(short_lived_disconnects);
+            log::info!(
+                "OpenCode shared SSE: reconnecting after {}ms (short_lived_disconnects={short_lived_disconnects})",
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+fn process_message_part_event(
+    app: &AppHandle,
+    part: &serde_json::Value,
+    subscriber: &mut SharedSseSubscriber,
+    working_dir: &str,
+) -> Option<bool> {
+    if subscriber.cancelled.load(Ordering::Relaxed) {
+        return Some(false);
+    }
+    subscriber.note_streaming_activity();
+
+    let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let part_id = part
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let part_session_id = part.get("sessionID").and_then(|v| v.as_str()).unwrap_or("");
+    let part_preview: String = part.to_string().chars().take(200).collect();
+
+    log::trace!(
+        "OpenCode shared SSE: message part type='{part_type}' session='{part_session_id}' → {part_preview}"
+    );
+
+    match part_type {
+        "text" => {
+            let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            subscriber.accumulate_text(&part_id, text);
+            let suffix = match subscriber.tracked_parts.get_mut(&part_id) {
+                Some(TrackedPartState {
+                    kind: TrackedPartKind::Text { emitted_len },
+                    ..
+                }) => {
+                    if *emitted_len > text.len() {
+                        log::debug!(
+                            "OpenCode SSE: stale text snapshot part_id='{part_id}' emitted_len={} text_len={} (skipped)",
+                            *emitted_len, text.len()
+                        );
+                    }
+                    let suffix = unseen_suffix(text, *emitted_len).to_string();
+                    // Never decrease emitted_len: stale snapshots must not
+                    // reset tracking backwards (causes subsequent deltas to
+                    // re-emit already-seen content).
+                    if text.len() > *emitted_len {
+                        *emitted_len = text.len();
+                    }
+                    suffix
+                }
+                _ => {
+                    subscriber.tracked_parts.insert(
+                        part_id,
+                        TrackedPartState {
+                            session_id: part_session_id.to_string(),
+                            kind: TrackedPartKind::Text {
+                                emitted_len: text.len(),
+                            },
+                        },
+                    );
+                    String::new()
+                }
+            };
+
+            if !suffix.is_empty() {
+                emit_chunk_for_subscriber(app, subscriber, &suffix);
+                return Some(true);
+            }
+            Some(false)
+        }
+        "reasoning" => {
+            let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            subscriber.accumulate_thinking(&part_id, text);
+            let suffix = match subscriber.tracked_parts.get_mut(&part_id) {
+                Some(TrackedPartState {
+                    kind: TrackedPartKind::Reasoning { emitted_len },
+                    ..
+                }) => {
+                    if *emitted_len > text.len() {
+                        log::debug!(
+                            "OpenCode SSE: stale reasoning snapshot part_id='{part_id}' emitted_len={} text_len={} (skipped)",
+                            *emitted_len, text.len()
+                        );
+                    }
+                    let suffix = unseen_suffix(text, *emitted_len).to_string();
+                    if text.len() > *emitted_len {
+                        *emitted_len = text.len();
+                    }
+                    suffix
+                }
+                Some(TrackedPartState {
+                    kind: TrackedPartKind::Text { emitted_len },
+                    ..
+                }) => {
+                    let prev_len = *emitted_len;
+                    subscriber.tracked_parts.insert(
+                        part_id,
+                        TrackedPartState {
+                            session_id: part_session_id.to_string(),
+                            kind: TrackedPartKind::Reasoning {
+                                emitted_len: text.len().max(prev_len),
+                            },
+                        },
+                    );
+                    unseen_suffix(text, prev_len).to_string()
+                }
+                _ => {
+                    subscriber.tracked_parts.insert(
+                        part_id,
+                        TrackedPartState {
+                            session_id: part_session_id.to_string(),
+                            kind: TrackedPartKind::Reasoning {
+                                emitted_len: text.len(),
+                            },
+                        },
+                    );
+                    String::new()
+                }
+            };
+
+            if !suffix.is_empty() {
+                emit_thinking_for_subscriber(app, subscriber, &suffix);
+                return Some(true);
+            }
+            Some(false)
+        }
+        "tool" | "tool_call" => {
+            let raw_tool_name = part
+                .get("tool")
+                .or_else(|| part.get("tool_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+            let tool_call_id = part
+                .get("callID")
+                .or_else(|| part.get("tool_call_id"))
+                .and_then(|v| v.as_str())
+                .or_else(|| part.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("tool-call")
+                .to_string();
+            let state = part.get("state").cloned().unwrap_or_default();
+            let mut input = state
+                .get("input")
+                .or_else(|| part.get("tool_input"))
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+
+            // For "question" tools: the SSE state.input often contains an internal
+            // value (e.g. 0) rather than the actual question data. Fetch the real
+            // question data from the OpenCode Question API so the frontend can
+            // render the question UI.
+            if raw_tool_name == "question" {
+                if let Some(enriched) = fetch_opencode_question_input(working_dir, &tool_call_id) {
+                    input = enriched;
+                }
+            }
+
+            // Normalize OpenCode lowercase tool names + camelCase params to match
+            // the Claude CLI conventions expected by the frontend.
+            let tool_name = normalize_opencode_tool(raw_tool_name, &mut input);
+
+            subscriber.accumulate_tool(&part_id, &tool_call_id, &tool_name, input.clone());
+            let existing_output =
+                subscriber
+                    .tracked_parts
+                    .get(&part_id)
+                    .and_then(|state| match &state.kind {
+                        TrackedPartKind::Tool { last_output, .. } => last_output.clone(),
+                        _ => None,
+                    });
+            let mut emitted = false;
+            let mut tool_use_to_emit: Option<(String, String, serde_json::Value)> = None;
+            let mut tool_result_to_emit: Option<(String, String)> = None;
+
+            {
+                let entry =
+                    subscriber
+                        .tracked_parts
+                        .entry(part_id)
+                        .or_insert_with(|| TrackedPartState {
+                            session_id: part_session_id.to_string(),
+                            kind: TrackedPartKind::Tool {
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                emitted_started: false,
+                                emitted_input: false,
+                                last_output: None,
+                            },
+                        });
+
+                if entry.session_id != part_session_id {
+                    entry.session_id = part_session_id.to_string();
+                }
+
+                if let TrackedPartKind::Tool {
+                    tool_call_id: tracked_call_id,
+                    tool_name: tracked_tool_name,
+                    emitted_started,
+                    emitted_input,
+                    last_output,
+                } = &mut entry.kind
+                {
+                    *tracked_call_id = tool_call_id.clone();
+                    *tracked_tool_name = tool_name.clone();
+
+                    let input_has_data =
+                        input.is_object() && input.as_object().map_or(false, |o| !o.is_empty());
+
+                    if !*emitted_started {
+                        tool_use_to_emit =
+                            Some((tool_call_id.clone(), tool_name.clone(), input.clone()));
+                        *emitted_started = true;
+                        *emitted_input = input_has_data;
+                        emitted = true;
+                    } else if !*emitted_input && input_has_data {
+                        // Re-emit tool_use with populated input so the frontend
+                        // updates its streaming state (the first emit may have had
+                        // empty input before the data was available).
+                        tool_use_to_emit =
+                            Some((tool_call_id.clone(), tool_name.clone(), input.clone()));
+                        *emitted_input = true;
+                        emitted = true;
+                    }
+
+                    let status = state
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let next_output = match status {
+                        "completed" => state
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        "error" => state
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        _ => None,
+                    };
+
+                    if let Some(output) = next_output {
+                        if existing_output.as_ref() != Some(&output) {
+                            *last_output = Some(output.clone());
+                            tool_result_to_emit = Some((tool_call_id.clone(), output));
+                            emitted = true;
+                        }
+                    }
+                }
+            }
+
+            // Accumulate tool output after releasing the tracked_parts borrow
+            if let Some((ref tc_id, ref output)) = tool_result_to_emit {
+                subscriber.accumulate_tool_output(tc_id, output);
+            }
+
+            if let Some((tool_call_id, tool_name, input)) = tool_use_to_emit {
+                emit_tool_use_for_subscriber(app, subscriber, &tool_call_id, &tool_name, input);
+            }
+            if let Some((tool_call_id, output)) = tool_result_to_emit {
+                emit_tool_result_for_subscriber(app, subscriber, &tool_call_id, &output);
+            }
+
+            Some(emitted)
+        }
+        _ => {
+            if !part_id.is_empty() {
+                subscriber
+                    .tracked_parts
+                    .entry(part_id)
+                    .or_insert_with(|| TrackedPartState {
+                        session_id: part_session_id.to_string(),
+                        kind: TrackedPartKind::Other,
+                    });
+            }
+            log::trace!(
+                "OpenCode shared SSE: unknown part type '{part_type}', properties={part_preview}"
+            );
+            Some(false)
+        }
+    }
+}
+
+fn process_message_part_delta_event(
+    app: &AppHandle,
+    properties: &serde_json::Value,
+    subscriber: &mut SharedSseSubscriber,
+) -> Option<bool> {
+    if subscriber.cancelled.load(Ordering::Relaxed) {
+        return Some(false);
+    }
+    subscriber.note_streaming_activity();
+
+    let delta_session_id = properties
+        .get("sessionID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let part_id = properties
+        .get("partID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let field = properties
+        .get("field")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let delta = properties
+        .get("delta")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if part_id.is_empty() || delta.is_empty() {
+        return Some(false);
+    }
+
+    // Determine the part kind and extract any emit data, then release tracked_parts borrow
+    enum DeltaAction {
+        Text,
+        Reasoning,
+        ToolOutput {
+            tool_call_id: String,
+            full_output: String,
+        },
+        NewText,
+        Untracked,
+    }
+
+    let action = match subscriber.tracked_parts.get_mut(part_id) {
+        Some(TrackedPartState {
+            kind: TrackedPartKind::Text { emitted_len },
+            ..
+        }) if field == "text" => {
+            *emitted_len += delta.len();
+            DeltaAction::Text
+        }
+        Some(TrackedPartState {
+            kind: TrackedPartKind::Reasoning { emitted_len },
+            ..
+        }) if field == "text" => {
+            *emitted_len += delta.len();
+            DeltaAction::Reasoning
+        }
+        Some(TrackedPartState {
+            kind:
+                TrackedPartKind::Tool {
+                    tool_call_id,
+                    last_output,
+                    ..
+                },
+            ..
+        }) if field.contains("output") => {
+            let mut next_output = last_output.clone().unwrap_or_default();
+            next_output.push_str(delta);
+            *last_output = Some(next_output.clone());
+            DeltaAction::ToolOutput {
+                tool_call_id: tool_call_id.clone(),
+                full_output: next_output,
+            }
+        }
+        _ if field == "text" => DeltaAction::NewText,
+        _ if field.contains("output") => {
+            log::trace!(
+                "OpenCode shared SSE: tool output delta for untracked part_id='{part_id}', deferring"
+            );
+            DeltaAction::Untracked
+        }
+        _ => {
+            log::trace!(
+                "OpenCode shared SSE: delta for unknown part part_id='{part_id}' field='{field}'"
+            );
+            DeltaAction::Untracked
+        }
+    };
+
+    // Now dispatch: accumulate + emit with no active tracked_parts borrow
+    match action {
+        DeltaAction::Text => {
+            subscriber.accumulate_text_delta(part_id, delta);
+            emit_chunk_for_subscriber(app, subscriber, delta);
+            Some(true)
+        }
+        DeltaAction::Reasoning => {
+            subscriber.accumulate_thinking_delta(part_id, delta);
+            emit_thinking_for_subscriber(app, subscriber, delta);
+            Some(true)
+        }
+        DeltaAction::ToolOutput {
+            tool_call_id,
+            full_output,
+        } => {
+            subscriber.accumulate_tool_output(&tool_call_id, &full_output);
+            emit_tool_result_for_subscriber(app, subscriber, &tool_call_id, &full_output);
+            Some(true)
+        }
+        DeltaAction::NewText => {
+            subscriber.tracked_parts.insert(
+                part_id.to_string(),
+                TrackedPartState {
+                    session_id: delta_session_id.to_string(),
+                    kind: TrackedPartKind::Text {
+                        emitted_len: delta.len(),
+                    },
+                },
+            );
+            subscriber.accumulate_text_delta(part_id, delta);
+            emit_chunk_for_subscriber(app, subscriber, delta);
+            Some(true)
+        }
+        DeltaAction::Untracked => Some(false),
+    }
+}
+
+fn process_shared_sse_event(
+    app: &AppHandle,
+    data: &str,
+    subscribers: &Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+) -> Option<bool> {
+    let json: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::info!("OpenCode shared SSE: JSON parse error: {e}, raw: {data}");
+            return None;
+        }
+    };
+
+    // OpenCode SSE wire format nests the event under `payload` and may include
+    // a top-level `directory` for the session instance that emitted it.
+    let event_directory = json
+        .get("directory")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let (event_type, properties) = if let Some(payload) = json.get("payload") {
+        let t = payload.get("type")?.as_str()?;
+        let p = payload.get("properties").cloned().unwrap_or_default();
+        (t.to_string(), p)
+    } else {
+        let t = json.get("type")?.as_str()?;
+        let p = json.get("properties").cloned().unwrap_or_default();
+        (t.to_string(), p)
+    };
+
+    match event_type.as_str() {
+        "server.connected" | "server.heartbeat" => Some(false),
+        "session.created" | "session.updated" => {
+            // Track parentID lineage so child/subagent session.error events can
+            // resolve to the primary Jean subscriber.
+            let info = properties.get("info").unwrap_or(&properties);
+            let session_id = info
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| properties.get("sessionID").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if let Some(parent_id) = info.get("parentID").and_then(|v| v.as_str()) {
+                remember_opencode_session_parent(session_id, parent_id);
+            }
+            // Prefer info.directory when present; otherwise the envelope directory.
+            let session_dir = info
+                .get("directory")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| event_directory.clone());
+            if let Some(dir) = session_dir.as_deref() {
+                remember_opencode_session_directory(session_id, dir);
+            }
+            Some(false)
+        }
+        "message.part.updated" | "message.part" | "message.part.added" => {
+            // Stream parts only for the primary subscribed session. Child/subagent
+            // parts stay isolated; only errors (below) fan in to the parent run.
+            let part = properties.get("part").unwrap_or(&properties);
+            let opencode_session_id = part.get("sessionID").and_then(|v| v.as_str()).unwrap_or("");
+            let (subscriber_handle, part_working_dir) = {
+                let lock_start = Instant::now();
+                let subscribers = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+                let lock_wait = lock_start.elapsed();
+                if lock_wait > Duration::from_millis(20) {
+                    log::warn!(
+                        "OpenCode shared SSE: route wait_ms={} session={} subscribers={}",
+                        lock_wait.as_millis(),
+                        opencode_session_id,
+                        subscribers.len()
+                    );
+                }
+                match subscribers.get(opencode_session_id) {
+                    Some(entry) => (entry.handle.clone(), entry.working_dir.clone()),
+                    None => return Some(false),
+                }
+            };
+            let mut subscriber = lock_recover(&subscriber_handle, "OPENCODE_SSE_SUBSCRIBER");
+            process_message_part_event(app, part, &mut subscriber, &part_working_dir)
+        }
+        "message.part.delta" => {
+            let opencode_session_id = properties
+                .get("sessionID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let subscriber = {
+                let lock_start = Instant::now();
+                let subscribers = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+                let lock_wait = lock_start.elapsed();
+                if lock_wait > Duration::from_millis(20) {
+                    log::warn!(
+                        "OpenCode shared SSE: route wait_ms={} session={} subscribers={}",
+                        lock_wait.as_millis(),
+                        opencode_session_id,
+                        subscribers.len()
+                    );
+                }
+                subscribers
+                    .get(opencode_session_id)
+                    .map(|entry| entry.handle.clone())
+            };
+            let Some(subscriber) = subscriber else {
+                return Some(false);
+            };
+            let mut subscriber = lock_recover(&subscriber, "OPENCODE_SSE_SUBSCRIBER");
+            process_message_part_delta_event(app, &properties, &mut subscriber)
+        }
+        "message.created" => Some(false),
+        "message.updated" => {
+            // Assistant messages may land with `info.error` set when a local /
+            // custom provider fails. Surface that immediately — the blocking
+            // `/message` POST often does not return promptly for these failures.
+            let info = properties.get("info").unwrap_or(&properties);
+            let role = info.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(error) = info.get("error") else {
+                return Some(false);
+            };
+            if role != "assistant" && !role.is_empty() {
+                return Some(false);
+            }
+            let opencode_session_id = info
+                .get("sessionID")
+                .and_then(|v| v.as_str())
+                .or_else(|| properties.get("sessionID").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if opencode_session_id.is_empty() {
+                return Some(false);
+            }
+            if let Some(dir) = event_directory.as_deref() {
+                remember_opencode_session_directory(opencode_session_id, dir);
+            }
+            Some(surface_opencode_sse_error(
+                app,
+                subscribers,
+                opencode_session_id,
+                error,
+            ))
+        }
+        "session.error" => {
+            let opencode_session_id = properties
+                .get("sessionID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let Some(error) = properties.get("error") else {
+                return Some(false);
+            };
+            if opencode_session_id.is_empty() {
+                return Some(false);
+            }
+            if let Some(dir) = event_directory.as_deref() {
+                remember_opencode_session_directory(opencode_session_id, dir);
+            }
+            Some(surface_opencode_sse_error(
+                app,
+                subscribers,
+                opencode_session_id,
+                error,
+            ))
+        }
+        "session.idle" => {
+            // The session's whole queue (original turn + any steered prompts)
+            // has drained. Flag the subscriber so a steered run can finalize.
+            // Only the primary (subscribed) session matters — child/subagent
+            // idle events must not mark the parent run idle.
+            let opencode_session_id = properties
+                .get("sessionID")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    properties
+                        .get("info")
+                        .and_then(|i| i.get("id"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("");
+            if let Some((_, session_idle, _)) = opencode_session_flags(opencode_session_id) {
+                session_idle.store(true, Ordering::Relaxed);
+                log::info!(
+                    "OpenCode shared SSE: session.idle opencode_session={opencode_session_id}"
+                );
+            }
+            Some(false)
+        }
+        // OpenCode permission prompts (e.g. external_directory access outside the
+        // worktree). Without handling these, the in-flight /message POST blocks
+        // forever and the Jean session appears frozen (issue #625).
+        "permission.asked" | "permission.v2.asked" => {
+            handle_opencode_permission_asked(
+                app,
+                subscribers,
+                &event_type,
+                &properties,
+                event_directory.as_deref(),
+            );
+            Some(true)
+        }
+        "permission.replied" | "permission.v2.replied" => {
+            // Reply can come from auto-approve or an external client; surface so
+            // the frontend can drop a stale pending card if needed.
+            handle_opencode_permission_replied(app, subscribers, &properties);
+            Some(false)
+        }
+        _ => {
+            log::trace!("OpenCode shared SSE: event type='{}'", event_type);
+            Some(false)
+        }
+    }
+}
+
+/// Whether Jean should auto-approve OpenCode permission prompts for this session.
+///
+/// True when:
+/// - the active turn started in yolo mode (subscriber flag), or
+/// - session metadata selected_execution_mode is yolo
+///
+/// Mirrors Codex auto-accept so YOLO mode never freezes on external_directory asks.
+fn should_auto_approve_opencode_permissions(
+    app: &AppHandle,
+    jean_session_id: &str,
+    turn_execution_mode: Option<&str>,
+) -> bool {
+    if turn_execution_mode == Some("yolo") {
+        return true;
+    }
+    matches!(
+        super::storage::load_metadata(app, jean_session_id),
+        Ok(Some(meta)) if meta.selected_execution_mode.as_deref() == Some("yolo")
+    )
+}
+
+/// Parse a `permission.asked` / `permission.v2.asked` properties object into a
+/// Jean-side request, normalizing v1/v2 field names.
+fn parse_opencode_permission_request(
+    event_type: &str,
+    properties: &serde_json::Value,
+    working_dir: Option<String>,
+) -> Option<OpenCodePermissionRequest> {
+    let request_id = properties.get("id").and_then(|v| v.as_str())?.to_string();
+    let opencode_session_id = properties
+        .get("sessionID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if request_id.is_empty() || opencode_session_id.is_empty() {
+        return None;
+    }
+
+    let is_v2 = event_type.contains("v2");
+    let permission = if is_v2 {
+        properties
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+    } else {
+        properties
+            .get("permission")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+    }
+    .to_string();
+
+    let patterns: Vec<String> = if is_v2 {
+        properties
+            .get("resources")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        properties
+            .get("patterns")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let always: Vec<String> = if is_v2 {
+        properties
+            .get("save")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_else(|| patterns.clone())
+    } else {
+        properties
+            .get("always")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_else(|| patterns.clone())
+    };
+
+    let tool_call_id = properties
+        .get("tool")
+        .and_then(|t| t.get("callID"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            properties
+                .get("source")
+                .and_then(|s| s.get("callID"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_string);
+
+    let metadata = properties.get("metadata").cloned().filter(|v| !v.is_null());
+
+    Some(OpenCodePermissionRequest {
+        request_id,
+        opencode_session_id,
+        permission,
+        patterns,
+        always,
+        metadata,
+        tool_call_id,
+        working_dir,
+        api_version: if is_v2 {
+            "v2".to_string()
+        } else {
+            "v1".to_string()
+        },
+    })
+}
+
+fn handle_opencode_permission_asked(
+    app: &AppHandle,
+    subscribers: &Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    event_type: &str,
+    properties: &serde_json::Value,
+    event_directory: Option<&str>,
+) {
+    let opencode_session_id = properties
+        .get("sessionID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if opencode_session_id.is_empty() {
+        log::warn!("OpenCode permission.asked missing sessionID");
+        return;
+    }
+
+    if let Some(dir) = event_directory {
+        remember_opencode_session_directory(opencode_session_id, dir);
+    }
+
+    let (jean_session_id, worktree_id, working_dir, turn_execution_mode) = {
+        let lock = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+        let parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+        match resolve_opencode_subscriber(&lock, &parents, opencode_session_id) {
+            Some((_root_id, entry)) => {
+                let sub = lock_recover(&entry.handle, "OPENCODE_SSE_SUBSCRIBER");
+                (
+                    sub.jean_session_id.clone(),
+                    sub.worktree_id.clone(),
+                    // Prefer the event/session directory (child workdir) over the
+                    // root subscriber's worktree so the reply hits the right instance.
+                    event_directory
+                        .map(str::to_string)
+                        .or_else(|| lookup_opencode_session_directory(opencode_session_id))
+                        .unwrap_or_else(|| entry.working_dir.clone()),
+                    sub.execution_mode.clone(),
+                )
+            }
+            None => {
+                log::warn!(
+                    "OpenCode permission.asked for unknown session={opencode_session_id} (no parent subscriber)"
+                );
+                return;
+            }
+        }
+    };
+
+    let Some(mut request) =
+        parse_opencode_permission_request(event_type, properties, Some(working_dir.clone()))
+    else {
+        log::warn!("OpenCode permission.asked could not be parsed: {properties}");
+        return;
+    };
+    request.working_dir = Some(working_dir.clone());
+
+    log::info!(
+        "OpenCode permission.asked jean_session={jean_session_id} request_id={} permission={} patterns={:?} api={}",
+        request.request_id,
+        request.permission,
+        request.patterns,
+        request.api_version
+    );
+
+    // YOLO: auto-approve with "always" so subsequent matching prompts in this
+    // OpenCode session do not re-block. Never freeze the conversation.
+    if should_auto_approve_opencode_permissions(
+        app,
+        &jean_session_id,
+        turn_execution_mode.as_deref(),
+    ) {
+        log::info!(
+            "OpenCode: auto-approving permission in yolo mode request_id={}",
+            request.request_id
+        );
+        if let Err(e) = respond_opencode_permission(
+            app,
+            &working_dir,
+            &request.request_id,
+            "always",
+            None,
+            Some(&request.opencode_session_id),
+            Some(&request.api_version),
+        ) {
+            log::error!(
+                "OpenCode: failed to auto-approve permission request_id={}: {e}",
+                request.request_id
+            );
+            // Fall through to surface the UI so the user can still unblock.
+        } else {
+            return;
+        }
+    }
+
+    let _ = app.emit_all(
+        "chat:opencode_permission_request",
+        &OpenCodePermissionRequestEvent {
+            session_id: jean_session_id,
+            worktree_id,
+            request,
+        },
+    );
+}
+
+fn handle_opencode_permission_replied(
+    app: &AppHandle,
+    subscribers: &Arc<Mutex<HashMap<String, SharedSseSubscriberEntry>>>,
+    properties: &serde_json::Value,
+) {
+    let opencode_session_id = properties
+        .get("sessionID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let request_id = properties
+        .get("requestID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if opencode_session_id.is_empty() || request_id.is_empty() {
+        return;
+    }
+
+    let (jean_session_id, worktree_id) = {
+        let lock = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+        let parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+        match resolve_opencode_subscriber(&lock, &parents, opencode_session_id) {
+            Some((_root_id, entry)) => {
+                let sub = lock_recover(&entry.handle, "OPENCODE_SSE_SUBSCRIBER");
+                (sub.jean_session_id.clone(), sub.worktree_id.clone())
+            }
+            None => return,
+        }
+    };
+
+    #[derive(serde::Serialize, Clone)]
+    struct OpenCodePermissionRepliedEvent {
+        session_id: String,
+        worktree_id: String,
+        request_id: String,
+        reply: String,
+    }
+
+    let reply = properties
+        .get("reply")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let _ = app.emit_all(
+        "chat:opencode_permission_replied",
+        &OpenCodePermissionRepliedEvent {
+            session_id: jean_session_id,
+            worktree_id,
+            request_id: request_id.to_string(),
+            reply,
+        },
+    );
+}
+
+async fn await_opencode_http_or_cancel<F, T>(
+    future: F,
+    cancelled: Arc<AtomicBool>,
+    force_abort: Arc<AtomicBool>,
+    opencode_session_id: String,
+    working_dir: String,
+) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    let should_stop = || cancelled.load(Ordering::SeqCst) || force_abort.load(Ordering::SeqCst);
+
+    if should_stop() {
+        super::registry::abort_opencode_session(opencode_session_id.clone(), Some(working_dir));
+        return None;
+    }
+
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Some(result),
+            _ = tokio::time::sleep(OPENCODE_HTTP_CANCEL_POLL_INTERVAL) => {
+                if should_stop() {
+                    super::registry::abort_opencode_session(opencode_session_id.clone(), Some(working_dir.clone()));
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+fn post_opencode_message_cancellable(
+    msg_url: String,
+    working_dir: String,
+    payload: serde_json::Value,
+    cancelled: Arc<AtomicBool>,
+    force_abort: Arc<AtomicBool>,
+    jean_session_id: String,
+    opencode_session_id: String,
+) -> Result<Option<(reqwest::StatusCode, String)>, String> {
+    post_opencode_message_cancellable_with_timeout(
+        msg_url,
+        working_dir,
+        payload,
+        cancelled,
+        force_abort,
+        jean_session_id,
+        opencode_session_id,
+        Duration::from_secs(1800),
+    )
+}
+
+fn post_opencode_message_cancellable_with_timeout(
+    msg_url: String,
+    working_dir: String,
+    payload: serde_json::Value,
+    cancelled: Arc<AtomicBool>,
+    force_abort: Arc<AtomicBool>,
+    jean_session_id: String,
+    opencode_session_id: String,
+    request_timeout: Duration,
+) -> Result<Option<(reqwest::StatusCode, String)>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to build OpenCode HTTP runtime: {e}"))?;
+
+    runtime.block_on(async move {
+        let client = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .map_err(|e| format!("Failed to build OpenCode async HTTP client: {e}"))?;
+
+        // Single attempt only — never replay a non-idempotent message POST.
+        let response = match await_opencode_http_or_cancel(
+            client
+                .post(&msg_url)
+                .query(&[("directory", working_dir.as_str())])
+                .json(&payload)
+                .send(),
+            cancelled.clone(),
+            force_abort.clone(),
+            opencode_session_id.clone(),
+            working_dir.clone(),
+        )
+        .await
+        {
+            Some(Ok(resp)) => resp,
+            Some(Err(e)) => {
+                // Never retried: the POST is non-idempotent (it appends a user
+                // message). A timeout may mean the server already accepted the
+                // prompt, so replaying duplicates it and masks the real provider
+                // failure (see #587).
+                return Err(format!("Failed to send OpenCode message: {e}"));
+            }
+            None => return Ok(None),
+        };
+
+        let status = response.status();
+        log::info!(
+            "OpenCode: POST body read start jean_session={} opencode_session={}",
+            jean_session_id,
+            opencode_session_id
+        );
+        let body_read_start = Instant::now();
+        let body = match await_opencode_http_or_cancel(
+            response.text(),
+            cancelled,
+            force_abort,
+            opencode_session_id.clone(),
+            working_dir,
+        )
+        .await
+        {
+            Some(Ok(body)) => body,
+            Some(Err(e)) => {
+                log::warn!(
+                    "OpenCode: POST body read failed jean_session={} opencode_session={} elapsed_ms={} err={e}",
+                    jean_session_id,
+                    opencode_session_id,
+                    body_read_start.elapsed().as_millis()
+                );
+                return Err(format!("Failed to read OpenCode message response: {e}"));
+            }
+            None => return Ok(None),
+        };
+
+        Ok(Some((status, body)))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_opencode_http(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &str,
+    working_dir: &std::path::Path,
+    existing_opencode_session_id: Option<&str>,
+    model: Option<&str>,
+    execution_mode: Option<&str>,
+    reasoning_effort: Option<&str>,
+    prompt: &str,
+    system_prompt: Option<&str>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<OpenCodeResponse, String> {
+    // Check for cancellation before doing any work
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(OpenCodeResponse {
+            content: String::new(),
+            session_id: existing_opencode_session_id.unwrap_or("").to_string(),
+            tool_calls: vec![],
+            content_blocks: vec![],
+            cancelled: true,
+            usage: None,
+        });
+    }
+
+    let base_url = crate::opencode_server::acquire(app)?;
+
+    // RAII guard: decrements the server usage count when this function exits.
+    // The server only shuts down when the last consumer releases.
+    struct ServerReleaseGuard;
+    impl Drop for ServerReleaseGuard {
+        fn drop(&mut self) {
+            crate::opencode_server::release();
+        }
+    }
+    let _server_guard = ServerReleaseGuard;
+
+    // 30 min timeout — OpenCode agentic tasks can run for extended periods
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()
+        .map_err(|e| format!("Failed to build OpenCode HTTP client: {e}"))?;
+
+    let working_dir_string = working_dir.to_string_lossy().to_string();
+    let query = [("directory", working_dir_string.clone())];
+
+    let opencode_session_id = if let Some(existing) = existing_opencode_session_id {
+        existing.to_string()
+    } else {
+        let create_url = format!("{base_url}/session");
+        let create_payload = serde_json::json!({
+            "title": format!("Jean {session_id}"),
+        });
+        let create_resp = client
+            .post(&create_url)
+            .query(&query)
+            .json(&create_payload)
+            .send()
+            .map_err(|e| format!("Failed to create OpenCode session: {e}"))?;
+
+        if !create_resp.status().is_success() {
+            let status = create_resp.status();
+            let body = create_resp.text().unwrap_or_default();
+            return Err(format!(
+                "OpenCode session create failed: status={status}, body={body}"
+            ));
+        }
+
+        let created: serde_json::Value = create_resp
+            .json()
+            .map_err(|e| format!("Failed to parse OpenCode session create response: {e}"))?;
+
+        created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("OpenCode session create response missing id")?
+            .to_string()
+    };
+
+    // Update the cancel flag registry with the OpenCode session ID so that
+    // cancel_process() can send a server-side interrupt request.
+    super::registry::update_cancel_flag_context(
+        session_id,
+        opencode_session_id.clone(),
+        working_dir_string.clone(),
+    );
+    super::commands::trigger_opencode_queue_steer(
+        app.clone(),
+        worktree_id.to_string(),
+        working_dir_string.clone(),
+        session_id.to_string(),
+    );
+
+    let selected_model = resolve_selected_model(&client, &base_url, &query, model)?;
+    log::info!(
+        "OpenCode: selected model provider='{}' model='{}'",
+        selected_model.0,
+        selected_model.1
+    );
+
+    // Check for cancellation before sending the (potentially long-running) message request
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(OpenCodeResponse {
+            content: String::new(),
+            session_id: opencode_session_id,
+            tool_calls: vec![],
+            content_blocks: vec![],
+            cancelled: true,
+            usage: None,
+        });
+    }
+
+    let streamed_via_sse = Arc::new(AtomicBool::new(false));
+    // Steering coordination flags shared with the SSE listener. `turn_started`
+    // gates steered `prompt_async` injections until the main turn is live;
+    // `session_idle` lets a steered run wait for every injected prompt to finish;
+    // `steered` records whether any injection happened (plain runs skip the wait).
+    let turn_started = Arc::new(AtomicBool::new(false));
+    let session_idle = Arc::new(AtomicBool::new(false));
+    let steered = Arc::new(AtomicBool::new(false));
+    // Shared with the SSE listener so provider failures (session.error /
+    // message.updated) unblock the POST and surface a real error instead of a
+    // perpetual "running" state for local/custom providers.
+    let upstream_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let force_abort = Arc::new(AtomicBool::new(false));
+    log::info!(
+        "OpenCode: registering shared SSE subscriber jean_session={} opencode_session={}",
+        session_id,
+        opencode_session_id
+    );
+    let _shared_sse_subscription = SharedSseSubscription::register(
+        app,
+        &base_url,
+        opencode_session_id.clone(),
+        session_id.to_string(),
+        worktree_id.to_string(),
+        run_id.to_string(),
+        working_dir_string.clone(),
+        execution_mode.map(str::to_string),
+        cancelled.clone(),
+        streamed_via_sse.clone(),
+        turn_started.clone(),
+        session_idle.clone(),
+        steered.clone(),
+        upstream_error.clone(),
+        force_abort.clone(),
+    );
+
+    let sse_connected = wait_for_shared_sse_connection(
+        Duration::from_secs(3),
+        &working_dir_string,
+        Some(cancelled),
+    );
+
+    if sse_connected {
+        log::info!("OpenCode: shared SSE streaming active, events will stream in real-time");
+    } else {
+        log::info!("OpenCode: shared SSE not available, will emit events from POST response");
+    }
+
+    // Cancellation can arrive while we're waiting for the shared SSE listener to
+    // connect. Re-check here so we don't start a new OpenCode message after the
+    // user already cancelled and the interrupt endpoint potentially ran before
+    // any in-flight message existed.
+    if cancelled.load(Ordering::SeqCst) {
+        log::info!(
+            "OpenCode: request cancelled before message POST jean_session={} opencode_session={}",
+            session_id,
+            opencode_session_id
+        );
+        return Ok(OpenCodeResponse {
+            content: String::new(),
+            session_id: opencode_session_id,
+            tool_calls: vec![],
+            content_blocks: vec![],
+            cancelled: true,
+            usage: None,
+        });
+    }
+
+    let msg_url = format!("{base_url}/session/{opencode_session_id}/message");
+
+    let mut payload = serde_json::json!({
+        "agent": agent_for_execution_mode(execution_mode),
+        "model": {
+            "providerID": selected_model.0,
+            "modelID": selected_model.1,
+        },
+        "parts": prepare_opencode_parts(prompt),
+    });
+
+    if let Some(v) = variant_for_effort(reasoning_effort) {
+        payload["variant"] = serde_json::Value::String(v.to_string());
+    }
+    if let Some(system) = system_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["system"] = serde_json::Value::String(system.to_string());
+    }
+
+    let post_start = Instant::now();
+    log::info!(
+        "OpenCode: message POST start jean_session={} opencode_session={} url={}",
+        session_id,
+        opencode_session_id,
+        msg_url
+    );
+    let Some((status, body)) = post_opencode_message_cancellable(
+        msg_url,
+        working_dir_string.clone(),
+        payload,
+        cancelled.clone(),
+        force_abort.clone(),
+        session_id.to_string(),
+        opencode_session_id.clone(),
+    )?
+    else {
+        // Prefer SSE-captured provider failures over a plain cancel. Local /
+        // custom providers often emit `session.error` and never cleanly finish
+        // the blocking `/message` body — we abort to unblock and land here.
+        if let Some(error_msg) = take_upstream_error(&upstream_error) {
+            log::warn!(
+                "OpenCode: message POST unblocked by upstream error jean_session={} opencode_session={} elapsed_ms={} msg={}",
+                session_id,
+                opencode_session_id,
+                post_start.elapsed().as_millis(),
+                error_msg
+            );
+            return Err(error_msg);
+        }
+        log::info!(
+            "OpenCode: message POST cancelled jean_session={} opencode_session={} elapsed_ms={}",
+            session_id,
+            opencode_session_id,
+            post_start.elapsed().as_millis()
+        );
+        return Ok(OpenCodeResponse {
+            content: String::new(),
+            session_id: opencode_session_id,
+            tool_calls: vec![],
+            content_blocks: vec![],
+            cancelled: true,
+            usage: None,
+        });
+    };
+    log::info!(
+        "OpenCode: message POST finished jean_session={} opencode_session={} elapsed_ms={} status={}",
+        session_id,
+        opencode_session_id,
+        post_start.elapsed().as_millis(),
+        status
+    );
+
+    if !status.is_success() {
+        let error = format!("OpenCode message failed: status={status}, body={body}");
+        let _ = app.emit_all(
+            "chat:error",
+            &ErrorEvent {
+                session_id: session_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                error: error.clone(),
+            },
+        );
+        return Err(error);
+    }
+
+    let body_parse_start = Instant::now();
+    let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        log::warn!(
+            "OpenCode: POST body parse failed jean_session={} opencode_session={} elapsed_ms={} err={e}",
+            session_id,
+            opencode_session_id,
+            body_parse_start.elapsed().as_millis()
+        );
+        format!("Failed to parse OpenCode message response: {e}")
+    })?;
+    log::info!(
+        "OpenCode: POST body parse done jean_session={} opencode_session={} elapsed_ms={} parts={}",
+        session_id,
+        opencode_session_id,
+        body_parse_start.elapsed().as_millis(),
+        response_json
+            .get("parts")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    );
+
+    // Prefer any SSE-captured provider failure (already emitted as chat:error).
+    if let Some(error_msg) = take_upstream_error(&upstream_error) {
+        log::warn!(
+            "OpenCode: upstream error from SSE jean_session={} opencode_session={} msg={}",
+            session_id,
+            opencode_session_id,
+            error_msg
+        );
+        return Err(error_msg);
+    }
+
+    // Surface upstream errors from `info.error` (e.g. opencode.ai zen "Insufficient balance",
+    // ContextOverflowError, model-provider auth failures). These come back as 200 OK with
+    // parts=[] and an embedded error object; without this check the run would silently log
+    // "empty JSONL content" and the UI would show nothing.
+    if let Some(error_msg) = extract_opencode_error_message(&response_json) {
+        log::warn!(
+            "OpenCode: upstream error in POST response jean_session={} opencode_session={} msg={}",
+            session_id,
+            opencode_session_id,
+            error_msg
+        );
+        let _ = app.emit_all(
+            "chat:error",
+            &ErrorEvent {
+                session_id: session_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                error: error_msg.clone(),
+            },
+        );
+        return Err(error_msg);
+    }
+
+    // Let the SSE listener drain any trailing events before deciding whether
+    // the POST response needs to synthesize the stream.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Check if SSE successfully streamed events — if so, skip emitting from
+    // the POST response to avoid duplicates. The POST response is still parsed
+    // to build the return value (content, tool_calls, content_blocks, usage).
+    let streamed_via_sse = streamed_via_sse.load(Ordering::Relaxed);
+    log::info!(
+        "OpenCode: POST response received, streamed_via_sse={streamed_via_sse}, \
+         will {} events from POST response",
+        if streamed_via_sse {
+            "SKIP emitting"
+        } else {
+            "EMIT"
+        }
+    );
+
+    let mut content = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut content_blocks: Vec<ContentBlock> = Vec::new();
+    let mut usage: Option<UsageData> = None;
+
+    let parts = response_json
+        .get("parts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // OpenCode echoes the user prompt as the first text part in the response.
+    // Track whether we've seen a non-text part so we only skip the leading echo.
+    let mut seen_non_text = false;
+    let trimmed_prompt = prompt.trim();
+
+    for part in parts {
+        // Re-check cancel flag per part: if user cancelled while POST was in-flight,
+        // suppress event emission to avoid re-adding content after chat:cancelled
+        // already cleared the frontend state. Data is still parsed for the return value.
+        let should_emit = !streamed_via_sse && !cancelled.load(Ordering::SeqCst);
+
+        match part.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    // Skip user prompt echo: OpenCode includes the user message as
+                    // the first text part before any reasoning/tool parts.
+                    if !seen_non_text && content_blocks.is_empty() && text.trim() == trimmed_prompt
+                    {
+                        log::trace!("OpenCode: skipping echoed user prompt in response parts");
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        if !content.is_empty() {
+                            content.push_str("\n\n");
+                        }
+                        content.push_str(text);
+                        content_blocks.push(ContentBlock::Text {
+                            text: text.to_string(),
+                        });
+                        if should_emit {
+                            let _ = app.emit_all(
+                                "chat:chunk",
+                                &ChunkEvent {
+                                    session_id: session_id.to_string(),
+                                    worktree_id: worktree_id.to_string(),
+                                    content: text.to_string(),
+                                    run_id: Some(run_id.to_string()),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            Some("reasoning") => {
+                seen_non_text = true;
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    content_blocks.push(ContentBlock::Thinking {
+                        thinking: text.to_string(),
+                    });
+                    if should_emit {
+                        let _ = app.emit_all(
+                            "chat:thinking",
+                            &ThinkingEvent {
+                                session_id: session_id.to_string(),
+                                worktree_id: worktree_id.to_string(),
+                                content: text.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+            Some("tool") => {
+                seen_non_text = true;
+                let raw_tool_name = part.get("tool").and_then(|v| v.as_str()).unwrap_or("tool");
+                let tool_call_id = part
+                    .get("callID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| part.get("id").and_then(|v| v.as_str()))
+                    .unwrap_or("tool-call")
+                    .to_string();
+                let state = part.get("state").cloned().unwrap_or_default();
+                let mut input = state.get("input").cloned().unwrap_or(serde_json::json!({}));
+
+                // Enrich "question" tool input (same as SSE handler)
+                if raw_tool_name == "question" {
+                    let wd = working_dir.to_string_lossy();
+                    if let Some(enriched) = fetch_opencode_question_input(&wd, &tool_call_id) {
+                        input = enriched;
+                    }
+                }
+
+                // Normalize OpenCode tool names + params to Claude CLI conventions.
+                let tool_name = normalize_opencode_tool(raw_tool_name, &mut input);
+
+                tool_calls.push(ToolCall {
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    input: input.clone(),
+                    output: None,
+                    parent_tool_use_id: None,
+                });
+                content_blocks.push(ContentBlock::ToolUse {
+                    tool_call_id: tool_call_id.clone(),
+                });
+
+                if should_emit {
+                    let _ = app.emit_all(
+                        "chat:tool_use",
+                        &ToolUseEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            id: tool_call_id.clone(),
+                            name: tool_name,
+                            input,
+                            parent_tool_use_id: None,
+                        },
+                    );
+                    let _ = app.emit_all(
+                        "chat:tool_block",
+                        &ToolBlockEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            tool_call_id: tool_call_id.clone(),
+                        },
+                    );
+                }
+
+                let status = state
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let maybe_output = match status {
+                    "completed" => state
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    "error" => state
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    _ => None,
+                };
+
+                if let Some(output) = maybe_output {
+                    if let Some(call) = tool_calls.iter_mut().find(|t| t.id == tool_call_id) {
+                        call.output = Some(output.clone());
+                    }
+                    if should_emit {
+                        let _ = app.emit_all(
+                            "chat:tool_result",
+                            &ToolResultEvent {
+                                session_id: session_id.to_string(),
+                                worktree_id: worktree_id.to_string(),
+                                tool_use_id: tool_call_id,
+                                output,
+                            },
+                        );
+                    }
+                }
+            }
+            Some("step-finish") => {
+                let tokens = part.get("tokens").cloned().unwrap_or_default();
+                let input = tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
+                let output = tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0);
+                let cache = tokens.get("cache").cloned().unwrap_or_default();
+                let cache_read = cache.get("read").and_then(|v| v.as_u64()).unwrap_or(0);
+                let cache_write = cache.get("write").and_then(|v| v.as_u64()).unwrap_or(0);
+                usage = Some(UsageData {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_input_tokens: cache_read,
+                    cache_creation_input_tokens: cache_write,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // If any prompt was steered into this run via `prompt_async`, the blocking
+    // `/message` POST returns when the ORIGINAL turn finishes — but injected
+    // prompts keep running server-side and stream over the (still-subscribed)
+    // SSE. Wait for `session.idle` so their output is captured below before we
+    // take the accumulated SSE blocks. Plain (non-steered) runs skip this and
+    // finalize immediately, so they are completely unaffected.
+    if steered.load(Ordering::Relaxed) {
+        wait_for_opencode_session_idle(&session_idle, cancelled, &opencode_session_id);
+    }
+
+    // If SSE accumulated richer content (intermediate thinking/tool blocks),
+    // prefer that over the POST response which only contains the final turn.
+    let (sse_blocks, sse_tool_calls) = _shared_sse_subscription.take_accumulated();
+    let (merged_content_blocks, final_tool_calls) = if sse_blocks.len() > content_blocks.len() {
+        log::info!(
+            "OpenCode: using SSE accumulated blocks ({} blocks, {} tools) over POST response ({} blocks, {} tools)",
+            sse_blocks.len(), sse_tool_calls.len(),
+            content_blocks.len(), tool_calls.len()
+        );
+        (sse_blocks, sse_tool_calls)
+    } else {
+        (content_blocks, tool_calls)
+    };
+
+    // Merge consecutive thinking blocks into one (OpenCode sends separate
+    // reasoning parts that would otherwise render as many "Thinking" items).
+    let final_content_blocks = merge_consecutive_thinking(merged_content_blocks);
+
+    // Check for cancellation before emitting chat:done — if the user cancelled
+    // while we were parsing the response, suppress the done event to avoid stale UI updates.
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(OpenCodeResponse {
+            content,
+            session_id: opencode_session_id,
+            tool_calls: final_tool_calls,
+            content_blocks: final_content_blocks,
+            cancelled: true,
+            usage,
+        });
+    }
+
+    let _ = app.emit_all(
+        "chat:done",
+        &DoneEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            waiting_for_plan: execution_mode == Some("plan") && !content.is_empty(),
+        },
+    );
+
+    Ok(OpenCodeResponse {
+        content,
+        session_id: opencode_session_id,
+        tool_calls: final_tool_calls,
+        content_blocks: final_content_blocks,
+        cancelled: false,
+        usage,
+    })
+}
+
+/// Merge consecutive `ContentBlock::Thinking` entries into a single block.
+/// OpenCode emits separate reasoning parts (each with its own `part_id`),
+/// which would otherwise render as many individual "Thinking" items in the UI.
+fn merge_consecutive_thinking(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    let mut result: Vec<ContentBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if let ContentBlock::Thinking { thinking } = &block {
+            if let Some(ContentBlock::Thinking {
+                thinking: ref mut prev,
+            }) = result.last_mut()
+            {
+                prev.push_str(thinking);
+                continue;
+            }
+        }
+        result.push(block);
+    }
+    result
+}
+
+/// Execute a one-shot OpenCode call and return the text response.
+///
+/// Used by magic prompt commands (digest, commit, PR, review, etc.) when an
+/// OpenCode model is selected. Starts the managed server, creates a temporary
+/// session, sends the prompt, and returns the concatenated text output.
+///
+/// All HTTP work runs on a dedicated OS thread because `reqwest::blocking`
+/// panics when called inside a Tokio async runtime (which Tauri async commands use).
+pub fn execute_one_shot_opencode(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    json_schema: Option<&str>,
+    working_dir: Option<&std::path::Path>,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
+    // Own all data for the spawned thread
+    let app = app.clone();
+    let model = model.to_string();
+    let prompt = prompt.to_string();
+    let reasoning = reasoning_effort.map(|s| s.to_string());
+    // Parse the JSON schema string into a Value for the native `format` field
+    let schema_value: Option<serde_json::Value> = json_schema
+        .map(|s| serde_json::from_str(s))
+        .transpose()
+        .map_err(|e| format!("Invalid JSON schema: {e}"))?;
+    let dir = working_dir
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_string_lossy()
+        .to_string();
+
+    // Run ALL blocking work (including server startup with reqwest health checks)
+    // on a dedicated OS thread to avoid panicking reqwest::blocking inside
+    // the Tokio async runtime that Tauri async commands use.
+    let handle = std::thread::spawn(move || {
+        let base_url = crate::opencode_server::acquire(&app)?;
+        let result = one_shot_opencode_blocking(
+            &base_url,
+            &prompt,
+            &model,
+            schema_value.as_ref(),
+            &dir,
+            reasoning.as_deref(),
+        );
+        crate::opencode_server::release();
+        result
+    });
+
+    handle
+        .join()
+        .map_err(|_| "OpenCode one-shot thread panicked".to_string())?
+}
+
+/// Blocking HTTP logic for one-shot OpenCode calls (runs on a dedicated OS thread).
+fn one_shot_opencode_blocking(
+    base_url: &str,
+    prompt: &str,
+    model: &str,
+    json_schema: Option<&serde_json::Value>,
+    dir: &str,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("Failed to build OpenCode HTTP client: {e}"))?;
+
+    let query = [("directory", dir.to_string())];
+
+    // Create a temporary session
+    let create_url = format!("{base_url}/session");
+    let create_payload = serde_json::json!({ "title": "Jean one-shot" });
+    let create_resp = client
+        .post(&create_url)
+        .query(&query)
+        .json(&create_payload)
+        .send()
+        .map_err(|e| format!("Failed to create OpenCode session: {e}"))?;
+    if !create_resp.status().is_success() {
+        let status = create_resp.status();
+        let body = create_resp.text().unwrap_or_default();
+        return Err(format!(
+            "OpenCode session create failed: status={status}, body={body}"
+        ));
+    }
+    let created: serde_json::Value = create_resp
+        .json()
+        .map_err(|e| format!("Failed to parse OpenCode session response: {e}"))?;
+    let session_id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("OpenCode session create response missing id")?
+        .to_string();
+
+    // Resolve provider/model (same path as interactive chat — multi-slash
+    // custom/local models like ollama/hf.co/... must survive intact).
+    let selected_model = resolve_selected_model(&client, base_url, &query, Some(model))?;
+
+    // Send the prompt
+    let msg_url = format!("{base_url}/session/{session_id}/message");
+    let mut payload = serde_json::json!({
+        "agent": "plan",
+        "model": {
+            "providerID": selected_model.0,
+            "modelID": selected_model.1,
+        },
+        "parts": prepare_opencode_parts(prompt),
+    });
+
+    // Add reasoning effort if specified
+    if let Some(effort) = reasoning_effort {
+        payload["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+    }
+
+    // Use OpenCode's native structured output support via the `format` field
+    if let Some(schema) = json_schema {
+        payload["format"] = serde_json::json!({
+            "type": "json_schema",
+            "schema": schema,
+        });
+    }
+
+    // Retry once on connection-level errors (server temporarily unreachable).
+    let response = match client.post(&msg_url).query(&query).json(&payload).send() {
+        Ok(resp) => resp,
+        Err(e) if e.is_connect() || e.is_request() => {
+            log::warn!("OpenCode one-shot connection error, retrying in 2s: {e}");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            client
+                .post(&msg_url)
+                .query(&query)
+                .json(&payload)
+                .send()
+                .map_err(|e| format!("Failed to send OpenCode message: {e}"))?
+        }
+        Err(e) => return Err(format!("Failed to send OpenCode message: {e}")),
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(format!(
+            "OpenCode one-shot failed: status={status}, body={body}"
+        ));
+    }
+
+    let mut response_json: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse OpenCode response: {e}"))?;
+
+    // When using json_schema format, the structured output is in info.structured
+    if json_schema.is_some() {
+        if let Some(structured) = response_json.get("info").and_then(|i| i.get("structured")) {
+            if !structured.is_null() {
+                return Ok(structured.to_string());
+            }
+        }
+        // Check for structured output error
+        if let Some(error) = response_json.get("info").and_then(|i| i.get("error")) {
+            let error_name = error
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let error_msg = error
+                .get("data")
+                .and_then(|d| d.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Structured output failed");
+            let error = format!("OpenCode {error_name}: {error_msg}");
+            if should_retry_structured_output_as_text(&error) {
+                log::warn!(
+                    "OpenCode provider rejected structured output with thinking enabled; retrying as strict JSON text"
+                );
+                payload
+                    .as_object_mut()
+                    .expect("OpenCode payload is an object")
+                    .remove("format");
+                payload["parts"] = prepare_opencode_parts(&structured_output_text_prompt(
+                    prompt,
+                    &json_schema
+                        .expect("schema exists when handling structured output error")
+                        .to_string(),
+                ));
+                let fallback_response =
+                    client
+                        .post(&msg_url)
+                        .query(&query)
+                        .json(&payload)
+                        .send()
+                        .map_err(|e| format!("Failed to retry OpenCode message: {e}"))?;
+                if !fallback_response.status().is_success() {
+                    let status = fallback_response.status();
+                    let body = fallback_response.text().unwrap_or_default();
+                    return Err(format!(
+                        "OpenCode one-shot fallback failed: status={status}, body={body}"
+                    ));
+                }
+                response_json = fallback_response
+                    .json()
+                    .map_err(|e| format!("Failed to parse OpenCode fallback response: {e}"))?;
+            } else {
+                return Err(error);
+            }
+        }
+    }
+
+    // Fall back to concatenating text parts (for non-schema responses)
+    let parts = response_json
+        .get("parts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut content = String::new();
+    for part in parts {
+        if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str(text);
+            }
+        }
+    }
+
+    if content.trim().is_empty() {
+        return Err("Empty response from OpenCode".to_string());
+    }
+
+    // Strip markdown code fences if the model wrapped JSON in ```json ... ```
+    let trimmed = content.trim();
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim()
+        .strip_suffix("```")
+        .unwrap_or(trimmed)
+        .trim();
+
+    Ok(stripped.to_string())
+}
+
+/// Reply to a pending OpenCode permission request.
+///
+/// - v1: `POST /permission/{requestID}/reply` with `{ reply, message? }`
+/// - v2: `POST /api/session/{sessionID}/permission/{requestID}/reply`
+///
+/// `reply` is one of `"once"`, `"always"`, or `"reject"`. This unblocks the
+/// in-flight tool call that triggered the permission ask (issue #625).
+pub fn respond_opencode_permission(
+    app: &tauri::AppHandle,
+    working_dir: &str,
+    request_id: &str,
+    reply: &str,
+    message: Option<String>,
+    opencode_session_id: Option<&str>,
+    api_version: Option<&str>,
+) -> Result<(), String> {
+    let reply = reply.trim();
+    if !matches!(reply, "once" | "always" | "reject") {
+        return Err(format!(
+            "Invalid OpenCode permission reply '{reply}' (expected once|always|reject)"
+        ));
+    }
+    if request_id.trim().is_empty() {
+        return Err("OpenCode permission request_id is required".to_string());
+    }
+
+    let base_url = crate::opencode_server::acquire(app)?;
+
+    struct ServerReleaseGuard;
+    impl Drop for ServerReleaseGuard {
+        fn drop(&mut self) {
+            crate::opencode_server::release();
+        }
+    }
+    let _server_guard = ServerReleaseGuard;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let query = [("directory", working_dir.to_string())];
+    let mut body = serde_json::json!({ "reply": reply });
+    if let Some(msg) = message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        body["message"] = serde_json::Value::String(msg.to_string());
+    }
+
+    let is_v2 = api_version
+        .map(|v| v.eq_ignore_ascii_case("v2"))
+        .unwrap_or(false);
+    let reply_url = if is_v2 {
+        let session_id = opencode_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "OpenCode v2 permission reply requires opencode_session_id".to_string()
+            })?;
+        format!("{base_url}/api/session/{session_id}/permission/{request_id}/reply")
+    } else {
+        format!("{base_url}/permission/{request_id}/reply")
+    };
+
+    log::info!(
+        "OpenCode permission reply url={reply_url} request_id={request_id} reply={reply} dir={working_dir}"
+    );
+
+    let reply_resp = client
+        .post(&reply_url)
+        .query(&query)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Failed to reply to OpenCode permission: {e}"))?;
+
+    if !reply_resp.status().is_success() {
+        let status = reply_resp.status();
+        let resp_body = reply_resp.text().unwrap_or_default();
+        // If v2 endpoint is missing on older servers, fall back to v1 once.
+        if is_v2 && status.as_u16() == 404 {
+            log::warn!(
+                "OpenCode v2 permission reply 404; falling back to v1 endpoint request_id={request_id}"
+            );
+            let fallback_url = format!("{base_url}/permission/{request_id}/reply");
+            let fallback_resp = client
+                .post(&fallback_url)
+                .query(&query)
+                .json(&body)
+                .send()
+                .map_err(|e| {
+                    format!("Failed to reply to OpenCode permission (v1 fallback): {e}")
+                })?;
+            if !fallback_resp.status().is_success() {
+                let status = fallback_resp.status();
+                let resp_body = fallback_resp.text().unwrap_or_default();
+                return Err(format!(
+                    "OpenCode permission reply failed: status={status}, body={resp_body}"
+                ));
+            }
+        } else {
+            return Err(format!(
+                "OpenCode permission reply failed: status={status}, body={resp_body}"
+            ));
+        }
+    }
+
+    log::info!("OpenCode permission replied: request_id={request_id}, reply={reply}");
+    Ok(())
+}
+
+/// Answer a pending OpenCode question by calling the Question.reply API.
+///
+/// Finds the pending question matching the given tool_call_id (via the question's
+/// `tool.callID` field), then sends the reply. This unblocks the in-flight HTTP POST
+/// that is waiting for the question to be answered.
+pub fn answer_opencode_question(
+    app: &tauri::AppHandle,
+    working_dir: &str,
+    tool_call_id: &str,
+    answers: Vec<Vec<String>>,
+) -> Result<(), String> {
+    let base_url = crate::opencode_server::acquire(app)?;
+
+    // RAII guard: decrements server usage count on exit
+    struct ServerReleaseGuard;
+    impl Drop for ServerReleaseGuard {
+        fn drop(&mut self) {
+            crate::opencode_server::release();
+        }
+    }
+    let _server_guard = ServerReleaseGuard;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let query = [("directory", working_dir.to_string())];
+
+    // List pending questions to find the one matching our tool_call_id
+    let list_url = format!("{base_url}/question");
+    let list_resp = client
+        .get(&list_url)
+        .query(&query)
+        .send()
+        .map_err(|e| format!("Failed to list OpenCode questions: {e}"))?;
+
+    if !list_resp.status().is_success() {
+        let status = list_resp.status();
+        let body = list_resp.text().unwrap_or_default();
+        return Err(format!(
+            "OpenCode question list failed: status={status}, body={body}"
+        ));
+    }
+
+    let questions: serde_json::Value = list_resp
+        .json()
+        .map_err(|e| format!("Failed to parse OpenCode question list: {e}"))?;
+
+    // Find the question whose tool.callID matches our tool_call_id
+    let request_id = questions
+        .as_array()
+        .and_then(|qs| {
+            qs.iter().find_map(|q| {
+                let call_id = q
+                    .get("tool")
+                    .and_then(|t| t.get("callID"))
+                    .and_then(|v| v.as_str());
+                if call_id == Some(tool_call_id) {
+                    q.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| {
+            format!("No pending OpenCode question found for tool_call_id={tool_call_id}")
+        })?;
+
+    // Reply to the question
+    let reply_url = format!("{base_url}/question/{request_id}/reply");
+    let reply_body = serde_json::json!({ "answers": answers });
+
+    let reply_resp = client
+        .post(&reply_url)
+        .query(&query)
+        .json(&reply_body)
+        .send()
+        .map_err(|e| format!("Failed to reply to OpenCode question: {e}"))?;
+
+    if !reply_resp.status().is_success() {
+        let status = reply_resp.status();
+        let body = reply_resp.text().unwrap_or_default();
+        return Err(format!(
+            "OpenCode question reply failed: status={status}, body={body}"
+        ));
+    }
+
+    log::info!("OpenCode question replied: request_id={request_id}, tool_call_id={tool_call_id}");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes tests that mutate process-global `SHARED_SSE` maps so parallel
+    /// test threads cannot clear each other's subscribers/parents mid-assertion.
+    static SSE_TEST_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn turn_started_gate_returns_false_for_unknown_session_quickly() {
+        // No subscriber registered → gate must time out (not block forever) and
+        // report the turn never started, so the steer caller requeues instead.
+        let start = Instant::now();
+        let started = wait_opencode_turn_started("ses_does_not_exist", Duration::from_millis(120));
+        assert!(!started);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn mark_steered_is_noop_for_unknown_session() {
+        // Must not panic when the session has no active subscriber.
+        mark_opencode_steered("ses_does_not_exist");
+    }
+
+    #[test]
+    fn parse_provider_model_keeps_single_segment_after_opencode_prefix() {
+        assert_eq!(
+            parse_provider_model(Some("opencode/gpt-5.5")),
+            Some(("opencode".into(), "gpt-5.5".into()))
+        );
+    }
+
+    #[test]
+    fn parse_provider_model_strips_jean_prefix_for_wrapped_paths() {
+        assert_eq!(
+            parse_provider_model(Some("opencode/ollama/Qwen")),
+            Some(("ollama".into(), "Qwen".into()))
+        );
+    }
+
+    #[test]
+    fn parse_provider_model_handles_plain_provider_model() {
+        assert_eq!(
+            parse_provider_model(Some("anthropic/claude-sonnet-4-6")),
+            Some(("anthropic".into(), "claude-sonnet-4-6".into()))
+        );
+    }
+
+    #[test]
+    fn parse_provider_model_keeps_multi_slash_ollama_hf_model_id() {
+        // Local/custom providers often expose HF-style ids with many slashes and a
+        // quant tag. The first slash is the provider; the rest is modelID.
+        assert_eq!(
+            parse_provider_model(Some(
+                "ollama/hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M"
+            )),
+            Some((
+                "ollama".into(),
+                "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M".into()
+            ))
+        );
+        assert_eq!(
+            parse_provider_model(Some(
+                "opencode/ollama/hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M"
+            )),
+            Some((
+                "ollama".into(),
+                "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_provider_model_handles_openrouter_multi_segment_paths() {
+        assert_eq!(
+            parse_provider_model(Some("openrouter/anthropic/claude-3.5-haiku:free")),
+            Some((
+                "openrouter".into(),
+                "anthropic/claude-3.5-haiku:free".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn resolve_selected_model_preserves_explicit_provider_without_catalog_lookup() {
+        let client = reqwest::blocking::Client::new();
+        let query = Vec::new();
+
+        assert_eq!(
+            resolve_selected_model(&client, "http://127.0.0.1:1", &query, Some("custom/gpt-4"),),
+            Ok(("custom".to_string(), "gpt-4".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_opencode_error_picks_credits_message_from_response_body() {
+        let body = serde_json::json!({
+            "info": {
+                "error": {
+                    "name": "APIError",
+                    "data": {
+                        "message": "Insufficient balance. Manage your billing here: ...",
+                        "responseBody": "{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance.\"}}"
+                    }
+                }
+            },
+            "parts": []
+        });
+        assert_eq!(
+            extract_opencode_error_message(&body),
+            Some("Insufficient balance.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_opencode_error_falls_back_to_data_message() {
+        let body = serde_json::json!({
+            "info": {
+                "error": {
+                    "name": "ContextOverflowError",
+                    "data": {
+                        "message": "Session too large to compact"
+                    }
+                }
+            },
+            "parts": []
+        });
+        assert_eq!(
+            extract_opencode_error_message(&body),
+            Some("Session too large to compact".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_opencode_error_uses_top_level_message_for_custom_providers() {
+        let body = serde_json::json!({
+            "info": {
+                "error": {
+                    "name": "UnknownError",
+                    "message": "Connection refused to http://127.0.0.1:11434"
+                }
+            },
+            "parts": []
+        });
+        assert_eq!(
+            extract_opencode_error_message(&body),
+            Some("Connection refused to http://127.0.0.1:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn format_opencode_error_object_accepts_string_errors() {
+        assert_eq!(
+            format_opencode_error_object(&serde_json::json!("provider offline")),
+            Some("provider offline".to_string())
+        );
+    }
+
+    #[test]
+    fn format_opencode_error_object_uses_plain_response_body() {
+        let error = serde_json::json!({
+            "name": "APIError",
+            "data": {
+                "message": "request failed",
+                "responseBody": "model 'foo' not found",
+                "isRetryable": false
+            }
+        });
+        assert_eq!(
+            format_opencode_error_object(&error),
+            Some("model 'foo' not found".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_opencode_error_returns_none_when_no_error() {
+        let body = serde_json::json!({
+            "info": {},
+            "parts": [{"type": "text", "text": "hello"}]
+        });
+        assert_eq!(extract_opencode_error_message(&body), None);
+    }
+
+    #[test]
+    fn take_upstream_error_clears_stored_value() {
+        let err = Arc::new(Mutex::new(Some("boom".to_string())));
+        assert_eq!(take_upstream_error(&err), Some("boom".to_string()));
+        assert_eq!(take_upstream_error(&err), None);
+    }
+
+    #[test]
+    fn await_opencode_http_or_cancel_returns_none_when_cancelled() {
+        std::thread::spawn(|| {
+            let cancelled = Arc::new(AtomicBool::new(true));
+            let force_abort = Arc::new(AtomicBool::new(false));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let start = Instant::now();
+            let result = runtime.block_on(await_opencode_http_or_cancel(
+                std::future::pending::<()>(),
+                cancelled,
+                force_abort,
+                "opencode-session".to_string(),
+                "/tmp".to_string(),
+            ));
+
+            assert!(result.is_none());
+            assert!(start.elapsed() < Duration::from_millis(50));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn await_opencode_http_or_cancel_returns_none_on_force_abort() {
+        std::thread::spawn(|| {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let force_abort = Arc::new(AtomicBool::new(true));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let start = Instant::now();
+            let result = runtime.block_on(await_opencode_http_or_cancel(
+                std::future::pending::<()>(),
+                cancelled,
+                force_abort,
+                "opencode-session".to_string(),
+                "/tmp".to_string(),
+            ));
+
+            assert!(result.is_none());
+            assert!(start.elapsed() < Duration::from_millis(50));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_opencode_subscriber_maps_child_to_parent_root() {
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let upstream_error = Arc::new(Mutex::new(None));
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-1".into(),
+            worktree_id: "wt-1".into(),
+            run_id: "run-1".into(),
+            execution_mode: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error,
+            force_abort,
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+        let mut subscribers = HashMap::new();
+        subscribers.insert(
+            "ses_parent".to_string(),
+            SharedSseSubscriberEntry {
+                working_dir: "/tmp/project".into(),
+                handle,
+            },
+        );
+        let mut parents = HashMap::new();
+        parents.insert("ses_child".to_string(), "ses_parent".to_string());
+        parents.insert("ses_grandchild".to_string(), "ses_child".to_string());
+
+        let resolved =
+            resolve_opencode_subscriber(&subscribers, &parents, "ses_grandchild").unwrap();
+        assert_eq!(resolved.0, "ses_parent");
+
+        // A lineage that never reaches a registered subscriber resolves to None.
+        let mut orphan_parents = HashMap::new();
+        orphan_parents.insert("ses_orphan".to_string(), "ses_unsubscribed".to_string());
+        assert!(resolve_opencode_subscriber(&subscribers, &orphan_parents, "ses_orphan").is_none());
+
+        // Unknown session with no lineage at all is None.
+        assert!(
+            resolve_opencode_subscriber(&subscribers, &HashMap::new(), "ses_unknown").is_none()
+        );
+    }
+
+    #[test]
+    fn prune_session_parent_descendants_removes_full_closure() {
+        let mut parents = HashMap::new();
+        // Multi-level chain under the dropped root (the shape resolve tests use).
+        parents.insert("ses_child".to_string(), "ses_root".to_string());
+        parents.insert("ses_grandchild".to_string(), "ses_child".to_string());
+        parents.insert(
+            "ses_great_grandchild".to_string(),
+            "ses_grandchild".to_string(),
+        );
+        // Sibling branch under the same root.
+        parents.insert("ses_other_child".to_string(), "ses_root".to_string());
+        // Unrelated tree must survive.
+        parents.insert(
+            "ses_unrelated_child".to_string(),
+            "ses_other_root".to_string(),
+        );
+        parents.insert(
+            "ses_unrelated_grandchild".to_string(),
+            "ses_unrelated_child".to_string(),
+        );
+
+        let removed = prune_session_parent_descendants(&mut parents, "ses_root");
+
+        assert!(
+            !parents.contains_key("ses_child")
+                && !parents.contains_key("ses_grandchild")
+                && !parents.contains_key("ses_great_grandchild")
+                && !parents.contains_key("ses_other_child"),
+            "full descendant closure of ses_root must be removed, got {parents:?}"
+        );
+        assert!(
+            removed.contains("ses_root")
+                && removed.contains("ses_child")
+                && removed.contains("ses_grandchild")
+                && removed.contains("ses_great_grandchild")
+                && removed.contains("ses_other_child"),
+            "prune must report the full removed set, got {removed:?}"
+        );
+        assert_eq!(
+            parents.get("ses_unrelated_child").map(String::as_str),
+            Some("ses_other_root")
+        );
+        assert_eq!(
+            parents.get("ses_unrelated_grandchild").map(String::as_str),
+            Some("ses_unrelated_child")
+        );
+    }
+
+    #[test]
+    fn shared_sse_subscription_drop_prunes_multi_level_lineage() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        // Isolate global maps so this exercises Drop cleanup only.
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+
+        {
+            let mut parents =
+                lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+            parents.insert("ses_child".to_string(), "ses_drop_root".to_string());
+            parents.insert("ses_grandchild".to_string(), "ses_child".to_string());
+            parents.insert("ses_keep_child".to_string(), "ses_keep_root".to_string());
+        }
+        {
+            let mut dirs =
+                lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS");
+            dirs.insert("ses_drop_root".to_string(), "/tmp/root".into());
+            dirs.insert("ses_child".to_string(), "/tmp/child".into());
+            dirs.insert("ses_grandchild".to_string(), "/tmp/grand".into());
+            dirs.insert("ses_keep_child".to_string(), "/tmp/keep".into());
+        }
+
+        // Construct a subscription handle and drop it — Drop must prune the full
+        // descendant chain, not only direct children of the root.
+        let subscription = SharedSseSubscription {
+            opencode_session_id: "ses_drop_root".to_string(),
+            handle: Arc::new(Mutex::new(SharedSseSubscriber {
+                jean_session_id: "jean-drop".into(),
+                worktree_id: "wt-drop".into(),
+                run_id: "run-drop".into(),
+                execution_mode: None,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                streamed_any: Arc::new(AtomicBool::new(false)),
+                turn_started: Arc::new(AtomicBool::new(false)),
+                session_idle: Arc::new(AtomicBool::new(false)),
+                steered: Arc::new(AtomicBool::new(false)),
+                upstream_error: Arc::new(Mutex::new(None)),
+                force_abort: Arc::new(AtomicBool::new(false)),
+                tracked_parts: HashMap::new(),
+                accumulated_blocks: Vec::new(),
+                accumulated_tool_calls: Vec::new(),
+            })),
+        };
+        drop(subscription);
+
+        let parents = lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+        assert!(
+            !parents.contains_key("ses_child") && !parents.contains_key("ses_grandchild"),
+            "Drop must prune multi-level descendants, got {parents:?}"
+        );
+        assert_eq!(
+            parents.get("ses_keep_child").map(String::as_str),
+            Some("ses_keep_root"),
+            "unrelated lineage must remain"
+        );
+        drop(parents);
+
+        let dirs = lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS");
+        assert!(
+            !dirs.contains_key("ses_drop_root")
+                && !dirs.contains_key("ses_child")
+                && !dirs.contains_key("ses_grandchild"),
+            "Drop must prune session directories for the root closure, got {dirs:?}"
+        );
+        assert_eq!(
+            dirs.get("ses_keep_child").map(String::as_str),
+            Some("/tmp/keep"),
+            "unrelated session directories must remain"
+        );
+        drop(dirs);
+
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+    }
+
+    #[test]
+    fn child_session_error_surfaces_on_parent_subscriber() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        let tmp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let upstream_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-parent".into(),
+            worktree_id: "wt-parent".into(),
+            run_id: "run-parent".into(),
+            execution_mode: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error: upstream_error.clone(),
+            force_abort: force_abort.clone(),
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+
+        // Isolate global maps for this test.
+        {
+            let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+            subscribers.clear();
+            subscribers.insert(
+                "ses_parent".to_string(),
+                SharedSseSubscriberEntry {
+                    working_dir: "/tmp/wt".into(),
+                    handle,
+                },
+            );
+        }
+        {
+            let mut parents =
+                lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+            parents.clear();
+            parents.insert("ses_child".to_string(), "ses_parent".to_string());
+        }
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+
+        let error = serde_json::json!({
+            "name": "APIError",
+            "data": { "message": "5-hour usage limit reached." }
+        });
+        let surfaced =
+            surface_opencode_sse_error(&app, &SHARED_SSE.subscribers, "ses_child", &error);
+        assert!(surfaced, "child error must surface via parent subscriber");
+        assert!(
+            force_abort.load(Ordering::SeqCst),
+            "must force-abort parent POST"
+        );
+        assert_eq!(
+            take_upstream_error(&upstream_error).as_deref(),
+            Some("5-hour usage limit reached.")
+        );
+
+        // Cleanup global state.
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+    }
+
+    #[test]
+    fn process_shared_sse_records_parent_and_surfaces_child_session_error() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        let tmp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let upstream_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-2".into(),
+            worktree_id: "wt-2".into(),
+            run_id: "run-2".into(),
+            execution_mode: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error: upstream_error.clone(),
+            force_abort: force_abort.clone(),
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+
+        {
+            let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+            subscribers.clear();
+            subscribers.insert(
+                "ses_root".to_string(),
+                SharedSseSubscriberEntry {
+                    working_dir: "/tmp/proj".into(),
+                    handle,
+                },
+            );
+        }
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+
+        // session.created for a subagent child rooted outside the primary worktree.
+        // Envelope `directory` is the child session's own working directory.
+        let created = r#"{"directory":"/tmp/child-work","payload":{"type":"session.created","properties":{"sessionID":"ses_sub","info":{"id":"ses_sub","parentID":"ses_root","title":"explore"}}}}"#;
+        assert_eq!(
+            process_shared_sse_event(&app, created, &SHARED_SSE.subscribers),
+            Some(false)
+        );
+        assert_eq!(
+            lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS")
+                .get("ses_sub")
+                .map(String::as_str),
+            Some("ses_root")
+        );
+        assert_eq!(
+            lookup_opencode_session_directory("ses_sub").as_deref(),
+            Some("/tmp/child-work"),
+            "child session must retain its own directory for abort"
+        );
+
+        // session.error on the child must fail the parent run.
+        let err_event = r#"{"directory":"/tmp/child-work","payload":{"type":"session.error","properties":{"sessionID":"ses_sub","error":{"name":"APIError","data":{"message":"provider offline"}}}}}"#;
+        assert_eq!(
+            process_shared_sse_event(&app, err_event, &SHARED_SSE.subscribers),
+            Some(true)
+        );
+        assert!(force_abort.load(Ordering::SeqCst));
+        assert_eq!(
+            take_upstream_error(&upstream_error).as_deref(),
+            Some("provider offline")
+        );
+        // After the error path, the child directory is still the child's own
+        // path (not the root subscriber's /tmp/proj).
+        assert_eq!(
+            lookup_opencode_session_directory("ses_sub").as_deref(),
+            Some("/tmp/child-work")
+        );
+
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+    }
+
+    #[test]
+    fn post_opencode_message_times_out_once_without_retry() {
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = hits.clone();
+
+        // Accept connections but never complete the HTTP response so the client times out.
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let mut connections = Vec::new();
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        hits_bg.fetch_add(1, Ordering::SeqCst);
+                        connections.push(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to accept test connection: {error}"),
+                }
+            }
+        });
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let result = post_opencode_message_cancellable_with_timeout(
+            format!("http://{addr}/session/ses_test/message"),
+            "/tmp".into(),
+            serde_json::json!({"parts": []}),
+            cancelled,
+            force_abort,
+            "jean-test".into(),
+            "ses_test".into(),
+            Duration::from_millis(300),
+        );
+
+        assert!(result.is_err(), "expected timeout error, got {result:?}");
+        // Give the accept thread a brief window in case a second attempt was made.
+        std::thread::sleep(Duration::from_millis(400));
+        server.join().unwrap();
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "timed-out message POST must be attempted exactly once"
+        );
+    }
+
+    #[test]
+    fn parse_opencode_permission_request_normalizes_v1_and_v2() {
+        let v1 = serde_json::json!({
+            "id": "per_1",
+            "sessionID": "ses_a",
+            "permission": "external_directory",
+            "patterns": ["/tmp/**"],
+            "always": ["/tmp/**"],
+            "metadata": { "filepath": "/tmp/x" },
+            "tool": { "messageID": "msg_1", "callID": "call_1" }
+        });
+        let req = parse_opencode_permission_request("permission.asked", &v1, Some("/proj".into()))
+            .expect("v1 parse");
+        assert_eq!(req.request_id, "per_1");
+        assert_eq!(req.opencode_session_id, "ses_a");
+        assert_eq!(req.permission, "external_directory");
+        assert_eq!(req.patterns, vec!["/tmp/**"]);
+        assert_eq!(req.always, vec!["/tmp/**"]);
+        assert_eq!(req.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(req.api_version, "v1");
+        assert_eq!(req.working_dir.as_deref(), Some("/proj"));
+
+        let v2 = serde_json::json!({
+            "id": "per_2",
+            "sessionID": "ses_b",
+            "action": "external_directory",
+            "resources": ["/var/tmp/*"],
+            "save": ["/var/tmp/*"],
+            "source": { "type": "tool", "messageID": "m2", "callID": "c2" }
+        });
+        let req =
+            parse_opencode_permission_request("permission.v2.asked", &v2, Some("/proj".into()))
+                .expect("v2 parse");
+        assert_eq!(req.permission, "external_directory");
+        assert_eq!(req.patterns, vec!["/var/tmp/*"]);
+        assert_eq!(req.always, vec!["/var/tmp/*"]);
+        assert_eq!(req.tool_call_id.as_deref(), Some("c2"));
+        assert_eq!(req.api_version, "v2");
+    }
+
+    #[test]
+    fn process_shared_sse_emits_permission_asked_for_primary_session() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        let tmp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-perm".into(),
+            worktree_id: "wt-perm".into(),
+            run_id: "run-perm".into(),
+            execution_mode: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error: Arc::new(Mutex::new(None)),
+            force_abort: Arc::new(AtomicBool::new(false)),
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+
+        {
+            let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+            subscribers.clear();
+            subscribers.insert(
+                "ses_perm".to_string(),
+                SharedSseSubscriberEntry {
+                    working_dir: "/tmp/proj".into(),
+                    handle,
+                },
+            );
+        }
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+
+        let event = r#"{"directory":"/tmp/proj","payload":{"type":"permission.asked","properties":{"id":"per_x","sessionID":"ses_perm","permission":"external_directory","patterns":["/tmp/**"],"always":["/tmp/**"],"metadata":{},"tool":{"messageID":"m","callID":"c"}}}}"#;
+        // Returns Some(true) so the SSE loop counts the event as emitted.
+        assert_eq!(
+            process_shared_sse_event(&app, event, &SHARED_SSE.subscribers),
+            Some(true)
+        );
+
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+        lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+    }
+
+    #[test]
+    fn sse_provider_error_unblocks_force_abort_distinct_from_user_cancel() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        let tmp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let upstream_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-3".into(),
+            worktree_id: "wt-3".into(),
+            run_id: "run-3".into(),
+            execution_mode: None,
+            cancelled: cancelled.clone(),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error: upstream_error.clone(),
+            force_abort: force_abort.clone(),
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+
+        {
+            let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+            subscribers.clear();
+            subscribers.insert(
+                "ses_primary".to_string(),
+                SharedSseSubscriberEntry {
+                    working_dir: "/tmp/x".into(),
+                    handle,
+                },
+            );
+        }
+        // Clear lineage left by sibling tests so session resolution stays deterministic.
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+
+        let err_event = r#"{"type":"session.error","properties":{"sessionID":"ses_primary","error":"quota exceeded"}}"#;
+        assert_eq!(
+            process_shared_sse_event(&app, err_event, &SHARED_SSE.subscribers),
+            Some(true)
+        );
+        assert!(
+            force_abort.load(Ordering::SeqCst),
+            "provider error must set force_abort"
+        );
+        assert!(
+            !cancelled.load(Ordering::SeqCst),
+            "provider error must not look like user cancellation"
+        );
+        assert_eq!(
+            take_upstream_error(&upstream_error).as_deref(),
+            Some("quota exceeded")
+        );
+
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
+    }
+}

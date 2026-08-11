@@ -4,8 +4,65 @@ import { Zap } from 'lucide-react'
 import { fireEvent, render, screen, within } from '@/test/test-utils'
 import { MobileSettingsMenu } from './MobileSettingsMenu'
 import * as platform from '@/lib/platform'
+import type * as ProjectsService from '@/services/projects'
+import type * as GitHubService from '@/services/github'
+
+interface PortInfo {
+  port: number
+  label: string
+  host?: string | null
+}
+
+const { usePortsMock, useWorktreeMock } = vi.hoisted(() => {
+  const usePortsMock = vi.fn(() => ({ data: [] as PortInfo[] }))
+  const useWorktreeMock = vi.fn(() => ({
+    data: {
+      id: 'worktree-1',
+      path: '/repo/worktree',
+      branch: 'feature',
+      project_id: 'project-1',
+      base_branch: 'main',
+    },
+  }))
+  return { usePortsMock, useWorktreeMock }
+})
+
+vi.mock('@/services/projects', async importOriginal => {
+  const actual = await importOriginal<typeof ProjectsService>()
+  return {
+    ...actual,
+    useWorktree: useWorktreeMock as unknown as typeof actual.useWorktree,
+    useProjects: () => ({
+      data: [{ id: 'project-1', path: '/repo', name: 'app', default_branch: 'main' }],
+    }),
+    usePorts: usePortsMock as unknown as typeof actual.usePorts,
+  }
+})
+
+vi.mock('@/services/github', async importOriginal => {
+  const actual = await importOriginal<typeof GitHubService>()
+  return {
+    ...actual,
+    useGitHubPRs: () => ({ data: [] }),
+  }
+})
 
 beforeEach(() => {
+  usePortsMock.mockReturnValue({ data: [] })
+  useWorktreeMock.mockReturnValue({
+    data: {
+      id: 'worktree-1',
+      path: '/repo/worktree',
+      branch: 'feature',
+      project_id: 'project-1',
+      base_branch: 'main',
+    },
+  })
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: 1280,
+  })
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation(() => ({
@@ -29,6 +86,7 @@ beforeEach(() => {
 const baseProps = {
   isDisabled: false,
   selectedBackend: 'claude' as const,
+  selectedModel: 'claude-sonnet-4-6',
   selectedProvider: null,
   backendModelLabel: 'Claude · Sonnet',
   backendModelLabelText: 'Claude · Sonnet',
@@ -109,7 +167,9 @@ describe('MobileSettingsMenu', () => {
     await user.click(screen.getByRole('button', { name: /settings/i }))
 
     const mcpItem = screen.getByText('MCP').closest('[role="menuitem"]')
+    const mcpIcon = mcpItem?.querySelector('svg.lucide-plug')
     expect(mcpItem).toHaveAttribute('aria-disabled', 'true')
+    expect(mcpIcon).not.toHaveClass('mr-2')
     expect(mcpItem?.querySelector('svg.lucide-chevron-right')).toBeNull()
     expect(screen.getByText('None')).toBeInTheDocument()
   })
@@ -362,6 +422,59 @@ describe('MobileSettingsMenu', () => {
     expect(screen.queryByText('Linked')).not.toBeInTheDocument()
   })
 
+  it('shows Open section with GitHub and jean.json port URLs', async () => {
+    const user = userEvent.setup()
+    const openSpy = vi
+      .spyOn(platform, 'openExternal')
+      .mockImplementation(() => {
+        return undefined as unknown as ReturnType<typeof platform.openExternal>
+      })
+    usePortsMock.mockReturnValue({
+      data: [
+        { port: 1420, label: 'App', host: 'localhost' },
+        { port: 3000, label: 'API', host: null },
+      ],
+    })
+
+    render(
+      <MobileSettingsMenu {...baseProps} worktreeId="worktree-1" />
+    )
+
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+
+    expect(screen.getByText('Open')).toBeInTheDocument()
+    expect(screen.getByText('GitHub')).toBeInTheDocument()
+    expect(screen.getByText('App (localhost:1420)')).toBeInTheDocument()
+    expect(screen.getByText('API (localhost:3000)')).toBeInTheDocument()
+
+    // Open section sits after Run/Terminal actions and before Linked
+    const githubItem = screen.getByText('GitHub').closest('[role="menuitem"]')
+    const portItem = screen
+      .getByText('App (localhost:1420)')
+      .closest('[role="menuitem"]')
+    expect(githubItem?.querySelector('svg.lucide-external-link')).toBeTruthy()
+    expect(portItem?.querySelector('svg.lucide-globe')).toBeTruthy()
+    expect(portItem?.querySelector('svg.lucide-external-link')).toBeTruthy()
+
+    await user.click(screen.getByText('App (localhost:1420)'))
+    expect(openSpy).toHaveBeenCalledWith('http://localhost:1420')
+
+    openSpy.mockRestore()
+  })
+
+  it('hides Open section when no worktree and no ports', async () => {
+    const user = userEvent.setup()
+    usePortsMock.mockReturnValue({ data: [] })
+    useWorktreeMock.mockReturnValue({ data: null as never })
+
+    render(<MobileSettingsMenu {...baseProps} />)
+
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+
+    expect(screen.queryByText('Open')).not.toBeInTheDocument()
+    expect(screen.queryByText('GitHub')).not.toBeInTheDocument()
+  })
+
   it('hides reasoning control for Command Code in mobile settings', async () => {
     const user = userEvent.setup()
 
@@ -518,5 +631,133 @@ describe('MobileSettingsMenu', () => {
     await user.click(screen.getByText('Effort'))
 
     expect(screen.getAllByText('Ultracode').length).toBeGreaterThan(0)
+  })
+
+  it('keeps the gear menu open when selecting an effort from the submenu', async () => {
+    const user = userEvent.setup()
+    const handleEffortLevelChange = vi.fn()
+    // Force non-mobile so Effort uses the submenu (not bottom sheet).
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1280,
+    })
+
+    render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        handleEffortLevelChange={handleEffortLevelChange}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+    await user.click(screen.getByText('Effort'))
+    const highItem = screen
+      .getAllByRole('menuitemradio', { name: /high/i })
+      .find(item => item.textContent?.startsWith('High'))
+    expect(highItem).toBeDefined()
+    if (!highItem) return
+    fireEvent.click(highItem)
+
+    expect(handleEffortLevelChange).toHaveBeenCalledWith('high')
+    // Menu should remain open so further settings can be changed without reopening.
+    expect(screen.getByText('Model')).toBeInTheDocument()
+    expect(screen.getByText('Effort')).toBeInTheDocument()
+  })
+
+  it('auto-opens the effort sheet when openReasoningSheetSignal bumps', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    expect(
+      screen.queryByRole('dialog', { name: 'Select effort' })
+    ).not.toBeInTheDocument()
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      await screen.findByRole('dialog', { name: 'Select effort' })
+    ).toBeInTheDocument()
+  })
+
+  it('auto-opens the thinking sheet for non-effort backends when signal bumps', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking={false}
+        isCodex={false}
+        selectedBackend="claude"
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking={false}
+        isCodex={false}
+        selectedBackend="claude"
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      await screen.findByRole('dialog', { name: 'Select thinking' })
+    ).toBeInTheDocument()
+  })
+
+  it('does not open a reasoning sheet when signal bumps for commandcode', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        selectedBackend="commandcode"
+        useAdaptiveThinking={false}
+        isCodex={false}
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        selectedBackend="commandcode"
+        useAdaptiveThinking={false}
+        isCodex={false}
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      screen.queryByRole('dialog', { name: 'Select effort' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('dialog', { name: 'Select thinking' })
+    ).not.toBeInTheDocument()
   })
 })

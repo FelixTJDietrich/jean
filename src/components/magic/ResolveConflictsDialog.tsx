@@ -23,6 +23,8 @@ import { useWorktree, useProjects } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
+import { useAvailableKimiModels } from '@/services/kimi-cli'
+import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import {
   type CliBackend,
@@ -34,6 +36,7 @@ import {
   CODEX_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
+  ANTIGRAVITY_MODEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import { formatOpencodeModelLabel } from '@/components/chat/toolbar/toolbar-utils'
 import { BackendLabel } from '@/components/ui/backend-label'
@@ -95,6 +98,12 @@ export function ResolveConflictsDialog({
   const { data: availableGrokModels } = useAvailableGrokModels({
     enabled: installedBackends.includes('grok'),
   })
+  const { data: availableKimiModels } = useAvailableKimiModels({
+    enabled: installedBackends.includes('kimi'),
+  })
+  const { data: availableAntigravityModels } = useAvailableAntigravityModels({
+    enabled: installedBackends.includes('antigravity'),
+  })
   const { data: modelCatalog } = useModelCatalog()
 
   const [resolveSelectionMode, setResolveSelectionMode] =
@@ -122,6 +131,24 @@ export function ResolveConflictsDialog({
       : GROK_MODEL_OPTIONS
     return models
   }, [availableGrokModels])
+  const kimiModelOptions = useMemo(() => {
+    if (!availableKimiModels?.length) {
+      return [{ value: 'kimi/default', label: 'Configured default' }]
+    }
+    return availableKimiModels.map(model => ({
+      value: `kimi/${model.id}`,
+      label: model.label,
+    }))
+  }, [availableKimiModels])
+  const antigravityModelOptions = useMemo(() => {
+    if (!availableAntigravityModels?.length) {
+      return ANTIGRAVITY_MODEL_OPTIONS
+    }
+    return availableAntigravityModels.map(model => ({
+      value: `antigravity/${model.id}`,
+      label: model.label || model.id,
+    }))
+  }, [availableAntigravityModels])
 
   const claudeModelOptions = useMemo(
     () =>
@@ -144,18 +171,23 @@ export function ResolveConflictsDialog({
     const model =
       preferences?.magic_prompt_models?.[RESOLVE_CONFLICTS_MODEL_KEY] ??
       (backend === 'codex'
-        ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+        ? (preferences?.selected_codex_model ?? 'gpt-5.6-sol')
         : backend === 'opencode'
-          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
+          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.6-sol')
           : backend === 'cursor'
             ? (preferences?.selected_cursor_model ?? 'cursor/auto')
             : backend === 'commandcode'
               ? (preferences?.selected_commandcode_model ??
                 'commandcode/default')
-              : backend === 'grok'
-                ? (preferences?.selected_grok_model ??
-                  'grok/grok-composer-2.5-fast')
-                : (preferences?.selected_model ?? 'sonnet'))
+              : backend === 'kimi'
+                ? (preferences?.selected_kimi_model ?? 'kimi/default')
+                : backend === 'grok'
+                  ? (preferences?.selected_grok_model ??
+                    'grok/grok-4.5')
+                  : backend === 'antigravity'
+                    ? (preferences?.selected_antigravity_model ??
+                      'antigravity/auto')
+                    : (preferences?.selected_model ?? 'sonnet'))
     const provider = resolveMagicPromptProvider(
       preferences?.magic_prompt_providers,
       RESOLVE_CONFLICTS_PROVIDER_KEY,
@@ -220,11 +252,21 @@ export function ResolveConflictsDialog({
           return opencodeModelOptions
         case 'grok':
           return grokModelOptions
+        case 'kimi':
+          return kimiModelOptions
+        case 'antigravity':
+          return antigravityModelOptions
         default:
           return resolveClaudeModelOptions
       }
     },
-    [grokModelOptions, opencodeModelOptions, resolveClaudeModelOptions]
+    [
+      antigravityModelOptions,
+      grokModelOptions,
+      kimiModelOptions,
+      opencodeModelOptions,
+      resolveClaudeModelOptions,
+    ]
   )
 
   const customResolveModelOptions = useMemo(
@@ -252,6 +294,10 @@ export function ResolveConflictsDialog({
         return 'Cursor'
       case 'grok':
         return 'Grok'
+      case 'kimi':
+        return 'Kimi Code'
+      case 'antigravity':
+        return 'Antigravity'
       default:
         return 'Claude'
     }
@@ -306,19 +352,7 @@ export function ResolveConflictsDialog({
     setCustomResolveModel(nextModel)
   }, [getResolveModelOptions, installedBackends, resolveDefaults])
 
-  useEffect(() => {
-    if (!customResolveModelOptions.length) return
-    if (
-      !customResolveModelOptions.some(
-        option => option.value === customResolveModel
-      )
-    ) {
-      const firstOption = customResolveModelOptions[0]
-      if (firstOption) {
-        setCustomResolveModel(firstOption.value)
-      }
-    }
-  }, [customResolveModel, customResolveModelOptions])
+  // Invalid customResolveModel is handled by effectiveCustomResolveModel
 
   const handleConfirm = useCallback(() => {
     const override =
@@ -433,9 +467,14 @@ export function ResolveConflictsDialog({
                       size="sm"
                       hideIcon={
                         installedBackends.filter(backend =>
-                          ['claude', 'codex', 'opencode', 'grok'].includes(
-                            backend
-                          )
+                          [
+                            'claude',
+                            'codex',
+                            'opencode',
+                            'grok',
+                            'kimi',
+                            'antigravity',
+                          ].includes(backend)
                         ).length <= 1
                       }
                       onClick={() => setResolveSelectionMode('custom')}
@@ -455,6 +494,16 @@ export function ResolveConflictsDialog({
                       {installedBackends.includes('grok') && (
                         <SelectItem value="grok">
                           <BackendLabel backend="grok" />
+                        </SelectItem>
+                      )}
+                      {installedBackends.includes('kimi') && (
+                        <SelectItem value="kimi">
+                          <BackendLabel backend="kimi" />
+                        </SelectItem>
+                      )}
+                      {installedBackends.includes('antigravity') && (
+                        <SelectItem value="antigravity">
+                          <BackendLabel backend="antigravity" />
                         </SelectItem>
                       )}
                     </SelectContent>

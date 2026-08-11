@@ -2,6 +2,78 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 describe('GeneralPane settings structure', () => {
+  it('uses the Kimi-style header and cards for every AI backend pane', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+
+    for (const backend of [
+      'claude',
+      'codex',
+      'opencode',
+      'cursor',
+      'pi',
+      'commandcode',
+      'grok',
+      'kimi',
+    ]) {
+      expect(source).toContain(`${backend}: {`)
+    }
+    expect(source).toContain('<BackendPaneHeader')
+
+    for (const anchorId of [
+      'pref-claude-section-cli',
+      'pref-claude-section-settings',
+      'pref-codex-section-cli',
+      'pref-codex-section-settings',
+      'pref-opencode-section-cli',
+      'pref-opencode-section-settings',
+      'pref-cursor-section-cli',
+      'pref-cursor-section-settings',
+      'pref-pi-section-cli',
+      'pref-pi-section-settings',
+      'pref-commandcode-section-cli',
+      'pref-commandcode-section-settings',
+      'pref-grok-section-cli',
+      'pref-grok-section-settings',
+      'pref-kimi-section-cli',
+      'pref-kimi-section-settings',
+    ]) {
+      const anchorIndex = source.indexOf(`anchorId="${anchorId}"`)
+      expect(anchorIndex, anchorId).toBeGreaterThan(-1)
+      expect(source.slice(anchorIndex, anchorIndex + 120)).toContain(
+        'variant="card"'
+      )
+    }
+  })
+
+  it('places managed uninstall actions below the full-width source cards', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+
+    expect(source.match(/className="w-full space-y-3"/g)).toHaveLength(7)
+    expect(source.match(/<BackendCliSourceCards/g)).toHaveLength(7)
+  })
+
+  it('renders the Kimi auto-steer toggle inside Kimi settings', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const kimiSection = source.slice(
+      source.indexOf("{scope === 'kimi' && ("),
+      source.indexOf('{isGeneralScope && (')
+    )
+
+    expect(kimiSection).toContain('kimi_auto_steer_enabled')
+    expect(kimiSection).toContain('handleKimiAutoSteerToggle')
+    expect(kimiSection).toContain('pref-kimi-section-cli')
+    expect(kimiSection).toContain('pref-kimi-section-settings')
+  })
+
   it('renders the OpenCode auto-steer toggle inside OpenCode settings', () => {
     const source = readFileSync(
       'src/components/preferences/panes/GeneralPane.tsx',
@@ -30,6 +102,29 @@ describe('GeneralPane settings structure', () => {
     expect(grokSection).not.toContain('grokCliQueryKeys.auth()')
   })
 
+  // Regression #627/#649: default backend picker must list installed CLIs even
+  // when auth probes return false (login is gated at send time instead).
+  it('filters default backend options by install status only, not auth', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+
+    expect(source).toContain('const claudeInstalled = !!cliStatus?.installed')
+    expect(source).toContain('const codexInstalled = !!codexStatus?.installed')
+    expect(source).toContain(
+      'const opencodeInstalled = !!opencodeStatus?.installed'
+    )
+    expect(source).toContain(
+      'const antigravityInstalled = !!antigravityStatus?.installed'
+    )
+    expect(source).not.toMatch(
+      /claudeInstalled\s*=\s*!!cliStatus\?\.installed\s*&&\s*!!claudeAuth\?\.authenticated/
+    )
+    expect(source).not.toContain('claudeUsable')
+    expect(source).toContain('installedBackendOptions.map(option =>')
+  })
+
   it('renders build and yolo reasoning overrides from model capabilities', () => {
     const source = readFileSync(
       'src/components/preferences/panes/GeneralPane.tsx',
@@ -43,5 +138,101 @@ describe('GeneralPane settings structure', () => {
     expect(executionOverrides).toContain('buildReasoning.levels.map')
     expect(executionOverrides).toContain('yoloReasoning.levels.map')
     expect(executionOverrides).not.toContain('? codexReasoningOptions')
+  })
+
+  it('uses Grok models for build and yolo overrides when Grok is selected', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const executionOverrides = source.slice(
+      source.indexOf('Build execution'),
+      source.indexOf('AI Language')
+    )
+
+    expect(
+      executionOverrides.match(/effective(?:Build|Yolo)Backend === 'grok'/g)
+    ).toHaveLength(2)
+    expect(executionOverrides.match(/\? grokModelOptions/g)).toHaveLength(2)
+  })
+
+  // Regression #505: shared patchPreferences.isPending made the AI Language
+  // Save button spin when model defaults (or any other General field) saved.
+  it('scopes AI Language save loading to its own preferences mutation', () => {
+    const generalSource = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const fieldSource = readFileSync(
+      'src/components/preferences/panes/AiLanguageField.tsx',
+      'utf8'
+    )
+
+    // Field lives in its own module with an independent mutation instance
+    expect(generalSource).toContain(
+      "import { AiLanguageField } from './AiLanguageField'"
+    )
+    expect(generalSource).toContain(
+      '<AiLanguageField preferences={preferences} />'
+    )
+    expect(generalSource).not.toMatch(
+      /<AiLanguageField[\s\S]*?patchPreferences=/
+    )
+    expect(fieldSource).toContain('usePatchPreferences()')
+    expect(fieldSource).toContain('isAiLanguageSavePending')
+    expect(fieldSource).toContain('disabled={!hasChanges || isSaving}')
+    expect(fieldSource).not.toContain(
+      'disabled={!hasChanges || patchPreferences.isPending}'
+    )
+  })
+
+  it('renders the app version and build commit at the bottom of general settings', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const versionSectionIndex = source.indexOf('title="Version"')
+    const generalSettingsEnd = source.indexOf(
+      '\n        </>\n      )}',
+      versionSectionIndex
+    )
+
+    expect(source).toContain(
+      "import { CLIENT_BUILD_INFO } from '@/lib/build-info'"
+    )
+    expect(versionSectionIndex).toBeGreaterThan(-1)
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'CLIENT_BUILD_INFO.appVersion'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      "label={activeRemoteConnection ? 'Jean Client' : 'Jean'}"
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'label="Jean Server"'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'remoteServerVersion'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'CLIENT_BUILD_INFO.gitSha'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'Source commit used for this build'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'openExternal('
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      '`https://github.com/coollabsio/jean/commit/${CLIENT_BUILD_INFO.gitSha}`'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'CLIENT_BUILD_INFO.builtAt'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).toContain(
+      'toLocaleString()'
+    )
+    expect(source.slice(versionSectionIndex, generalSettingsEnd)).not.toContain(
+      '<SettingsSection'
+    )
   })
 })

@@ -21,9 +21,9 @@ import type {
   ClaudeAccountsState,
 } from '@/types/claude-cli'
 
-import { hasBackend } from '@/lib/environment'
+import { hasBackendTransport } from '@/lib/environment'
 
-const isTauri = hasBackend
+const isTauri = hasBackendTransport
 const USAGE_REFRESH_MS = 1000 * 60 * 5
 
 // Query keys for Claude CLI.
@@ -314,6 +314,10 @@ export function useInstallProgress(): [InstallProgress | null, () => void] {
 /**
  * Combined hook for CLI setup flow
  */
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_claude_cli_version_exists', { version })
+}
+
 export function useClaudeCliSetup() {
   const status = useClaudeCliStatus()
   const versions = useAvailableCliVersions()
@@ -350,8 +354,6 @@ export function useClaudeCliSetup() {
     })
   }
 
-  const checkManualVersion = (version: string) =>
-    invoke<boolean>('check_claude_cli_version_exists', { version })
 
   return {
     status: status.data,

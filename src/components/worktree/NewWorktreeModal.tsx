@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getModifierSymbol } from '@/lib/platform'
 import { useIsMobile } from '@/hooks/use-mobile'
-import { Zap, CircleDot, GitPullRequest, Shield, GitBranch } from 'lucide-react'
+import {
+  Zap,
+  CircleDot,
+  GitPullRequest,
+  Shield,
+  GitBranch,
+  Bug,
+} from 'lucide-react'
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import type { LucideIcon } from 'lucide-react'
 import { useGhLogin } from '@/hooks/useGhLogin'
@@ -22,6 +29,7 @@ import { GitHubPRsTab } from './GitHubPRsTab'
 import { SecurityAlertsTab } from './SecurityAlertsTab'
 import { BranchesTab } from './BranchesTab'
 import { LinearIssuesTab } from './LinearIssuesTab'
+import { SentryIssuesTab } from './SentryIssuesTab'
 import { IssuePreviewModal } from './IssuePreviewModal'
 
 export type TabId =
@@ -31,6 +39,7 @@ export type TabId =
   | 'security'
   | 'branches'
   | 'linear'
+  | 'sentry'
 
 export interface Tab {
   id: TabId
@@ -47,6 +56,7 @@ export const TABS: Tab[] = [
   { id: 'security', label: 'Security', key: '4', icon: Shield },
   { id: 'branches', label: 'Branches', key: '5', icon: GitBranch },
   { id: 'linear', label: 'Linear', key: '6', icon: LinearIcon },
+  { id: 'sentry', label: 'Sentry', key: '7', icon: Bug },
 ]
 
 export function NewWorktreeModal() {
@@ -68,10 +78,17 @@ export function NewWorktreeModal() {
   // Track preview-was-open across the same event cycle (ref survives after state clears)
   const previewOpenRef = useRef(false)
 
+  // Tab changes also reset list selection/search (avoid effect chain on activeTab)
+  const handleTabChange = useCallback((tab: TabId) => {
+    setActiveTab(tab)
+    setSelectedItemIndex(0)
+    setSearchQuery('')
+  }, [])
+
   // Hooks
   const data = useNewWorktreeData(searchQuery, includeClosed)
   const handlers = useNewWorktreeHandlers(data, {
-    setActiveTab,
+    setActiveTab: handleTabChange,
     setSearchQuery,
     setSelectedItemIndex,
     setIncludeClosed,
@@ -98,9 +115,18 @@ export function NewWorktreeModal() {
     setPreviewItem({ type: 'advisory', number: 0, ghsaId: advisory.ghsaId })
   }
 
+  // With several remotes the quick actions are per-remote, so the "N" shortcut
+  // targets the first one (origin) instead of the project default branch.
+  const defaultBranch = data.selectedProject?.default_branch
+  const primaryRemote = data.remotes?.[0]?.name
+  const quickCreateBase =
+    defaultBranch && (data.remotes?.length ?? 0) > 1 && primaryRemote
+      ? `${primaryRemote}/${defaultBranch}`
+      : undefined
+
   const { handleKeyDown } = useNewWorktreeKeyboard({
     activeTab,
-    setActiveTab,
+    setActiveTab: handleTabChange,
     filteredIssues: data.filteredIssues,
     filteredPRs: data.filteredPRs,
     filteredSecurityAlerts: data.filteredSecurityAlerts,
@@ -108,7 +134,8 @@ export function NewWorktreeModal() {
     selectedItemIndex,
     setSelectedItemIndex,
     creatingFromNumber: handlers.creatingFromNumber,
-    handleCreateWorktree: handlers.handleCreateWorktree,
+    handleCreateWorktree: () =>
+      handlers.handleCreateWorktree(undefined, quickCreateBase),
     handleBaseSession: handlers.handleBaseSession,
     handleSelectIssue: handlers.handleSelectIssue,
     handleSelectIssueAndInvestigate: handlers.handleSelectIssueAndInvestigate,
@@ -130,20 +157,24 @@ export function NewWorktreeModal() {
     handleSelectLinearIssue: handlers.handleSelectLinearIssue,
     handleSelectLinearIssueAndInvestigate:
       handlers.handleSelectLinearIssueAndInvestigate,
+    filteredSentryIssues: data.filteredSentryIssues,
+    handleSelectSentryIssue: handlers.handleSelectSentryIssue,
+    handleSelectSentryIssueAndInvestigate:
+      handlers.handleSelectSentryIssueAndInvestigate,
   })
 
-  // Apply store-provided default tab when modal opens
+  // Apply store-provided default tab when modal opens (resets selection via handleTabChange)
   useEffect(() => {
     if (newWorktreeModalOpen) {
       const { newWorktreeModalDefaultTab, setNewWorktreeModalDefaultTab } =
         useUIStore.getState()
       if (newWorktreeModalDefaultTab) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setActiveTab(newWorktreeModalDefaultTab)
+        handleTabChange(newWorktreeModalDefaultTab)
         setNewWorktreeModalDefaultTab(null)
       }
     }
-  }, [newWorktreeModalOpen])
+  }, [newWorktreeModalOpen, handleTabChange])
 
   // Focus search input when switching to searchable tabs
   useEffect(() => {
@@ -152,7 +183,8 @@ export function NewWorktreeModal() {
         activeTab === 'prs' ||
         activeTab === 'security' ||
         activeTab === 'branches' ||
-        activeTab === 'linear') &&
+        activeTab === 'linear' ||
+        activeTab === 'sentry') &&
       newWorktreeModalOpen
     ) {
       const timer = setTimeout(() => {
@@ -161,13 +193,6 @@ export function NewWorktreeModal() {
       return () => clearTimeout(timer)
     }
   }, [activeTab, newWorktreeModalOpen])
-
-  // Reset selection when switching tabs
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSelectedItemIndex(0)
-    setSearchQuery('')
-  }, [activeTab])
 
   return (
     <>
@@ -226,7 +251,7 @@ export function NewWorktreeModal() {
           {/* Tabs */}
           <SessionTabBar
             activeTab={activeTab}
-            onTabChange={setActiveTab}
+            onTabChange={handleTabChange}
             tabs={TABS}
           />
 
@@ -243,6 +268,11 @@ export function NewWorktreeModal() {
                 }
                 projectId={data.selectedProjectId}
                 jeanConfig={data.jeanConfig}
+                remotes={data.remotes}
+                projectPath={data.selectedProject?.path}
+                defaultBranch={defaultBranch}
+                branches={data.branches}
+                isLoadingBranches={data.isLoadingBranches}
               />
             )}
 
@@ -262,8 +292,10 @@ export function NewWorktreeModal() {
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectIssue={handlers.handleSelectIssue}
                 onInvestigateIssue={handlers.handleSelectIssueAndInvestigate}
+                onBulkInvestigateIssues={handlers.handleBulkInvestigateIssues}
                 onPreviewIssue={handlePreviewIssue}
                 creatingFromNumber={handlers.creatingFromNumber}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
                 onGhLogin={triggerGhLogin}
                 isGhInstalled={isGhInstalled}
@@ -286,10 +318,12 @@ export function NewWorktreeModal() {
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectPR={handlers.handleSelectPR}
                 onInvestigatePR={handlers.handleSelectPRAndInvestigate}
+                onBulkInvestigatePRs={handlers.handleBulkInvestigatePRs}
                 onStackPR={handlers.handleStackOnPR}
                 onPreviewPR={handlePreviewPR}
                 creatingFromNumber={handlers.creatingFromNumber}
                 stackingFromPR={handlers.stackingFromPR}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
                 onGhLogin={triggerGhLogin}
                 isGhInstalled={isGhInstalled}
@@ -330,6 +364,10 @@ export function NewWorktreeModal() {
                 }
                 onPreviewAdvisory={handlePreviewAdvisory}
                 creatingFromGhsaId={handlers.creatingFromGhsaId}
+                onBulkInvestigateSecurity={
+                  handlers.handleBulkInvestigateSecurity
+                }
+                isBulkInvestigating={handlers.isBulkInvestigating}
               />
             )}
 
@@ -349,7 +387,36 @@ export function NewWorktreeModal() {
                 onInvestigateIssue={
                   handlers.handleSelectLinearIssueAndInvestigate
                 }
+                onBulkInvestigateIssues={
+                  handlers.handleBulkInvestigateLinearIssues
+                }
                 creatingFromId={handlers.creatingFromLinearId}
+                isBulkInvestigating={handlers.isBulkInvestigating}
+                searchInputRef={searchInputRef}
+              />
+            )}
+
+            {activeTab === 'sentry' && (
+              <SentryIssuesTab
+                projectId={data.selectedProjectId ?? ''}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                issues={data.filteredSentryIssues}
+                isLoading={data.isLoadingSentryIssues}
+                isRefetching={data.isRefetchingSentryIssues}
+                error={data.sentryIssuesError}
+                onRefresh={() => data.refetchSentryIssues()}
+                selectedIndex={selectedItemIndex}
+                setSelectedIndex={setSelectedItemIndex}
+                onSelectIssue={handlers.handleSelectSentryIssue}
+                onInvestigateIssue={
+                  handlers.handleSelectSentryIssueAndInvestigate
+                }
+                onBulkInvestigateIssues={
+                  handlers.handleBulkInvestigateSentryIssues
+                }
+                creatingFromId={handlers.creatingFromSentryId}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
               />
             )}
@@ -366,9 +433,7 @@ export function NewWorktreeModal() {
                 selectedIndex={selectedItemIndex}
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectBranch={handlers.handleSelectBranch}
-                onStackBranch={handlers.handleStackOnBranch}
                 creatingFromBranch={handlers.creatingFromBranch}
-                stackingFromBranch={handlers.stackingFromBranch}
                 searchInputRef={searchInputRef}
               />
             )}

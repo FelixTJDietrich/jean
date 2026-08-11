@@ -20,9 +20,15 @@ vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
 Element.prototype.scrollIntoView = vi.fn()
 
+const refreshOpencodeModelsMutateAsync = vi.fn()
+
 vi.mock('@/services/opencode-cli', () => ({
   useAvailableOpencodeModels: () => ({
     data: ['openai/gpt-5.4', 'groq/compound-mini'],
+  }),
+  useRefreshOpencodeModels: () => ({
+    mutateAsync: refreshOpencodeModelsMutateAsync,
+    isPending: false,
   }),
 }))
 
@@ -45,6 +51,14 @@ vi.mock('@/services/cursor-cli', () => ({
   }),
 }))
 
+let mockAntigravityModels: { id: string; label: string }[] = []
+
+vi.mock('@/services/antigravity-cli', () => ({
+  useAvailableAntigravityModels: () => ({
+    data: mockAntigravityModels,
+  }),
+}))
+
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
     data: {
@@ -59,7 +73,10 @@ beforeEach(() => {
   mockFavoriteModels = []
   mockFastModeModels = []
   mockCursorModels = [{ id: 'auto', label: 'Auto' }]
+  mockAntigravityModels = []
   patchPreferencesMutate.mockClear()
+  refreshOpencodeModelsMutateAsync.mockReset()
+  refreshOpencodeModelsMutateAsync.mockResolvedValue(['openai/gpt-5.4'])
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation(() => ({
@@ -99,6 +116,52 @@ describe('BackendModelPickerContent', () => {
     expect(
       screen.getByRole('button', { name: /refresh model list/i })
     ).toBeInTheDocument()
+  })
+
+  it('shows a manual refresh button for OpenCode CLI model lists', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="opencode"
+        selectedModel="openai/gpt-5.4"
+        selectedProvider={null}
+        installedBackends={['claude', 'codex', 'opencode']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    const refreshButton = screen.getByRole('button', {
+      name: /refresh model list/i,
+    })
+    expect(refreshButton).toBeInTheDocument()
+
+    await user.click(refreshButton)
+    expect(refreshOpencodeModelsMutateAsync).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not show a refresh button for Cursor model lists', () => {
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="cursor"
+        selectedModel="cursor/auto"
+        selectedProvider={null}
+        installedBackends={['cursor']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(
+      screen.queryByRole('button', { name: /refresh model list/i })
+    ).not.toBeInTheDocument()
   })
   it('keeps Claude 1M variants plus standard models', () => {
     render(
@@ -157,14 +220,14 @@ describe('BackendModelPickerContent', () => {
     expect(onRequestClose).toHaveBeenCalled()
   })
 
-  it('shows the beta sidebar dot on Command Code and Grok, not Cursor', () => {
+  it('shows the beta sidebar dot on Command Code, Grok, and Antigravity, not Cursor', () => {
     render(
       <BackendModelPickerContent
         open
         selectedBackend="cursor"
         selectedModel="cursor/auto"
         selectedProvider={null}
-        installedBackends={['cursor', 'commandcode', 'grok']}
+        installedBackends={['cursor', 'commandcode', 'grok', 'antigravity']}
         customCliProfiles={[]}
         onModelChange={vi.fn()}
         onBackendModelChange={vi.fn()}
@@ -177,10 +240,127 @@ describe('BackendModelPickerContent', () => {
       name: 'Command Code (Beta)',
     })
     const grokTab = screen.getByRole('tab', { name: 'Grok (Beta)' })
+    const antigravityTab = screen.getByRole('tab', {
+      name: 'Antigravity CLI (Beta)',
+    })
 
     expect(cursorTab.querySelector('.bg-yellow-500')).toBeNull()
     expect(commandCodeTab.querySelector('.bg-yellow-500')).not.toBeNull()
     expect(grokTab.querySelector('.bg-yellow-500')).not.toBeNull()
+    expect(antigravityTab.querySelector('.bg-yellow-500')).not.toBeNull()
+  })
+
+  it('lists CLI-reported Antigravity models ahead of static fallbacks', () => {
+    mockAntigravityModels = [
+      { id: 'gemini-4-pro-high', label: 'Gemini 4 Pro (High)' },
+    ]
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="antigravity"
+        selectedModel="antigravity/auto"
+        selectedProvider={null}
+        installedBackends={['antigravity']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    const labels = screen
+      .getAllByRole('option')
+      .map(option => option.textContent ?? '')
+    const dynamicIndex = labels.findIndex(t =>
+      t.includes('Gemini 4 Pro (High)')
+    )
+    const staticIndex = labels.findIndex(t => t.includes('antigravity/auto'))
+    expect(dynamicIndex).toBeGreaterThanOrEqual(0)
+    expect(staticIndex).toBeGreaterThanOrEqual(0)
+    expect(dynamicIndex).toBeLessThan(staticIndex)
+  })
+
+  it('scopes search to Antigravity and swaps models on the same backend', async () => {
+    const user = userEvent.setup()
+    const onModelChange = vi.fn()
+    const onBackendModelChange = vi.fn()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="antigravity"
+        selectedModel="antigravity/auto"
+        selectedProvider={null}
+        installedBackends={['claude', 'antigravity']}
+        customCliProfiles={[]}
+        onModelChange={onModelChange}
+        onBackendModelChange={onBackendModelChange}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    const searchInput = screen.getByPlaceholderText(
+      /search antigravity cli \(beta\) models/i
+    )
+    await user.type(searchInput, 'gemini 3.1 pro')
+    await user.click(screen.getByText('Gemini 3.1 Pro (High)'))
+
+    expect(onModelChange).toHaveBeenCalledWith(
+      'antigravity/gemini-3.1-pro-high'
+    )
+    expect(onBackendModelChange).not.toHaveBeenCalled()
+  })
+
+  it('switches backend and model when selecting an Antigravity model from another backend', async () => {
+    const user = userEvent.setup()
+    const onModelChange = vi.fn()
+    const onBackendModelChange = vi.fn()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="claude"
+        selectedModel="claude-fable-5"
+        selectedProvider={null}
+        installedBackends={['claude', 'antigravity']}
+        customCliProfiles={[]}
+        onModelChange={onModelChange}
+        onBackendModelChange={onBackendModelChange}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    await user.click(
+      screen.getByRole('tab', { name: 'Antigravity CLI (Beta)' })
+    )
+    await user.click(screen.getByText('Auto'))
+
+    expect(onBackendModelChange).toHaveBeenCalledWith(
+      'antigravity',
+      'antigravity/auto'
+    )
+    expect(onModelChange).not.toHaveBeenCalled()
+  })
+
+  it('does not show a refresh button for Antigravity model lists', () => {
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="antigravity"
+        selectedModel="antigravity/auto"
+        selectedProvider={null}
+        installedBackends={['antigravity']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(
+      screen.queryByRole('button', { name: /refresh model list/i })
+    ).not.toBeInTheDocument()
   })
 
   it('keeps the Cursor fallback model when web access caches an empty model list', () => {

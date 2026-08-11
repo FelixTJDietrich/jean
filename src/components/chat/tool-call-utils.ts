@@ -1,4 +1,10 @@
-import type { ToolCall, ContentBlock, Todo, PlanToolInput, Question } from '@/types/chat'
+import type {
+  ToolCall,
+  ContentBlock,
+  Todo,
+  PlanToolInput,
+  Question,
+} from '@/types/chat'
 import {
   isTodoWrite,
   isCollabToolCall,
@@ -8,6 +14,10 @@ import {
   normalizeQuestionMultipleField,
   normalizeCodexQuestions,
 } from '@/types/chat'
+
+function isTodoWriteLike(toolCall: ToolCall): boolean {
+  return isTodoWrite(toolCall)
+}
 
 /** Check if a tool is a task/agent container (Claude CLI uses both names) */
 function isAgentTool(name: string): boolean {
@@ -54,7 +64,7 @@ export type GroupedToolCall =
 /**
  * Check if a tool call is a special tool that should not render in the timeline.
  * AskUserQuestion and ExitPlanMode have dedicated inline render paths.
- * TodoWrite and CodexTodoList are shown via dedicated todo UI.
+ * TodoWrite (incl. Grok todo_write) and CodexTodoList are shown via dedicated todo UI.
  */
 function isSpecialTool(toolCall: ToolCall): boolean {
   return (
@@ -62,7 +72,7 @@ function isSpecialTool(toolCall: ToolCall): boolean {
     toolCall.name === 'ExitPlanMode' ||
     toolCall.name === 'CodexPlan' ||
     toolCall.name === 'EnterPlanMode' ||
-    toolCall.name === 'TodoWrite' ||
+    isTodoWriteLike(toolCall) ||
     toolCall.name === 'CodexTodoList'
   )
 }
@@ -112,7 +122,7 @@ export function groupToolCalls(toolCalls: ToolCall[]): GroupedToolCall[] {
  * Item that can be stacked in a group (thinking or tool)
  */
 export type StackableItem =
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; key: string }
   | { type: 'tool'; tool: ToolCall }
 
 /**
@@ -132,7 +142,13 @@ export type TimelineItem =
 
 export interface ResolvedPlanContent {
   content: string | null
-  source: 'plan' | 'plan_preview' | 'message_text' | 'explanation' | null
+  source:
+    | 'plan'
+    | 'plan_preview'
+    | 'message_text'
+    | 'steps'
+    | 'explanation'
+    | null
 }
 
 export interface SplitTextAroundPlanResult {
@@ -173,7 +189,7 @@ function mergeConsecutiveStackables(items: TimelineItem[]): TimelineItem[] {
           result.push({
             type: 'thinking',
             thinking: buffered.item.thinking,
-            key: buffered.key,
+            key: buffered.item.key,
           })
         }
       }
@@ -189,7 +205,11 @@ function mergeConsecutiveStackables(items: TimelineItem[]): TimelineItem[] {
       })
     } else if (item.type === 'thinking') {
       stackableBuffer.push({
-        item: { type: 'thinking', thinking: item.thinking },
+        item: {
+          type: 'thinking',
+          thinking: item.thinking,
+          key: item.key,
+        },
         key: item.key,
       })
     } else {
@@ -482,17 +502,148 @@ function normalizePlanText(content: string): string {
   return content.trim().replace(/\r\n/g, '\n')
 }
 
-function getPlanToolInput(toolCalls: ToolCall[]): PlanToolInput | undefined {
-  const planTool = toolCalls.find(isPlanToolCall)
-  return planTool?.input as PlanToolInput | undefined
-}
-
 function getPlanField(input: PlanToolInput | undefined): string | null {
   return isNonEmptyString(input?.plan) ? input.plan : null
 }
 
 function getPlanPreviewField(input: PlanToolInput | undefined): string | null {
   return isNonEmptyString(input?.plan_preview) ? input.plan_preview : null
+}
+
+/** Status-only explanations are not handoff-quality plan bodies. */
+function isStatusOnlyPlanExplanation(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!]+$/g, '')
+  if (!normalized) return true
+  if (normalized.length > 80) return false
+  return (
+    /plan (created|ready|complete|completed|updated)/.test(normalized) ||
+    /ready for approval/.test(normalized) ||
+    /awaiting approval/.test(normalized)
+  )
+}
+
+/**
+ * Prefer the richest Codex/ExitPlanMode tool input when multiple plan tools
+ * exist (e.g. split turn-id vs item-id after history reload).
+ */
+function getPlanToolInput(toolCalls: ToolCall[]): PlanToolInput | undefined {
+  const planTools = toolCalls.filter(isPlanToolCall)
+  if (planTools.length === 0) return undefined
+  if (planTools.length === 1) {
+    return planTools[0]?.input as PlanToolInput | undefined
+  }
+
+  let best: PlanToolInput | undefined
+  let bestScore = -1
+  for (const tool of planTools) {
+    const input = tool.input as PlanToolInput
+    const plan = getPlanField(input)
+    const preview = getPlanPreviewField(input)
+    const steps =
+      input?.steps?.filter(step => isNonEmptyString(step.step)).length ?? 0
+    const explanation = isNonEmptyString(input?.explanation)
+      ? input.explanation.trim()
+      : ''
+    let score = 0
+    if (plan && !looksLikeFormattedSteps(plan)) {
+      score += 1000 + plan.trim().length
+    }
+    if (preview) score += 500 + preview.trim().length
+    if (steps > 0) score += 100 + steps * 10
+    if (explanation && !isStatusOnlyPlanExplanation(explanation)) {
+      score += 50 + explanation.length
+    } else if (explanation) {
+      score += 1
+    }
+    if (score > bestScore) {
+      bestScore = score
+      best = input
+    }
+  }
+  return best
+}
+
+/**
+ * Merge plan fields from all plan tools so a thin explanation tool and a
+ * rich plan-body tool still produce one complete handoff document.
+ */
+function getMergedPlanToolInput(
+  toolCalls: ToolCall[]
+): PlanToolInput | undefined {
+  const planTools = toolCalls.filter(isPlanToolCall)
+  if (planTools.length === 0) return undefined
+  if (planTools.length === 1) {
+    return planTools[0]?.input as PlanToolInput | undefined
+  }
+
+  const merged: PlanToolInput = { source: 'codex' }
+  let bestPlan: string | null = null
+  let bestPreview: string | null = null
+  let bestSteps: PlanToolInput['steps']
+  let bestExplanation: string | null = null
+
+  for (const tool of planTools) {
+    const input = tool.input as PlanToolInput
+    const plan = getPlanField(input)
+    if (
+      plan &&
+      !looksLikeFormattedSteps(plan) &&
+      (!bestPlan || plan.trim().length > bestPlan.trim().length)
+    ) {
+      bestPlan = plan
+    }
+    const preview = getPlanPreviewField(input)
+    if (
+      preview &&
+      (!bestPreview || preview.trim().length > bestPreview.trim().length)
+    ) {
+      bestPreview = preview
+    }
+    const steps = input?.steps?.filter(step => isNonEmptyString(step.step))
+    if (steps && steps.length > (bestSteps?.length ?? 0)) {
+      bestSteps = steps
+    }
+    if (isNonEmptyString(input?.explanation)) {
+      const explanation = input.explanation.trim()
+      if (
+        !isStatusOnlyPlanExplanation(explanation) &&
+        (!bestExplanation || explanation.length > bestExplanation.length)
+      ) {
+        bestExplanation = explanation
+      } else if (!bestExplanation) {
+        bestExplanation = explanation
+      }
+    }
+  }
+
+  if (bestPlan) merged.plan = bestPlan
+  if (bestPreview) merged.plan_preview = bestPreview
+  if (bestSteps) merged.steps = bestSteps
+  if (bestExplanation) merged.explanation = bestExplanation
+  return merged
+}
+
+function formatPlanSteps(input: PlanToolInput | undefined): string | null {
+  const steps = input?.steps?.filter(step => isNonEmptyString(step.step)) ?? []
+  if (steps.length === 0) return null
+
+  const formattedSteps = steps.map(step => {
+    if (step.status === 'completed') return `- [x] ${step.step}`
+    if (step.status === 'in_progress') {
+      return `- [ ] **In progress:** ${step.step}`
+    }
+    return `- [ ] ${step.step}`
+  })
+
+  const explanation = isNonEmptyString(input?.explanation)
+    ? input.explanation.trim()
+    : null
+  // Don't promote status-only explanations as plan intro text
+  const intro =
+    explanation && !isStatusOnlyPlanExplanation(explanation)
+      ? explanation
+      : null
+  return [intro, formattedSteps.join('\n')].filter(Boolean).join('\n\n')
 }
 
 export function splitTextAroundPlan(text: string): SplitTextAroundPlanResult {
@@ -571,7 +722,19 @@ export function resolvePlanContent(params: {
   messageContent?: string | null
   contentBlocks?: ContentBlock[]
 }): ResolvedPlanContent {
-  const input = getPlanToolInput(params.toolCalls)
+  // Plan UI only exists when the backend emitted a real plan tool call.
+  // Never promote ordinary assistant narration (Grok/Claude YOLO status text
+  // between tools) into a synthetic Plan card — that hides text from the
+  // timeline and stuffs every response into "Plan".
+  if (!params.toolCalls.some(isPlanToolCall)) {
+    return { content: null, source: null }
+  }
+
+  // Merge across split CodexPlan tools (turn-id vs item-id) so the richest
+  // body/steps win instead of whichever tool was inserted first.
+  const input =
+    getMergedPlanToolInput(params.toolCalls) ??
+    getPlanToolInput(params.toolCalls)
   const plan = getPlanField(input)
   const planPreview = getPlanPreviewField(input)
 
@@ -590,8 +753,41 @@ export function resolvePlanContent(params: {
     return { content: extractedFromText, source: 'message_text' }
   }
 
+  // Prefer full assistant text over thin checklist/status when a plan tool
+  // exists but only has thin steps/explanation — YOLO/new-worktree handoff.
+  const fullAssistantText = collectPlanTextCandidates(params)
+    .flatMap(text => {
+      const trimmed = text.trim()
+      return trimmed ? [trimmed] : []
+    })
+    .sort((a, b) => b.length - a.length)[0]
+  const formattedSteps = formatPlanSteps(input)
+  if (
+    fullAssistantText &&
+    fullAssistantText.length >= 120 &&
+    (!formattedSteps || fullAssistantText.length > formattedSteps.length * 2)
+  ) {
+    return { content: fullAssistantText, source: 'message_text' }
+  }
+
+  if (formattedSteps) {
+    return { content: formattedSteps, source: 'steps' }
+  }
+
+  if (
+    isNonEmptyString(input?.explanation) &&
+    !isStatusOnlyPlanExplanation(input.explanation)
+  ) {
+    return { content: input.explanation, source: 'explanation' }
+  }
+
+  // Last resort: status-only explanation (still better than empty for UI)
   if (isNonEmptyString(input?.explanation)) {
     return { content: input.explanation, source: 'explanation' }
+  }
+
+  if (fullAssistantText) {
+    return { content: fullAssistantText, source: 'message_text' }
   }
 
   return { content: null, source: null }

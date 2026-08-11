@@ -7,6 +7,8 @@ import { toast } from 'sonner'
 import { Textarea } from '@/components/ui/textarea'
 import { Kbd } from '@/components/ui/kbd'
 import { useChatStore } from '@/store/chat-store'
+import { useUIStore } from '@/store/ui-store'
+import { cn } from '@/lib/utils'
 import { getFilename, getExtension } from '@/lib/path-utils'
 import type {
   PendingFile,
@@ -45,11 +47,15 @@ import {
   listControlChars,
   sanitizeTextInputValue,
 } from '@/lib/input-sanitization'
+import { isImeComposingEvent } from '@/lib/ime-composition'
 import {
   decodePromptAttachmentMetadata,
   parsePlainTextPromptMetadata,
   type PromptAttachmentMetadata,
 } from './message-content-utils'
+import { isModKeyEvent } from '@/types/keybindings'
+import { isSteerCapableBackend } from '@/lib/backend-auto-steer'
+import { isNativeApp } from '@/lib/environment'
 
 /** Threshold for saving pasted text as file (2000 chars) */
 const TEXT_PASTE_THRESHOLD = 2000
@@ -62,7 +68,7 @@ interface ChatInputProps {
   executionMode: ExecutionMode
   canSwitchBackendWithTab?: boolean
   focusChatShortcut: string
-  onSubmit: (e: React.FormEvent) => void
+  onSubmit: (e: React.FormEvent, options?: { forceSteer?: boolean }) => void
   onCancel: () => void
   onSwitchBackendWithTab?: () => void
   onCommandExecute?: (command: ClaudeCommand) => void
@@ -73,6 +79,7 @@ interface ChatInputProps {
   inputRef: React.RefObject<HTMLTextAreaElement | null>
   installedBackends?: CliBackend[]
   selectedBackend?: CliBackend
+  onSteerModifierChange?: (active: boolean) => void
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -94,8 +101,10 @@ export const ChatInput = memo(function ChatInput({
   inputRef,
   installedBackends,
   selectedBackend,
+  onSteerModifierChange,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
+  const zenMode = useUIStore(state => state.zenMode)
   const resizeTextarea = useAutoResize(inputRef)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -123,6 +132,9 @@ export const ChatInput = memo(function ChatInput({
   const [slashTriggerIndex, setSlashTriggerIndex] = useState<number | null>(
     null
   )
+  const [slashTriggerKind, setSlashTriggerKind] = useState<
+    'mixed' | 'command' | 'skill'
+  >('mixed')
 
   // Context mention popover state (for # issues/PRs/security/Linear)
   const [contextMentionOpen, setContextMentionOpen] = useState(false)
@@ -430,9 +442,12 @@ export const ChatInput = memo(function ChatInput({
         }
       }
 
-      // Detect / trigger for slash commands and skills (only if @/# popovers not open)
+      // Detect / commands and $ skills (only if @/# popovers are not open)
       if (!fileMentionOpen && !contextMentionOpen) {
-        if (prevChar === '/') {
+        if (
+          prevChar === '/' ||
+          (prevChar === '$' && selectedBackend === 'codex')
+        ) {
           // Check that it's at start or preceded by whitespace
           const charBeforeSlash = value[cursorPos - 2]
           if (
@@ -441,6 +456,13 @@ export const ChatInput = memo(function ChatInput({
             charBeforeSlash === '\n'
           ) {
             setSlashTriggerIndex(cursorPos - 1)
+            setSlashTriggerKind(
+              prevChar === '$'
+                ? 'skill'
+                : selectedBackend === 'codex'
+                  ? 'command'
+                  : 'mixed'
+            )
             setSlashQuery('')
             setSlashPopoverOpen(true)
 
@@ -475,12 +497,27 @@ export const ChatInput = memo(function ChatInput({
       contextMentionOpen,
       hashTriggerIndex,
       formRef,
+      selectedBackend,
     ]
   )
 
   // Handle keyboard events
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // Japanese/CJK IME: Enter confirms composition — must not submit or
+      // select mentions. Do not preventDefault; let the IME handle the key.
+      // keyCode 229 covers Safari/WKWebView where compositionend can fire
+      // before keydown and leave isComposing false (issue #584).
+      if (isImeComposingEvent(e)) {
+        return
+      }
+
+      const forceSteer =
+        isSending &&
+        isSteerCapableBackend(selectedBackend) &&
+        (e.metaKey || e.ctrlKey)
+      onSteerModifierChange?.(forceSteer)
+
       // When file mention popover is open, handle navigation
       if (fileMentionOpen) {
         if (e.ctrlKey && e.shiftKey && e.key === 'ArrowLeft') {
@@ -606,7 +643,7 @@ export const ChatInput = memo(function ChatInput({
             .getState()
             .setInputDraft(activeSessionId, valueRef.current)
         }
-        onSubmit(e)
+        onSubmit(e, forceSteer ? { forceSteer: true } : undefined)
         // Clear input immediately (don't wait for store subscription)
         valueRef.current = ''
         setShowHint(true)
@@ -628,6 +665,8 @@ export const ChatInput = memo(function ChatInput({
       onSwitchBackendWithTab,
       isMobile,
       resizeTextarea,
+      selectedBackend,
+      onSteerModifierChange,
     ]
   )
 
@@ -796,24 +835,26 @@ export const ChatInput = memo(function ChatInput({
           })
         }
 
-        // Restore text files (read content from disk)
-        for (const path of copiedPromptMetadata.textFiles) {
-          try {
-            const response = await invoke<ReadTextResponse>(
-              'read_pasted_text',
-              { path }
-            )
-            addPendingTextFile(activeSessionId, {
-              id: generateId(),
-              path,
-              filename: getFilename(path),
-              size: response.size,
-              content: response.content,
-            })
-          } catch {
-            // File may no longer exist, skip
-          }
-        }
+        // Restore text files (read content from disk) — independent reads
+        await Promise.all(
+          copiedPromptMetadata.textFiles.map(async path => {
+            try {
+              const response = await invoke<ReadTextResponse>(
+                'read_pasted_text',
+                { path }
+              )
+              addPendingTextFile(activeSessionId, {
+                id: generateId(),
+                path,
+                filename: getFilename(path),
+                size: response.size,
+                content: response.content,
+              })
+            } catch {
+              // File may no longer exist, skip
+            }
+          })
+        )
 
         // Restore file and directory mentions
         for (const file of copiedPromptMetadata.files) {
@@ -836,22 +877,34 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
-      const items = e.clipboardData?.items
-      if (!items) return
+      const items = e.clipboardData?.items ?? []
 
       // First, check for image items in the clipboard
-      let hasImage = false
+      const imageFiles: File[] = []
       for (const item of items) {
         if (!item.type.startsWith('image/')) continue
-        hasImage = true
         // Prevent the browser from also inserting any text/html fallback for
         // image clipboard entries; mixed text is handled explicitly below.
         e.preventDefault()
 
         const file = item.getAsFile()
         if (!file) continue
-
-        await processAttachmentFile(file, activeSessionId)
+        imageFiles.push(file)
+      }
+      // iOS can expose an image copied from the share sheet through `files`
+      // while leaving `items` empty.
+      for (const file of Array.from(e.clipboardData?.files ?? [])) {
+        if (file.type.startsWith('image/') && !imageFiles.includes(file)) {
+          e.preventDefault()
+          imageFiles.push(file)
+        }
+      }
+      const hasImage = imageFiles.length > 0
+      // Independent per-image save; process in parallel
+      if (imageFiles.length > 0) {
+        await Promise.all(
+          imageFiles.map(file => processAttachmentFile(file, activeSessionId))
+        )
       }
 
       // Mixed image+text paste should preserve both parts. Because image paste
@@ -870,7 +923,7 @@ export const ChatInput = memo(function ChatInput({
       // Native clipboard fallback (Linux/WebKitGTK doesn't expose image items via Web API)
       const clipboardText = plainText
       const clipboardHtml = e.clipboardData?.getData('text/html')
-      if (!clipboardText && !clipboardHtml) {
+      if (isNativeApp() && !clipboardText && !clipboardHtml) {
         e.preventDefault()
         const placeholderId = `clipboard-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
         const { addPendingImage, updatePendingImage, removePendingImage } =
@@ -926,9 +979,10 @@ export const ChatInput = memo(function ChatInput({
       const files = e.target.files
       if (!files || files.length === 0) return
 
-      for (const file of Array.from(files)) {
-        await processAttachmentFile(file, activeSessionId)
-      }
+      // Independent per-file attachment processing
+      await Promise.all(
+        Array.from(files, file => processAttachmentFile(file, activeSessionId))
+      )
 
       e.target.value = ''
       inputRef.current?.focus()
@@ -1202,10 +1256,12 @@ export const ChatInput = memo(function ChatInput({
         multiple
         tabIndex={-1}
         className="sr-only"
+        aria-label="Attach images"
         onChange={handleFileInputChange}
       />
       <Textarea
         ref={inputRef}
+        data-chat-input
         placeholder={
           isSending
             ? executionMode === 'yolo'
@@ -1224,13 +1280,20 @@ export const ChatInput = memo(function ChatInput({
         defaultValue=""
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onKeyUp={e => {
+          if (!isModKeyEvent(e)) onSteerModifierChange?.(false)
+        }}
+        onBlur={() => onSteerModifierChange?.(false)}
         onPaste={handlePaste}
         disabled={false}
-        className="min-h-[40px] max-h-[50vh] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm"
+        className={cn(
+          'min-h-[40px] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base placeholder:text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm',
+          zenMode ? 'h-12 max-h-12' : 'max-h-[50vh]'
+        )}
         rows={1}
         autoFocus={!isMobile}
       />
-      {showHint && (
+      {showHint && !zenMode && (
         <span className="absolute top-0 right-0 hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground opacity-40">
           <Kbd>{focusChatShortcut}</Kbd>
           <span>to focus</span>
@@ -1277,6 +1340,7 @@ export const ChatInput = memo(function ChatInput({
         handleRef={slashPopoverHandleRef}
         installedBackends={installedBackends}
         sessionBackend={selectedBackend}
+        triggerKind={slashTriggerKind}
       />
     </div>
   )

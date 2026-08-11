@@ -2360,7 +2360,7 @@ dependencies = [
  "png 0.18.1",
  "tiff",
  "zune-core 0.5.1",
- "zune-jpeg 0.5.12",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]
@@ -2489,33 +2489,19 @@ dependencies = [
 
 [[package]]
 name = "jean"
-version = "0.1.67"
+version = "0.1.73"
 dependencies = [
  "arboard",
- "axum",
  "base64 0.22.1",
- "chrono",
  "dirs 5.0.1",
- "flate2",
- "futures-util",
  "gtk",
- "if-addrs",
- "ignore",
  "image",
- "libc",
+ "jean-core",
  "log",
  "objc2-app-kit",
  "once_cell",
- "portable-pty",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "rust-embed",
  "serde",
  "serde_json",
- "serde_yaml",
- "sha2",
- "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -2528,17 +2514,49 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tauri-winrt-notification",
  "tempfile",
+ "tokio",
+ "webkit2gtk",
+ "webview2-com",
+]
+
+[[package]]
+name = "jean-core"
+version = "0.1.73"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 5.0.1",
+ "flate2",
+ "futures-util",
+ "if-addrs",
+ "ignore",
+ "image",
+ "libc",
+ "log",
+ "once_cell",
+ "portable-pty",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tar",
  "tokio",
  "tokio-tungstenite",
  "toml 0.8.2",
  "toml_edit 0.23.10+spec-1.0.0",
  "tower-http",
  "uuid",
- "webkit2gtk",
  "which",
  "windows-sys 0.59.0",
  "zip 2.4.2",
+ "zune-core 0.5.1",
 ]
 
 [[package]]
@@ -5707,6 +5725,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -7618,9 +7637,9 @@ dependencies = [
 
 [[package]]
 name = "zune-jpeg"
-version = "0.5.12"
+version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "410e9ecef634c709e3831c2cfdb8d9c32164fae1c67496d5b68fff728eec37fe"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core 0.5.1",
 ]

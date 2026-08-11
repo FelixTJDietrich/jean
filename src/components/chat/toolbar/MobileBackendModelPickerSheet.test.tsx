@@ -4,6 +4,10 @@ import { MobileBackendModelPickerSheet } from './MobileBackendModelPickerSheet'
 
 vi.mock('@/services/opencode-cli', () => ({
   useAvailableOpencodeModels: () => ({ data: [] }),
+  useRefreshOpencodeModels: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
 }))
 vi.mock('@/services/cursor-cli', () => ({
   useAvailableCursorModels: () => ({ data: [] }),
@@ -35,6 +39,7 @@ vi.mock('@/services/model-catalog', () => ({
 }))
 
 beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn()
   Object.defineProperty(window, 'innerWidth', {
     configurable: true,
     writable: true,

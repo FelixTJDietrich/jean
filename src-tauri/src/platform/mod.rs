@@ -1,11 +1,10 @@
-// Cross-platform abstractions for shell execution and process management
+pub mod notifications;
 
-pub mod cli_detect;
-pub mod process;
-pub mod shell;
-pub mod wsl;
+#[cfg(target_os = "linux")]
+pub mod linux_webkit;
 
-pub use cli_detect::*;
-pub use process::*;
-pub use shell::*;
-pub use wsl::*;
+#[cfg(target_os = "linux")]
+pub use linux_webkit::apply_linux_webkit_env;
+
+pub mod windows_webview;
+pub use windows_webview::install_process_failed_recovery;

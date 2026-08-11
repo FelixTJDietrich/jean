@@ -27,7 +27,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import type { CliBackend, CustomCliProfile } from '@/types/preferences'
+import type {
+  CliBackend,
+  CodexProviderProfile,
+  CustomCliProfile,
+} from '@/types/preferences'
 import type {
   EffortLevel,
   ExecutionMode,
@@ -55,8 +59,11 @@ import {
   CODEX_EFFORT_LEVEL_OPTIONS,
   EFFORT_LEVEL_OPTIONS,
   GROK_EFFORT_LEVEL_OPTIONS,
+  KIMI_EFFORT_LEVEL_OPTIONS,
+  ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
+  withAdaptiveEffortOption,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   getPrStatusDisplay,
@@ -66,6 +73,9 @@ import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBack
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
+
+/** Stable default so omit/undefined doesn't allocate a new [] each render. */
+const EMPTY_CODEX_PROVIDERS: CodexProviderProfile[] = []
 
 interface DesktopToolbarControlsProps {
   hasPendingQuestions: boolean
@@ -80,6 +90,7 @@ interface DesktopToolbarControlsProps {
   sessionHasMessages?: boolean
   providerLocked?: boolean
   customCliProfiles: CustomCliProfile[]
+  customCodexProviders?: CodexProviderProfile[]
   isCodex: boolean
   modelReasoning?: ModelReasoningCapability | null
 
@@ -92,7 +103,6 @@ interface DesktopToolbarControlsProps {
 
   availableMcpServers: McpServerInfo[]
   enabledMcpServers: string[]
-  activeMcpCount: number
   isHealthChecking: boolean
   mcpStatuses: Record<string, McpHealthStatus> | undefined
 
@@ -146,6 +156,7 @@ export function DesktopToolbarControls({
   sessionHasMessages,
   providerLocked,
   customCliProfiles,
+  customCodexProviders = EMPTY_CODEX_PROVIDERS,
   isCodex,
   modelReasoning,
   prUrl,
@@ -156,7 +167,6 @@ export function DesktopToolbarControls({
   activeWorktreePath: _activeWorktreePath,
   availableMcpServers: _availableMcpServers,
   enabledMcpServers: _enabledMcpServers,
-  activeMcpCount,
   isHealthChecking: _isHealthChecking,
   mcpStatuses: _mcpStatuses,
   loadedIssueContexts,
@@ -194,27 +204,35 @@ export function DesktopToolbarControls({
 }: DesktopToolbarControlsProps) {
   const isPi = selectedBackend === 'pi'
   const isGrok = selectedBackend === 'grok'
+  const isKimi = selectedBackend === 'kimi'
+  const isAntigravity = selectedBackend === 'antigravity'
   const usesEffortControl =
     modelReasoning?.type === 'effort' ||
     (modelReasoning === undefined &&
-      (useAdaptiveThinking || isCodex || isPi || isGrok))
+      (useAdaptiveThinking || isCodex || isPi || isGrok || isKimi || isAntigravity))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels
-      : isPi
-        ? PI_EFFORT_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : isAntigravity
+        ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
+        : isPi
+        ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
         : isCodex
-          ? CODEX_EFFORT_LEVEL_OPTIONS
-          : isGrok
-            ? GROK_EFFORT_LEVEL_OPTIONS
-            : EFFORT_LEVEL_OPTIONS
+          ? withAdaptiveEffortOption(CODEX_EFFORT_LEVEL_OPTIONS, selectedModel)
+          : isKimi
+            ? withAdaptiveEffortOption(KIMI_EFFORT_LEVEL_OPTIONS, selectedModel)
+            : isGrok
+              ? withAdaptiveEffortOption(GROK_EFFORT_LEVEL_OPTIONS, selectedModel)
+              : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
-      ? modelReasoning.levels
-      : THINKING_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : withAdaptiveEffortOption(THINKING_LEVEL_OPTIONS, selectedModel)
+  const effortOptionValues = new Set(effortLevelOptions.map(o => o.value))
+  const thinkingOptionValues = new Set(thinkingLevelOptions.map(o => o.value))
   const displayedEffortLevel =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels.some(o => o.value === selectedEffortLevel)
+      ? effortOptionValues.has(selectedEffortLevel)
         ? selectedEffortLevel
         : modelReasoning.default
       : isCodex || isPi
@@ -230,10 +248,11 @@ export function DesktopToolbarControls({
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
   const displayedThinkingLevel =
-    modelReasoning?.type === 'thinking' &&
-    !modelReasoning.levels.some(o => o.value === selectedThinkingLevel)
-      ? modelReasoning.default
-      : selectedThinkingLevel
+    thinkingOptionValues.has(selectedThinkingLevel)
+      ? selectedThinkingLevel
+      : modelReasoning?.type === 'thinking'
+        ? modelReasoning.default
+        : selectedThinkingLevel
   const displayedThinkingLabel =
     thinkingLevelOptions.find(o => o.value === displayedThinkingLevel)?.label ??
     displayedThinkingLevel
@@ -255,14 +274,19 @@ export function DesktopToolbarControls({
     loadedSecurityContexts.length + loadedAdvisoryContexts.length
   const loadedLinearCount = loadedLinearContexts.length
   const loadedContextCount = attachedSavedContexts.length
-  const providerDisplayName = getProviderDisplayName(selectedProvider)
+  const providerDisplayName = getProviderDisplayName(
+    selectedProvider,
+    selectedBackend
+  )
+  const showClaudeProviders =
+    customCliProfiles.length > 0 && selectedBackend === 'claude'
+  const showCodexProviders =
+    customCodexProviders.length > 0 && selectedBackend === 'codex'
+  const showProviderDropdown = showClaudeProviders || showCodexProviders
 
   return (
     <>
-      <DockBurgerButton
-        activeMcpCount={activeMcpCount}
-        className="hidden @xl:flex"
-      />
+      <DockBurgerButton className="hidden @xl:flex" />
 
       <Tooltip>
         <TooltipTrigger asChild>
@@ -338,6 +362,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -369,6 +395,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -401,6 +429,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.packageName} ({ctx.severity})
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -436,6 +466,8 @@ export function DesktopToolbarControls({
                         {ctx.ghsaId} — {ctx.summary}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -473,6 +505,8 @@ export function DesktopToolbarControls({
                       </span>
                       {ctx.url && (
                         <button
+                          type="button"
+                        aria-label="Open external link"
                           className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                           onClick={e => {
                             e.stopPropagation()
@@ -575,7 +609,7 @@ export function DesktopToolbarControls({
         </>
       )}
 
-      {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
+      {showProviderDropdown && (
         <>
           <div className="hidden @xl:block h-4 w-px bg-border/50" />
           <DropdownMenu
@@ -601,35 +635,59 @@ export function DesktopToolbarControls({
               onEscapeKeyDown={e => e.stopPropagation()}
               onCloseAutoFocus={focusChatInput}
             >
-              <DropdownMenuRadioGroup
-                value={selectedProvider ?? '__anthropic__'}
-                onValueChange={handleProviderChange}
-              >
-                <DropdownMenuRadioItem value="__anthropic__">
-                  Anthropic
-                  <Kbd className="ml-auto text-[10px]">1</Kbd>
-                </DropdownMenuRadioItem>
-                {customCliProfiles.length > 0 && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
-                      Custom Providers
-                      <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
-                        cc
-                      </span>
-                    </DropdownMenuLabel>
-                    {customCliProfiles.map((profile, i) => (
-                      <DropdownMenuRadioItem
-                        key={profile.name}
-                        value={profile.name}
-                      >
-                        {profile.name}
-                        <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </>
-                )}
-              </DropdownMenuRadioGroup>
+              {showClaudeProviders ? (
+                <DropdownMenuRadioGroup
+                  value={selectedProvider ?? '__anthropic__'}
+                  onValueChange={handleProviderChange}
+                >
+                  <DropdownMenuRadioItem value="__anthropic__">
+                    Anthropic
+                    <Kbd className="ml-auto text-[10px]">1</Kbd>
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    Custom Providers
+                    <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
+                      cc
+                    </span>
+                  </DropdownMenuLabel>
+                  {customCliProfiles.map((profile, i) => (
+                    <DropdownMenuRadioItem
+                      key={profile.name}
+                      value={profile.name}
+                    >
+                      {profile.name}
+                      <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              ) : (
+                <DropdownMenuRadioGroup
+                  value={selectedProvider ?? '__default__'}
+                  onValueChange={handleProviderChange}
+                >
+                  <DropdownMenuRadioItem value="__default__">
+                    Default (OpenAI)
+                    <Kbd className="ml-auto text-[10px]">1</Kbd>
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    Custom Providers
+                    <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
+                      cx
+                    </span>
+                  </DropdownMenuLabel>
+                  {customCodexProviders.map((profile, i) => (
+                    <DropdownMenuRadioItem
+                      key={profile.name}
+                      value={profile.name}
+                    >
+                      {profile.name}
+                      <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </>

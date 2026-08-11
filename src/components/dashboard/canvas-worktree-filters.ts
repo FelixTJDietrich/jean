@@ -116,3 +116,7 @@ export function getCanvasFilterTabCount(
   return worktrees.filter(worktree => matchesCanvasFilterTab(worktree, tab))
     .length
 }
+
+export function shouldShowCanvasWorktreeSection(worktree: Worktree): boolean {
+  return worktree.status !== 'deleting'
+}

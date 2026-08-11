@@ -1,6 +1,7 @@
 import { renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type * as ModelCatalogService from '@/services/model-catalog'
+import { ANTIGRAVITY_MODEL_OPTIONS } from './toolbar-options'
 import { useToolbarDerivedState } from './useToolbarDerivedState'
 
 vi.mock('@/services/model-catalog', async importOriginal => {
@@ -102,6 +103,50 @@ describe('useToolbarDerivedState', () => {
     expect(
       result.current.claudeModelOptions.map(option => option.value)
     ).toEqual(['opus', 'sonnet', 'haiku'])
+  })
+
+  it('exposes Kimi Code as an installed backend with its configured default', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'kimi',
+        selectedProvider: null,
+        selectedModel: 'kimi/default',
+        customCliProfiles: [],
+        installedBackends: ['kimi'],
+        kimiModelOptions: [
+          { value: 'kimi/default', label: 'Configured default' },
+        ],
+      })
+    )
+
+    expect(result.current.backendModelSections).toEqual([
+      {
+        backend: 'kimi',
+        label: 'Kimi Code',
+        options: [{ value: 'kimi/default', label: 'Configured default' }],
+      },
+    ])
+    expect(result.current.selectedModelLabel).toBe('Configured default')
+  })
+
+  it('exposes Antigravity as an installed backend with its static model options', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'antigravity',
+        selectedProvider: null,
+        selectedModel: 'antigravity/auto',
+        customCliProfiles: [],
+        installedBackends: ['antigravity'],
+      })
+    )
+
+    expect(result.current.backendModelSections).toEqual([
+      {
+        backend: 'antigravity',
+        label: 'Antigravity CLI',
+        options: ANTIGRAVITY_MODEL_OPTIONS,
+      },
+    ])
   })
 
   it('counts enabled MCP servers identified by backend-prefixed keys', () => {

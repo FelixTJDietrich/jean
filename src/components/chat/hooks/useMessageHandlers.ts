@@ -9,13 +9,17 @@ import {
   persistEnqueue,
 } from '@/services/chat'
 import { useChatStore } from '@/store/chat-store'
-import { buildCodexUserInputAnswerMap } from '@/types/chat'
+import {
+  buildCodexUserInputAnswerMap,
+  getCodexUserInputRequestId,
+} from '@/types/chat'
 import type {
   ChatMessage,
   CodexCommandApprovalRequest,
   CodexDynamicToolCallRequest,
   CodexMcpElicitationRequest,
   CodexPermissionRequest,
+  OpenCodePermissionRequest,
   CodexUserInputRequest,
   EffortLevel,
   ExecutionMode,
@@ -44,6 +48,8 @@ import type {
 } from '@/types/projects'
 import { clearPlanApprovalTransientState } from './plan-approval-state'
 import type { ApprovalModelOverride } from '../ApprovalModelSubmenu'
+
+const respondingCodexUserInputRequests = new Set<string>()
 
 /** Git commands to auto-approve for magic prompts (no permission prompts needed) */
 export const GIT_ALLOWED_TOOLS = [
@@ -167,9 +173,15 @@ interface MessageHandlers {
   ) => void
   handleCodexCommandApproval: (
     request: CodexCommandApprovalRequest,
-    decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel'
+    decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel',
+    /** When true, promote Jean session to YOLO and auto-approve residual Codex prompts. */
+    promoteToYolo?: boolean
   ) => void
   handleCodexPermissionRequestDecline: (request: CodexPermissionRequest) => void
+  handleOpencodePermissionReply: (
+    request: OpenCodePermissionRequest,
+    reply: 'once' | 'always' | 'reject'
+  ) => void
   handleCodexUserInputAnswer: (
     request: CodexUserInputRequest,
     answers: QuestionAnswer[]
@@ -197,6 +209,7 @@ interface MessageHandlers {
 
 const THINKING_LEVEL_VALUES = new Set<ThinkingLevel>([
   'off',
+  'adaptive',
   'think',
   'megathink',
   'ultrathink',
@@ -213,6 +226,8 @@ function mapCodexReasoningToEffort(
   value: string | null | undefined
 ): EffortLevel | undefined {
   switch (value) {
+    case 'adaptive':
+      return 'adaptive'
     case 'low':
       return 'low'
     case 'medium':
@@ -235,10 +250,10 @@ function getDefaultModelForBackend(
   preferences: AppPreferences | undefined
 ): string {
   if (backend === 'codex') {
-    return preferences?.selected_codex_model ?? 'gpt-5.5'
+    return preferences?.selected_codex_model ?? 'gpt-5.6-sol'
   }
   if (backend === 'opencode') {
-    return preferences?.selected_opencode_model ?? 'opencode/gpt-5.5'
+    return preferences?.selected_opencode_model ?? 'opencode/gpt-5.6-sol'
   }
   if (backend === 'cursor') {
     return preferences?.selected_cursor_model ?? 'cursor/auto'
@@ -250,7 +265,13 @@ function getDefaultModelForBackend(
     return preferences?.selected_commandcode_model ?? 'commandcode/default'
   }
   if (backend === 'grok') {
-    return preferences?.selected_grok_model ?? 'grok/grok-composer-2.5-fast'
+    return preferences?.selected_grok_model ?? 'grok/grok-4.5'
+  }
+  if (backend === 'kimi') {
+    return preferences?.selected_kimi_model ?? 'kimi/default'
+  }
+  if (backend === 'antigravity') {
+    return preferences?.selected_antigravity_model ?? 'antigravity/auto'
   }
   return preferences?.selected_model ?? 'claude-opus-4-8[1m]'
 }
@@ -261,7 +282,10 @@ const SESSION_BACKENDS = new Set<Session['backend']>([
   'opencode',
   'cursor',
   'commandcode',
+  'pi',
   'grok',
+  'kimi',
+  'antigravity',
 ])
 
 function asSessionBackend(
@@ -552,6 +576,8 @@ export function useMessageHandlers({
       const waitingForInput =
         (state.pendingPermissionDenials[sessionId]?.length ?? 0) > 0 ||
         (state.pendingCodexPermissionRequests[sessionId]?.length ?? 0) > 0 ||
+        (state.pendingOpencodePermissionRequests[sessionId]?.length ?? 0) >
+          0 ||
         (state.pendingCodexUserInputRequests[sessionId]?.length ?? 0) > 0 ||
         (state.pendingCodexMcpElicitationRequests[sessionId]?.length ?? 0) >
           0 ||
@@ -565,6 +591,8 @@ export function useMessageHandlers({
         sessionId,
         pendingCodexPermissionRequests:
           state.pendingCodexPermissionRequests[sessionId] ?? [],
+        pendingOpencodePermissionRequests:
+          state.pendingOpencodePermissionRequests[sessionId] ?? [],
         pendingCodexUserInputRequests:
           state.pendingCodexUserInputRequests[sessionId] ?? [],
         pendingCodexMcpElicitationRequests:
@@ -2847,10 +2875,55 @@ export function useMessageHandlers({
     ]
   )
 
+  const handleOpencodePermissionReply = useCallback(
+    (request: OpenCodePermissionRequest, reply: 'once' | 'always' | 'reject') => {
+      const sessionId = activeSessionIdRef.current
+      const worktreeId = activeWorktreeIdRef.current
+      const worktreePath = activeWorktreePathRef.current
+      if (!sessionId || !worktreeId || !worktreePath) return
+
+      const store = useChatStore.getState()
+      const remaining = store
+        .getPendingOpencodePermissionRequests(sessionId)
+        .filter(item => item.request_id !== request.request_id)
+      store.setPendingOpencodePermissionRequests(sessionId, remaining)
+      if (remaining.length === 0) {
+        store.setWaitingForInput(sessionId, false)
+      }
+
+      const replyDir = request.working_dir?.trim() || worktreePath
+
+      invoke('respond_opencode_permission', {
+        worktreePath: replyDir,
+        requestId: request.request_id,
+        reply,
+        opencodeSessionId: request.opencode_session_id,
+        apiVersion: request.api_version ?? 'v1',
+      })
+        .then(() =>
+          persistCodexPendingState(sessionId, worktreeId, worktreePath)
+        )
+        .catch(err => {
+          console.error(
+            '[useMessageHandlers] Failed to respond to OpenCode permission request:',
+            err
+          )
+          toast.error(`Failed to respond to OpenCode permission: ${err}`)
+        })
+    },
+    [
+      activeSessionIdRef,
+      activeWorktreeIdRef,
+      activeWorktreePathRef,
+      persistCodexPendingState,
+    ]
+  )
+
   const handleCodexCommandApproval = useCallback(
     (
       request: CodexCommandApprovalRequest,
-      decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel'
+      decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel',
+      promoteToYolo = false
     ) => {
       const sessionId = activeSessionIdRef.current
       const worktreeId = activeWorktreeIdRef.current
@@ -2866,7 +2939,11 @@ export function useMessageHandlers({
       )
       store.setWaitingForInput(sessionId, false)
 
-      if (decision === 'acceptForSession') {
+      // Jean-level YOLO promote: switch session mode even when Codex only allows
+      // a one-shot "accept" (availableDecisions without acceptForSession — #626).
+      const shouldPromoteToYolo =
+        promoteToYolo || decision === 'acceptForSession'
+      if (shouldPromoteToYolo) {
         store.setExecutionMode(sessionId, 'yolo')
         invoke('broadcast_session_setting', {
           sessionId,
@@ -2893,7 +2970,12 @@ export function useMessageHandlers({
       invoke('respond_codex_command_approval', {
         sessionId,
         rpcId: request.rpc_id,
-        response: { decision },
+        response: {
+          decision,
+          // Backend strips this before forwarding to Codex, and uses it to set
+          // the mid-turn auto-approve flag even when decision is plain "accept".
+          promoteToYolo: shouldPromoteToYolo,
+        },
       })
         .then(() =>
           persistCodexPendingState(sessionId, worktreeId, worktreePath)
@@ -2923,20 +3005,25 @@ export function useMessageHandlers({
       if (!sessionId || !worktreeId || !worktreePath) return
 
       const store = useChatStore.getState()
-      const toolCallId = request.item_id || `codex-user-input-${request.rpc_id}`
-      store.markQuestionAnswered(sessionId, toolCallId, answers)
-      store.updateToolCallOutput(sessionId, toolCallId, JSON.stringify(answers))
-      store.setPendingCodexUserInputRequests(
-        sessionId,
-        store
-          .getPendingCodexUserInputRequests(sessionId)
-          .filter(item => item.rpc_id !== request.rpc_id)
-      )
-      store.setWaitingForInput(sessionId, false)
+      const toolCallId = getCodexUserInputRequestId(request)
+      const responseKey = `${sessionId}:${request.rpc_id}`
+      if (respondingCodexUserInputRequests.has(responseKey)) return
+      respondingCodexUserInputRequests.add(responseKey)
 
       const answerMap = buildCodexUserInputAnswerMap(request.questions, answers)
 
-      const persistAnsweredState = () => {
+      const completeResponse = () => {
+        store.markQuestionAnswered(sessionId, toolCallId, answers)
+        store.updateToolCallOutput(
+          sessionId,
+          toolCallId,
+          JSON.stringify(answers)
+        )
+        const remainingRequests = store
+          .getPendingCodexUserInputRequests(sessionId)
+          .filter(item => getCodexUserInputRequestId(item) !== toolCallId)
+        store.setPendingCodexUserInputRequests(sessionId, remainingRequests)
+        store.setWaitingForInput(sessionId, remainingRequests.length > 0)
         persistCodexPendingState(sessionId, worktreeId, worktreePath)
         invoke('update_session_state', {
           worktreeId,
@@ -2948,10 +3035,11 @@ export function useMessageHandlers({
           submittedAnswers:
             useChatStore.getState().submittedAnswers[sessionId] ?? {},
         }).catch(() => undefined)
+        respondingCodexUserInputRequests.delete(responseKey)
       }
 
       if (isCodexDevUserInputRequest(request)) {
-        persistAnsweredState()
+        completeResponse()
         console.info('[Codex Dev Flow] ToolRequestUserInputResponse', {
           answers: answerMap,
         })
@@ -2965,9 +3053,10 @@ export function useMessageHandlers({
         answers: answerMap,
       })
         .then(() => {
-          persistAnsweredState()
+          completeResponse()
         })
         .catch(err => {
+          respondingCodexUserInputRequests.delete(responseKey)
           console.error(
             '[useMessageHandlers] Failed to answer Codex user-input request:',
             err
@@ -3204,11 +3293,13 @@ Please apply this fix to the file.`
         chatQueryKeys.sessions(worktreeId)
       )
       const allContent =
-        cachedSessionsData?.sessions
-          ?.find((s: Session) => s.id === sessionId)
-          ?.messages?.filter((m: { role: string }) => m.role === 'assistant')
-          ?.map((m: { content: string }) => m.content)
-          ?.join('\n') ?? ''
+        (
+          cachedSessionsData?.sessions
+            ?.find((s: Session) => s.id === sessionId)
+            ?.messages?.flatMap((m: { role: string; content: string }) =>
+              m.role === 'assistant' ? [m.content] : []
+            ) ?? []
+        ).join('\n')
       const findings = parseReviewFindings(allContent)
       const findingIndex = findings.findIndex(
         f =>
@@ -3341,11 +3432,13 @@ Please apply all these fixes to the respective files.`
         chatQueryKeys.sessions(worktreeId)
       )
       const allContent =
-        cachedSessionsData?.sessions
-          ?.find((s: Session) => s.id === sessionId)
-          ?.messages?.filter((m: { role: string }) => m.role === 'assistant')
-          ?.map((m: { content: string }) => m.content)
-          ?.join('\n') ?? ''
+        (
+          cachedSessionsData?.sessions
+            ?.find((s: Session) => s.id === sessionId)
+            ?.messages?.flatMap((m: { role: string; content: string }) =>
+              m.role === 'assistant' ? [m.content] : []
+            ) ?? []
+        ).join('\n')
       const allFindings = parseReviewFindings(allContent)
 
       for (const { finding } of findingsWithSuggestions) {
@@ -3451,6 +3544,7 @@ Please apply all these fixes to the respective files.`
     handleCodexPermissionRequest,
     handleCodexCommandApproval,
     handleCodexPermissionRequestDecline,
+    handleOpencodePermissionReply,
     handleCodexUserInputAnswer,
     handleCodexMcpElicitationAccept,
     handleCodexMcpElicitationDecline,

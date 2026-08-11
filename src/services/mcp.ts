@@ -56,6 +56,9 @@ export function invalidateAllMcpServers(
  * - Codex:    ~/.codex/config.toml + .codex/config.toml
  * - OpenCode: ~/.config/opencode/opencode.json + opencode.json
  * - Cursor:   ~/.cursor/mcp.json + .cursor/mcp.json
+ * - Grok:     ~/.grok/config.toml + project .grok/config.toml (+ Claude/Cursor/.mcp.json compat)
+ * - Kimi:     ~/.kimi-code/mcp.json + project .kimi-code/mcp.json
+ * - Antigravity:   ~/.gemini/config/mcp_config.json + project .agents/mcp_config.json
  */
 export function useMcpServers(
   worktreePath: string | null | undefined,
@@ -87,6 +90,9 @@ export function useAllBackendsMcpServers(
   const codex = useMcpServers(worktreePath, 'codex')
   const opencode = useMcpServers(worktreePath, 'opencode')
   const cursor = useMcpServers(worktreePath, 'cursor')
+  const grok = useMcpServers(worktreePath, 'grok')
+  const kimi = useMcpServers(worktreePath, 'kimi')
+  const antigravity = useMcpServers(worktreePath, 'antigravity')
 
   const has = useMemo(() => new Set(installedBackends), [installedBackends])
 
@@ -96,14 +102,29 @@ export function useAllBackendsMcpServers(
     if (has.has('codex') && codex.data) result.push(...codex.data)
     if (has.has('opencode') && opencode.data) result.push(...opencode.data)
     if (has.has('cursor') && cursor.data) result.push(...cursor.data)
+    if (has.has('grok') && grok.data) result.push(...grok.data)
+    if (has.has('kimi') && kimi.data) result.push(...kimi.data)
+    if (has.has('antigravity') && antigravity.data) result.push(...antigravity.data)
     return result
-  }, [has, claude.data, codex.data, cursor.data, opencode.data])
+  }, [
+    has,
+    claude.data,
+    codex.data,
+    cursor.data,
+    antigravity.data,
+    grok.data,
+    kimi.data,
+    opencode.data,
+  ])
 
   const isLoading =
     (has.has('claude') && claude.isLoading) ||
     (has.has('codex') && codex.isLoading) ||
     (has.has('opencode') && opencode.isLoading) ||
-    (has.has('cursor') && cursor.isLoading)
+    (has.has('cursor') && cursor.isLoading) ||
+    (has.has('grok') && grok.isLoading) ||
+    (has.has('kimi') && kimi.isLoading) ||
+    (has.has('antigravity') && antigravity.isLoading)
 
   return { data: servers, isLoading }
 }
@@ -148,6 +169,8 @@ export function useAllBackendsMcpHealth(
   const opencode = useMcpHealthCheck('opencode', worktreePath)
   const cursor = useMcpHealthCheck('cursor', worktreePath)
   const grok = useMcpHealthCheck('grok', worktreePath)
+  const kimi = useMcpHealthCheck('kimi', worktreePath)
+  const antigravity = useMcpHealthCheck('antigravity', worktreePath)
 
   const has = useMemo(() => new Set(installedBackends), [installedBackends])
 
@@ -159,6 +182,8 @@ export function useAllBackendsMcpHealth(
       ['opencode', opencode],
       ['cursor', cursor],
       ['grok', grok],
+      ['kimi', kimi],
+      ['antigravity', antigravity],
     ]
     for (const [backend, query] of entries) {
       if (has.has(backend) && query.data?.statuses) {
@@ -168,13 +193,25 @@ export function useAllBackendsMcpHealth(
       }
     }
     return merged
-  }, [has, claude.data, codex.data, cursor.data, grok.data, opencode.data])
+  }, [
+    has,
+    claude.data,
+    codex.data,
+    cursor.data,
+    antigravity.data,
+    grok.data,
+    kimi.data,
+    opencode.data,
+  ])
 
   const isFetching =
     (has.has('claude') && claude.isFetching) ||
     (has.has('codex') && codex.isFetching) ||
     (has.has('opencode') && opencode.isFetching) ||
-    (has.has('cursor') && cursor.isFetching)
+    (has.has('cursor') && cursor.isFetching) ||
+    (has.has('grok') && grok.isFetching) ||
+    (has.has('kimi') && kimi.isFetching) ||
+    (has.has('antigravity') && antigravity.isFetching)
 
   const refetchAll = useMemo(
     () => () => {
@@ -182,8 +219,20 @@ export function useAllBackendsMcpHealth(
       if (has.has('codex')) codex.refetch()
       if (has.has('opencode')) opencode.refetch()
       if (has.has('cursor')) cursor.refetch()
+      if (has.has('grok')) grok.refetch()
+      if (has.has('kimi')) kimi.refetch()
+      if (has.has('antigravity')) antigravity.refetch()
     },
-    [has, claude.refetch, codex.refetch, cursor.refetch, opencode.refetch] // eslint-disable-line react-hooks/exhaustive-deps
+    [
+      has,
+      claude.refetch,
+      codex.refetch,
+      cursor.refetch,
+      antigravity.refetch,
+      grok.refetch,
+      kimi.refetch,
+      opencode.refetch,
+    ] // eslint-disable-line react-hooks/exhaustive-deps
   )
 
   return { statuses, isFetching, refetchAll }
@@ -206,12 +255,12 @@ export function getNewServersToAutoEnable(
 ): string[] {
   const enabledSet = new Set(currentEnabled)
   const knownSet = new Set(knownServers)
-  return allServers
-    .filter(s => {
-      const key = mcpKey(s.backend, s.name)
-      return !s.disabled && !enabledSet.has(key) && !knownSet.has(key)
-    })
-    .map(s => mcpKey(s.backend, s.name))
+  return allServers.flatMap(s => {
+    const key = mcpKey(s.backend, s.name)
+    return !s.disabled && !enabledSet.has(key) && !knownSet.has(key)
+      ? [key]
+      : []
+  })
 }
 
 /**
@@ -245,6 +294,98 @@ export function buildMcpConfigJson(
 
   if (Object.keys(mcpServers).length === 0) return undefined
   return JSON.stringify({ mcpServers })
+}
+
+/**
+ * Resolve enabled MCP servers with the same cascade as ChatWindow:
+ * session override → project → global defaults, then auto-enable newly
+ * discovered servers (unless a session override is set).
+ */
+export function resolveEnabledMcpServers(options: {
+  availableServers: McpServerInfo[]
+  /** Explicit session override; presence (including empty array) skips auto-enable */
+  sessionEnabled?: string[]
+  projectEnabled?: string[] | null
+  globalEnabled?: string[]
+  knownServers?: string[]
+}): string[] {
+  const hasSessionOverride = options.sessionEnabled !== undefined
+  const baseEnabled = hasSessionOverride
+    ? (options.sessionEnabled ?? [])
+    : options.projectEnabled != null
+      ? options.projectEnabled
+      : (options.globalEnabled ?? [])
+
+  // Antigravity has no per-run MCP override. `agy` automatically loads every
+  // enabled server from its persistent config, so Jean must not show a server
+  // as off when the CLI will still use it.
+  const antigravityEnabled = options.availableServers
+    .filter(server => server.backend === 'antigravity' && !server.disabled)
+    .map(server => mcpKey('antigravity', server.name))
+  const effectiveBase = [...new Set([...baseEnabled, ...antigravityEnabled])]
+
+  if (hasSessionOverride) return effectiveBase
+
+  const knownServers = options.knownServers ?? []
+  const newlyEnabled = getNewServersToAutoEnable(
+    options.availableServers,
+    effectiveBase,
+    knownServers
+  )
+  return newlyEnabled.length > 0
+    ? [...effectiveBase, ...newlyEnabled]
+    : effectiveBase
+}
+
+export interface ResolveMcpConfigForSendOptions {
+  worktreePath: string
+  backend: CliBackend
+  sessionEnabled?: string[]
+  projectEnabled?: string[] | null
+  globalEnabled?: string[]
+  knownServers?: string[]
+}
+
+/**
+ * Fetch MCP servers and build the config JSON used by send_chat_message.
+ * Safe to call outside React (magic commands, background automation).
+ *
+ * Always attempts discovery via invoke (no isTauri gate) so fire-and-forget
+ * magic paths work in the same environments as create_session/send_chat_message.
+ */
+export async function resolveMcpConfigForSend(
+  options: ResolveMcpConfigForSendOptions
+): Promise<{ mcpConfig?: string; enabledServers: string[] }> {
+  let availableServers: McpServerInfo[] = []
+  try {
+    availableServers = await invoke<McpServerInfo[]>('get_mcp_servers', {
+      backend: options.backend,
+      worktreePath: options.worktreePath,
+    })
+    if (!Array.isArray(availableServers)) {
+      availableServers = []
+    }
+  } catch {
+    // Proceed with empty discovery — Claude still gets Jean MCP via backend merge
+    availableServers = []
+  }
+
+  const enabledServers = resolveEnabledMcpServers({
+    availableServers,
+    sessionEnabled: options.sessionEnabled,
+    projectEnabled: options.projectEnabled,
+    globalEnabled: options.globalEnabled,
+    knownServers: options.knownServers,
+  })
+
+  return {
+    enabledServers,
+    mcpConfig: buildMcpConfigJson(
+      availableServers,
+      enabledServers,
+      options.backend
+    ),
+  }
 }
 
 // ── Composite key helpers ──────────────────────────────────────────────
@@ -300,6 +441,8 @@ export const BACKEND_LABELS: Record<CliBackend, string> = {
   pi: 'PI',
   commandcode: 'Command Code',
   grok: 'Grok',
+  kimi: 'Kimi Code',
+  antigravity: 'Antigravity CLI',
 }
 
 /** Group servers by their backend field */

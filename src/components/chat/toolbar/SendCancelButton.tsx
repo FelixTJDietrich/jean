@@ -1,4 +1,4 @@
-import { getModifierSymbol, isMacOS } from '@/lib/platform'
+import { getModifierSymbol, isClientMacOS } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/kbd'
 import {
@@ -11,6 +11,10 @@ import { useIsMobile } from '@/hooks/use-mobile'
 interface SendCancelButtonProps {
   isSending: boolean
   canSend: boolean
+  /** When true, the secondary action steers into the running turn instead of queueing. */
+  willSteer?: boolean
+  /** When true, steering requires the primary modifier plus Enter. */
+  steerWithModifier?: boolean
   queuedMessageCount?: number
   onCancel: () => void
 }
@@ -18,6 +22,8 @@ interface SendCancelButtonProps {
 export function SendCancelButton({
   isSending,
   canSend,
+  willSteer = false,
+  steerWithModifier = false,
   queuedMessageCount,
   onCancel,
 }: SendCancelButtonProps) {
@@ -37,20 +43,34 @@ export function SendCancelButton({
             <span>{queuedMessageCount ? 'Skip to Next' : 'Cancel'}</span>
             {!isMobile && (
               <Kbd className="ml-0.5 h-4 text-[10px] bg-primary-foreground/20 text-primary-foreground">
-                {isMacOS ? `${getModifierSymbol()}⌥⌫` : 'Ctrl+Alt+⌫'}
+                {isClientMacOS ? `${getModifierSymbol()}⌥⌫` : 'Ctrl+Alt+⌫'}
               </Kbd>
             )}
           </button>
         </TooltipTrigger>
         <TooltipContent>
           {queuedMessageCount
-            ? `Skip to next queued message (${isMacOS ? `${getModifierSymbol()}+Option+Backspace` : 'Ctrl+Alt+Backspace'})`
-            : `Cancel (${isMacOS ? `${getModifierSymbol()}+Option+Backspace` : 'Ctrl+Alt+Backspace'})`}
+            ? `Skip to next queued message (${isClientMacOS ? `${getModifierSymbol()}+Option+Backspace` : 'Ctrl+Alt+Backspace'})`
+            : `Cancel (${isClientMacOS ? `${getModifierSymbol()}+Option+Backspace` : 'Ctrl+Alt+Backspace'})`}
         </TooltipContent>
       </Tooltip>
     )
 
     if (canSend) {
+      const actionLabel = willSteer ? 'Steer' : 'Queue'
+      const actionShortcut = steerWithModifier
+        ? isClientMacOS
+          ? `${getModifierSymbol()}↵`
+          : `${getModifierSymbol()}+Enter`
+        : 'Enter'
+      const actionTooltip = willSteer
+        ? isMobile
+          ? 'Steer into running turn'
+          : `Steer into running turn (${actionShortcut})`
+        : isMobile
+          ? 'Queue message'
+          : 'Queue message (Enter)'
+
       return (
         <div className="flex items-center">
           {cancelButton}
@@ -59,14 +79,16 @@ export function SendCancelButton({
             <TooltipTrigger asChild>
               <button
                 type="submit"
-                className="flex h-8 items-center justify-center px-2.5 text-xs font-medium transition-colors text-muted-foreground hover:bg-muted/80 hover:text-foreground"
+                aria-label={actionLabel}
+                className="flex h-8 items-center justify-center gap-1.5 px-2.5 text-xs font-medium transition-colors text-muted-foreground hover:bg-muted/80 hover:text-foreground"
               >
-                <span>Queue</span>
+                <span>{actionLabel}</span>
+                {!isMobile && (
+                  <Kbd className="h-4 text-[10px]">{actionShortcut}</Kbd>
+                )}
               </button>
             </TooltipTrigger>
-            <TooltipContent>
-              {isMobile ? 'Queue message' : 'Queue message (Enter)'}
-            </TooltipContent>
+            <TooltipContent>{actionTooltip}</TooltipContent>
           </Tooltip>
         </div>
       )

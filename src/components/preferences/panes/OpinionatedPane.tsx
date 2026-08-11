@@ -43,6 +43,9 @@ const PLUGINS: PluginDefinition[] = [
     backends: ['Claude', 'Codex', 'OpenCode', 'Cursor', 'all CLIs'],
     usage: [
       {
+        note: "On Linux and macOS, installs through RTK's documented curl installer into ~/.local/bin.",
+      },
+      {
         note: 'Runs transparently — once installed, use your normal CLI commands (git, npm, docker, cargo, etc.) and RTK auto-rewrites them to token-optimized versions.',
       },
       {
@@ -77,7 +80,7 @@ const PLUGINS: PluginDefinition[] = [
     ],
     usage: [
       {
-        note: "Installs through Caveman's unified installer where supported, then mirrors Jean-global skills for every Jean AI backend found on this machine.",
+        note: "On Linux and macOS, installs through Caveman's documented curl installer. Jean then mirrors skills into each backend's CLI path (including ~/.grok/skills for Grok) plus Jean-global mirrors.",
       },
       {
         note: 'Claude and OpenCode can auto-activate. Codex and Cursor expose skills for per-session activation with /caveman; Cursor also gets an always-on rule when the installer can write one.',
@@ -114,7 +117,7 @@ const PLUGINS: PluginDefinition[] = [
     ],
     usage: [
       {
-        note: 'Installs through Claude when available, then mirrors Superpowers skills into every Jean AI backend. Without Claude, Jean fetches the Superpowers repo directly.',
+        note: 'Installs through Claude when available, then mirrors Superpowers skills into each backend CLI path (including ~/.grok/skills for Grok) plus Jean-global mirrors. Without Claude, Jean fetches the Superpowers repo directly.',
       },
       {
         label: 'Brainstorm a feature',
@@ -139,6 +142,8 @@ const PLUGINS: PluginDefinition[] = [
 interface PluginStatus {
   installed: boolean
   version: string | null
+  install_supported?: boolean
+  unsupported_reason?: string
   backends?: BackendPluginStatus[]
 }
 
@@ -197,6 +202,7 @@ function PluginCard({ plugin }: { plugin: PluginDefinition }) {
     plugin.scope === 'ai-backends' &&
     (status?.backends?.some(backend => !backend.installed) ?? false)
   const statusLabel = hasMissingBackend ? 'Partial' : 'Installed'
+  const installUnsupported = status?.install_supported === false
 
   const handleUninstall = useCallback(async () => {
     setUninstalling(true)
@@ -250,6 +256,11 @@ function PluginCard({ plugin }: { plugin: PluginDefinition }) {
                 ) : (
                   <span className="truncate"> (v{status.version})</span>
                 ))}
+            </Badge>
+          )}
+          {!checking && installUnsupported && (
+            <Badge variant="outline" className="text-xs">
+              Unsupported
             </Badge>
           )}
           <Badge variant="outline" className="max-w-full truncate text-xs">
@@ -311,15 +322,16 @@ function PluginCard({ plugin }: { plugin: PluginDefinition }) {
             <Button
               size="sm"
               onClick={handleInstall}
-              disabled={installing || uninstalling}
+              disabled={installing || uninstalling || installUnsupported}
+              title={status?.unsupported_reason}
               className="w-full sm:w-auto"
             >
-              {installing ? (
+              {installUnsupported ? null : installing ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Download className="h-4 w-4" />
               )}
-              Install
+              {installUnsupported ? 'Unsupported' : 'Install'}
             </Button>
           )}
         </span>
@@ -336,6 +348,11 @@ function PluginCard({ plugin }: { plugin: PluginDefinition }) {
             <p className="text-xs text-muted-foreground">
               {plugin.description}
             </p>
+            {status?.unsupported_reason && (
+              <p className="text-xs text-destructive">
+                {status.unsupported_reason}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => openExternal(plugin.githubUrl)}

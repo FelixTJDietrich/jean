@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useTerminal } from '@/hooks/useTerminal'
+import { StandaloneTerminalSurface } from '@/components/chat/StandaloneTerminalSurface'
 import { disposeTerminal, setOnStopped } from '@/lib/terminal-instances'
 
 interface CliVersionInfo {
@@ -158,11 +158,15 @@ export function SetupState({
 
   const renderManualVersionInput = (disabled = false) => (
     <div className="space-y-1.5">
-      <label className="text-xs text-muted-foreground">
+      <label
+        htmlFor="cli-manual-version"
+        className="text-xs text-muted-foreground"
+      >
         Or enter a manual version
       </label>
       <div className="flex gap-2">
         <Input
+          id="cli-manual-version"
           type="text"
           placeholder="2.1.98"
           value={manualVersion}
@@ -214,7 +218,10 @@ export function SetupState({
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <label className="text-sm font-medium text-foreground">
+          <label
+            htmlFor="cli-select-version"
+            className="text-sm font-medium text-foreground"
+          >
             Select Version
           </label>
           {!isLoading && !isError && versions.length > 0 && onRetry && (
@@ -256,7 +263,7 @@ export function SetupState({
               value={selectedVersion ?? undefined}
               onValueChange={handleSelectVersion}
             >
-              <SelectTrigger className="w-full">
+              <SelectTrigger id="cli-select-version" className="w-full">
                 <SelectValue placeholder="Select a version" />
               </SelectTrigger>
               <SelectContent>
@@ -398,6 +405,7 @@ export interface AuthLoginStateProps {
   terminalId: string
   command: string
   commandArgs?: string[] | null
+  action?: 'login' | 'install'
   onComplete: () => void
   onRetry?: () => void
   onSkip?: () => void
@@ -408,57 +416,30 @@ export function AuthLoginState({
   terminalId,
   command,
   commandArgs,
+  action = 'login',
   onComplete,
   onRetry,
   onSkip,
 }: AuthLoginStateProps) {
-  const observerRef = useRef<ResizeObserver | null>(null)
-  const initialized = useRef(false)
+  const actionLabel = action === 'install' ? 'Installation' : 'Login'
+  const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  )
+  const completionStartedRef = useRef(false)
   const [exitStatus, setExitStatus] = useState<{
     exitCode: number | null
     signal: string | null
   } | null>(null)
 
-  const { initTerminal, fit } = useTerminal({
-    terminalId,
-    worktreeId: 'cli-login',
-    worktreePath: '/tmp',
-    command,
-    commandArgs,
-  })
-
-  const containerCallbackRef = useCallback(
-    (container: HTMLDivElement | null) => {
-      if (observerRef.current) {
-        observerRef.current.disconnect()
-        observerRef.current = null
-      }
-
-      if (!container) return
-
-      const observer = new ResizeObserver(entries => {
-        const entry = entries[0]
-        if (
-          !entry ||
-          entry.contentRect.width === 0 ||
-          entry.contentRect.height === 0
-        )
-          return
-
-        if (!initialized.current) {
-          initialized.current = true
-          initTerminal(container)
-          return
-        }
-
-        fit()
-      })
-
-      observer.observe(container)
-      observerRef.current = observer
-    },
-    [initTerminal, fit]
-  )
+  const handleCompleteOnce = useCallback(() => {
+    if (completionStartedRef.current) return
+    completionStartedRef.current = true
+    if (completionTimeoutRef.current) {
+      clearTimeout(completionTimeoutRef.current)
+      completionTimeoutRef.current = null
+    }
+    onComplete()
+  }, [onComplete])
 
   useEffect(() => {
     dbg(
@@ -489,7 +470,9 @@ export function AuthLoginState({
       if (exitCode === 0) {
         dbg('AuthLoginState: exit 0, calling onComplete in 1.5s')
         // Brief delay so user can see the success output
-        setTimeout(() => onComplete(), 1500)
+        if (!completionStartedRef.current) {
+          completionTimeoutRef.current = setTimeout(handleCompleteOnce, 1500)
+        }
         return
       }
 
@@ -497,17 +480,17 @@ export function AuthLoginState({
       setExitStatus({ exitCode, signal })
     })
     return () => setOnStopped(terminalId, undefined)
-  }, [terminalId, onComplete, cliName])
+  }, [terminalId, handleCompleteOnce, cliName])
 
   useEffect(() => {
     setExitStatus(null)
   }, [terminalId])
 
-  // Cleanup observer and terminal on unmount
+  // Cleanup terminal on unmount
   useEffect(() => {
     return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect()
+      if (completionTimeoutRef.current) {
+        clearTimeout(completionTimeoutRef.current)
       }
       invoke('stop_terminal', { terminalId }).catch(() => {
         /* noop */
@@ -519,20 +502,33 @@ export function AuthLoginState({
   return (
     <div className="space-y-4">
       <div className="text-center">
-        <p className="font-medium">{cliName} Login Required</p>
-        <p className="text-sm text-muted-foreground mt-1">
-          Complete the authentication process below.
+        <p className="font-medium">
+          {cliName} {action === 'install' ? 'Installation' : 'Login'} Required
         </p>
+        <p className="text-sm text-muted-foreground mt-1">
+          Complete the{' '}
+          {action === 'install' ? 'installation' : 'authentication'}
+          {' process below.'}
+        </p>
+        {action === 'login' && (
+          <p className="text-xs text-muted-foreground mt-2">
+            Click the terminal, then use ↑/↓ and Enter to choose options. The
+            provider list may take a few seconds to appear.
+          </p>
+        )}
       </div>
 
-      <div className="h-[300px] w-full overflow-hidden rounded-md border border-border bg-background p-3 sm:p-4">
-        <div ref={containerCallbackRef} className="h-full w-full" />
-      </div>
+      <StandaloneTerminalSurface
+        terminalId={terminalId}
+        command={command}
+        commandArgs={commandArgs}
+        className="h-[min(50dvh,380px)] min-h-[200px] sm:h-[360px]"
+      />
 
       {exitStatus && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
           <p className="text-sm font-medium text-destructive">
-            Login process exited unexpectedly
+            {actionLabel} process exited unexpectedly
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             {exitStatus.signal
@@ -545,8 +541,8 @@ export function AuthLoginState({
       <div className="flex gap-2">
         {exitStatus ? (
           <>
-            <Button onClick={onComplete} className="flex-1" size="lg">
-              Check Login Status
+            <Button onClick={handleCompleteOnce} className="flex-1" size="lg">
+              Check {actionLabel} Status
             </Button>
             {onRetry && (
               <Button
@@ -555,13 +551,13 @@ export function AuthLoginState({
                 className="flex-1"
                 size="lg"
               >
-                Retry Login
+                Retry {actionLabel}
               </Button>
             )}
           </>
         ) : (
-          <Button onClick={onComplete} className="flex-1" size="lg">
-            I&apos;ve Completed Login
+          <Button onClick={handleCompleteOnce} className="flex-1" size="lg">
+            I&apos;ve Completed {actionLabel}
           </Button>
         )}
         {onSkip && (
@@ -628,6 +624,7 @@ export function CliPathSelector({
 
       <div className="space-y-3">
         <button
+          type="button"
           onClick={() => {
             if (!pathFound) return
             dbg('CliPathSelector: user selected PATH for', cliName)
@@ -657,6 +654,7 @@ export function CliPathSelector({
         </button>
 
         <button
+          type="button"
           onClick={() => {
             dbg('CliPathSelector: user selected JEAN for', cliName)
             onSelectJean()

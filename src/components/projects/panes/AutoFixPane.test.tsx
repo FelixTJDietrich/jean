@@ -4,12 +4,18 @@ import { fireEvent, render, screen, within } from '@/test/test-utils'
 import type { Project, ProjectAutoFixSettings } from '@/types/projects'
 import {
   AutoFixPane,
+  buildAutoFixSettings,
+  firstAvailableBackend,
   hasAutoFixSettingsChanges,
   MR_ROBOT_SETTINGS_BADGE,
+  normalizeAutoFixProvider,
+  resolveAutoFixBackend,
 } from './AutoFixPane'
+import type { CliBackend } from '@/types/preferences'
 
 const mutateMock = vi.fn()
 let projectsMock: Project[] = []
+let installedBackendsMock: CliBackend[] = ['claude', 'codex', 'cursor']
 
 class ResizeObserverMock {
   observe() {
@@ -44,18 +50,37 @@ vi.mock('@/services/github', () => ({
   }),
 }))
 
+const preferencesMock = {
+  favorite_models: [] as string[],
+  fast_mode_models: [] as string[],
+  custom_cli_profiles: [] as {
+    name: string
+    settings_json: string
+    supports_thinking?: boolean
+  }[],
+}
+
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
-    data: {
-      favorite_models: [],
-      fast_mode_models: [],
-    },
+    data: preferencesMock,
   }),
   usePatchPreferences: () => ({ mutate: vi.fn() }),
 }))
 
+vi.mock('@/hooks/useInstalledBackends', () => ({
+  useInstalledBackends: () => ({
+    // Subset of CLI backends — uninstalled ones must not appear in the picker
+    installedBackends: installedBackendsMock,
+    isLoading: false,
+  }),
+}))
+
 vi.mock('@/services/opencode-cli', () => ({
   useAvailableOpencodeModels: () => ({ data: undefined }),
+  useRefreshOpencodeModels: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+  }),
 }))
 
 vi.mock('@/services/cursor-cli', () => ({
@@ -70,6 +95,43 @@ vi.mock('@/services/commandcode-cli', () => ({
   useAvailableCommandCodeModels: () => ({ data: undefined }),
 }))
 
+vi.mock('@/services/grok-cli', () => ({
+  useAvailableGrokModels: () => ({ data: undefined }),
+}))
+
+vi.mock('@/services/kimi-cli', () => ({
+  useAvailableKimiModels: () => ({ data: undefined }),
+}))
+
+vi.mock('@/services/model-catalog', () => ({
+  useModelCatalog: () => ({ data: undefined }),
+  useRefreshModelCatalog: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+  }),
+  getCatalogModelOptions: (_catalog: unknown, backend: string) => {
+    if (backend === 'codex') {
+      return [
+        { value: 'gpt-5.4', label: 'GPT 5.4' },
+        { value: 'gpt-5.5', label: 'GPT 5.5' },
+      ]
+    }
+    if (backend === 'claude') {
+      return [
+        { value: 'claude-opus-4-8[1m]', label: 'Claude Opus 4.8 (1M)' },
+        { value: 'haiku', label: 'Claude Haiku' },
+      ]
+    }
+    return []
+  },
+  getCatalogModelFastInfo: () => ({
+    supportsFast: false,
+    fastModel: null,
+    baseModel: null,
+  }),
+  getCatalogModelReasoning: () => undefined,
+}))
+
 const baseAutoFixSettings: ProjectAutoFixSettings = {
   enabled: false,
   interval_minutes: 30,
@@ -77,9 +139,11 @@ const baseAutoFixSettings: ProjectAutoFixSettings = {
   max_parallel_worktrees: 3,
   planning_backend: 'claude',
   planning_model: 'haiku',
+  planning_provider: null,
   auto_yolo_enabled: false,
   yolo_backend: 'claude',
   yolo_model: null,
+  yolo_provider: null,
   active_hours_enabled: false,
   active_hours_start: 20,
   active_hours_end: 8,
@@ -114,10 +178,33 @@ function getElementAt<T>(items: T[], index: number): T {
   return item
 }
 
+describe('auto-fix backend defaults', () => {
+  it('picks the first installed backend as the default', () => {
+    expect(firstAvailableBackend(['codex', 'cursor'])).toBe('codex')
+    expect(firstAvailableBackend([])).toBe('claude')
+  })
+
+  it('keeps an installed backend and remaps uninstalled ones', () => {
+    expect(resolveAutoFixBackend('cursor', ['codex', 'cursor'])).toBe('cursor')
+    expect(resolveAutoFixBackend('claude', ['codex', 'cursor'])).toBe('codex')
+    expect(resolveAutoFixBackend(null, ['pi'])).toBe('pi')
+  })
+
+  it('defaults planning and yolo to the first available backend', () => {
+    const settings = buildAutoFixSettings(null, ['codex', 'opencode'])
+    expect(settings.planning_backend).toBe('codex')
+    expect(settings.yolo_backend).toBe('codex')
+  })
+})
+
 describe('AutoFixPane', () => {
   beforeEach(() => {
     mutateMock.mockReset()
     projectsMock = [project()]
+    installedBackendsMock = ['claude', 'codex', 'cursor']
+    preferencesMock.favorite_models = []
+    preferencesMock.fast_mode_models = []
+    preferencesMock.custom_cli_profiles = []
     HTMLElement.prototype.hasPointerCapture = vi.fn()
     HTMLElement.prototype.releasePointerCapture = vi.fn()
     HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -350,18 +437,60 @@ describe('AutoFixPane', () => {
     ).toHaveTextContent('Backend default')
   })
 
-  it('offers every CLI backend for planning and yolo execution', async () => {
+  it('defaults to the first installed backend when Claude is not available', () => {
+    installedBackendsMock = ['codex', 'cursor']
+    projectsMock = [
+      {
+        id: 'project-id',
+        name: 'Project',
+        path: '/tmp/project',
+        default_branch: 'main',
+        added_at: 1,
+        order: 1,
+        auto_fix_settings: null,
+      },
+    ]
+    renderPane()
+
+    expect(
+      screen.getByRole('button', { name: 'Choose planning backend and model' })
+    ).toHaveTextContent('Codex')
+    expect(
+      screen.getByRole('button', { name: 'Choose yolo backend and model' })
+    ).toHaveTextContent('Codex')
+  })
+
+  it('remaps a saved Claude backend when Claude is not installed', () => {
+    installedBackendsMock = ['codex', 'cursor']
+    projectsMock = [
+      project({
+        planning_backend: 'claude',
+        yolo_backend: 'claude',
+        auto_yolo_enabled: true,
+      }),
+    ]
+    renderPane()
+
+    expect(
+      screen.getByRole('button', { name: 'Choose planning backend and model' })
+    ).toHaveTextContent('Codex')
+    expect(
+      screen.getByRole('button', { name: 'Choose yolo backend and model' })
+    ).toHaveTextContent('Codex')
+  })
+
+  it('only offers installed backends for planning and yolo execution', async () => {
     const user = userEvent.setup()
     projectsMock = [project({ auto_yolo_enabled: true })]
     renderPane()
 
-    const expectedBackends = [
-      'Claude',
-      'Codex',
+    const expectedBackends = ['Claude', 'Codex', 'Cursor']
+    const hiddenBackends = [
       'OpenCode',
-      'Cursor',
       'PI (Beta)',
       'Command Code (Beta)',
+      'Grok (Beta)',
+      'Kimi Code (Beta)',
     ]
 
     await user.click(
@@ -373,6 +502,11 @@ describe('AutoFixPane', () => {
         within(planningTabs).getByRole('tab', { name: backend })
       ).toBeInTheDocument()
     }
+    for (const backend of hiddenBackends) {
+      expect(
+        within(planningTabs).queryByRole('tab', { name: backend })
+      ).not.toBeInTheDocument()
+    }
     await user.keyboard('{Escape}')
 
     await user.click(
@@ -383,6 +517,11 @@ describe('AutoFixPane', () => {
       expect(
         within(yoloTabs).getByRole('tab', { name: backend })
       ).toBeInTheDocument()
+    }
+    for (const backend of hiddenBackends) {
+      expect(
+        within(yoloTabs).queryByRole('tab', { name: backend })
+      ).not.toBeInTheDocument()
     }
   })
 
@@ -456,5 +595,103 @@ describe('AutoFixPane', () => {
         yolo_model: null,
       }),
     })
+  })
+
+  it('shows custom Claude providers for planning and yolo', async () => {
+    const user = userEvent.setup()
+    preferencesMock.custom_cli_profiles = [
+      {
+        name: 'MiniMax',
+        settings_json: JSON.stringify({
+          env: {
+            ANTHROPIC_MODEL: 'MiniMax-M2.5',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.5',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M2.5',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M2.5',
+          },
+        }),
+      },
+    ]
+    projectsMock = [
+      project({
+        auto_yolo_enabled: true,
+        planning_provider: null,
+        yolo_provider: null,
+      }),
+    ]
+    renderPane()
+
+    expect(
+      screen.getByRole('combobox', { name: 'Choose planning provider' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('combobox', { name: 'Choose yolo provider' })
+    ).toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole('combobox', { name: 'Choose planning provider' })
+    )
+    await user.click(await screen.findByRole('option', { name: 'MiniMax' }))
+
+    fireEvent.change(getElementAt(screen.getAllByRole('spinbutton'), 0), {
+      target: { value: '32' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save settings' }))
+
+    expect(mutateMock).toHaveBeenCalledWith({
+      projectId: 'project-id',
+      autoFixSettings: expect.objectContaining({
+        planning_provider: 'MiniMax',
+        planning_backend: 'claude',
+      }),
+    })
+  })
+
+  it('clears providers when switching away from Claude', async () => {
+    const user = userEvent.setup()
+    preferencesMock.custom_cli_profiles = [
+      {
+        name: 'OpenRouter',
+        settings_json: '{}',
+      },
+    ]
+    projectsMock = [
+      project({
+        planning_provider: 'OpenRouter',
+        planning_model: 'opus',
+        auto_yolo_enabled: true,
+      }),
+    ]
+    renderPane()
+
+    expect(
+      screen.getByRole('button', { name: 'Choose planning backend and model' })
+    ).toHaveTextContent('OpenRouter')
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose planning backend and model' })
+    )
+    await user.click(await screen.findByRole('tab', { name: 'Codex' }))
+    await user.click(await screen.findByText('Backend default'))
+    await user.click(screen.getByRole('button', { name: 'Save settings' }))
+
+    expect(mutateMock).toHaveBeenCalledWith({
+      projectId: 'project-id',
+      autoFixSettings: expect.objectContaining({
+        planning_backend: 'codex',
+        planning_provider: null,
+        planning_model: null,
+      }),
+    })
+  })
+})
+
+describe('normalizeAutoFixProvider', () => {
+  it('keeps named Claude profiles and drops sentinels/non-Claude', () => {
+    expect(normalizeAutoFixProvider('claude', 'MiniMax')).toBe('MiniMax')
+    expect(normalizeAutoFixProvider('claude', '__anthropic__')).toBeNull()
+    expect(normalizeAutoFixProvider('claude', 'anthropic')).toBeNull()
+    expect(normalizeAutoFixProvider('claude', '  ')).toBeNull()
+    expect(normalizeAutoFixProvider('codex', 'MiniMax')).toBeNull()
   })
 })

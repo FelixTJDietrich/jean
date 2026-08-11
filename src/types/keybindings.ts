@@ -1,9 +1,11 @@
 // Keybinding action identifiers - extensible for future shortcuts
-import { isMacOS } from '@/lib/platform'
+import { isNativeApp } from '@/lib/environment'
+import { isClientMacOS } from '@/lib/platform'
 
 export type KeybindingAction =
   | 'focus_chat_input'
   | 'toggle_left_sidebar'
+  | 'toggle_file_browser'
   | 'open_preferences'
   | 'open_commit_modal'
   | 'open_git_diff'
@@ -44,6 +46,8 @@ export type KeybindingAction =
   | 'open_quick_menu'
   | 'open_usage_dropdown'
   | 'search_chat'
+  | 'toggle_zen_mode'
+  | 'clear_session_context'
 
 // Shortcut string format: "mod+key" where mod is cmd/ctrl
 // Examples: "mod+l", "mod+shift+p", "mod+1"
@@ -65,6 +69,7 @@ export interface KeybindingDefinition {
 export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   focus_chat_input: 'mod+l',
   toggle_left_sidebar: 'mod+b',
+  toggle_file_browser: 'mod+shift+b',
   open_preferences: 'mod+comma',
   open_commit_modal: 'mod+shift+c',
   open_git_diff: 'mod+g',
@@ -85,7 +90,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   approve_plan_worktree_build: 'mod+alt+enter',
   approve_plan_worktree_yolo: 'mod+alt+y',
   open_plan: 'p',
-  restore_last_archived: 'mod+alt+shift+t',
+  restore_last_archived: 'mod+shift+alt+t',
   focus_canvas_search: 'slash',
   toggle_terminal: 'mod+backquote',
   toggle_browser: 'mod+shift+backquote',
@@ -105,6 +110,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   open_quick_menu: 'mod+period',
   open_usage_dropdown: 'mod+u',
   search_chat: 'mod+f',
+  toggle_zen_mode: 'mod+shift+z',
+  clear_session_context: 'mod+shift+k',
 }
 
 // UI definitions for the settings pane
@@ -121,6 +128,13 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     label: 'Toggle left sidebar',
     description: 'Show or hide the projects sidebar',
     default_shortcut: 'mod+b',
+    category: 'navigation',
+  },
+  {
+    action: 'toggle_file_browser',
+    label: 'Toggle file browser',
+    description: 'Show or hide the worktree file browser',
+    default_shortcut: 'mod+shift+b',
     category: 'navigation',
   },
   {
@@ -197,7 +211,7 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     action: 'close_session_or_worktree',
     label: 'Close session',
     description:
-      'Close the current session, or remove worktree if last session',
+      'Close the current session, or show project picker if last session',
     default_shortcut: 'mod+w',
     category: 'chat',
   },
@@ -269,7 +283,7 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     action: 'restore_last_archived',
     label: 'Restore archived',
     description: 'Restore the most recently archived worktree or session',
-    default_shortcut: 'mod+alt+shift+t',
+    default_shortcut: 'mod+shift+alt+t',
     category: 'navigation',
   },
   {
@@ -292,6 +306,21 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     description: 'Show or hide the embedded browser side pane',
     default_shortcut: 'mod+shift+backquote',
     category: 'navigation',
+  },
+  {
+    action: 'toggle_zen_mode',
+    label: 'Toggle zen mode',
+    description:
+      'Full-screen the active session: hide session tabs and top chrome',
+    default_shortcut: 'mod+shift+z',
+    category: 'navigation',
+  },
+  {
+    action: 'clear_session_context',
+    label: 'Clear session context',
+    description: 'Clear the current chat history and start with fresh context',
+    default_shortcut: 'mod+shift+k',
+    category: 'chat',
   },
   {
     action: 'toggle_session_label',
@@ -418,18 +447,18 @@ export function formatShortcutDisplay(
   // Ctrl+key already works (both map to "mod"), so show ⌃ instead of ⌘.
   const isWeb =
     typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
-  const useMacCtrl = isMacOS && isWeb
+  const useMacCtrl = isClientMacOS && isWeb
 
   return shortcut
     .split('+')
     .map(part => {
       switch (part) {
         case 'mod':
-          return useMacCtrl ? '⌃' : isMacOS ? '⌘' : 'Ctrl'
+          return useMacCtrl ? '⌃' : isClientMacOS ? '⌘' : 'Ctrl'
         case 'shift':
-          return isMacOS ? '⇧' : 'Shift'
+          return isClientMacOS ? '⇧' : 'Shift'
         case 'alt':
-          return isMacOS ? '⌥' : 'Alt'
+          return isClientMacOS ? '⌥' : 'Alt'
         case 'comma':
           return ','
         case 'period':
@@ -445,9 +474,9 @@ export function formatShortcutDisplay(
         case 'slash':
           return '/'
         case 'backspace':
-          return isMacOS ? '⌫' : 'Backspace'
+          return isClientMacOS ? '⌫' : 'Backspace'
         case 'enter':
-          return isMacOS ? '↩' : 'Enter'
+          return isClientMacOS ? '↩' : 'Enter'
         case 'tab':
           return 'Tab'
         case 'escape':
@@ -461,6 +490,19 @@ export function formatShortcutDisplay(
     .join(' + ')
 }
 
+/**
+ * Primary modifier for "mod" shortcuts.
+ * - macOS native app: Command (metaKey) — Control must pass through to terminals
+ *   (e.g. Ctrl+T) instead of opening a new session (issue #615)
+ * - macOS web: Control (browser intercepts Cmd)
+ * - Windows/Linux: Control
+ */
+export function isModKeyEvent(
+  e: Pick<KeyboardEvent, 'metaKey' | 'ctrlKey'>
+): boolean {
+  return isClientMacOS && isNativeApp() ? e.metaKey : e.ctrlKey
+}
+
 // Helper to parse keyboard event into shortcut string
 export function eventToShortcutString(e: KeyboardEvent): ShortcutString | null {
   // Ignore modifier-only presses
@@ -468,8 +510,15 @@ export function eventToShortcutString(e: KeyboardEvent): ShortcutString | null {
     return null
   }
 
+  // On macOS native, Control chords are not app "mod" shortcuts. Returning null
+  // lets them reach focused terminals (Ctrl+T, Ctrl+R, …) instead of matching
+  // mod+t / mod+r / etc. Issue #615.
+  if (isClientMacOS && isNativeApp() && e.ctrlKey && !e.metaKey) {
+    return null
+  }
+
   const parts: string[] = []
-  if (e.metaKey || e.ctrlKey) parts.push('mod')
+  if (isModKeyEvent(e)) parts.push('mod')
   if (e.shiftKey) parts.push('shift')
   if (e.altKey) parts.push('alt')
 

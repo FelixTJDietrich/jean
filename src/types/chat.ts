@@ -9,12 +9,14 @@ export type MessageRole = 'user' | 'assistant'
  * Thinking level for Claude responses
  * Controls --settings alwaysThinkingEnabled and MAX_THINKING_TOKENS env var
  * - off: Thinking disabled
+ * - adaptive: Omit thinking settings so the model chooses depth
  * - think: 4K tokens budget
  * - megathink: 10K tokens budget
  * - ultrathink: 32K tokens budget (default)
  */
 export type ThinkingLevel =
   | 'off'
+  | 'adaptive'
   | 'think'
   | 'megathink'
   | 'ultrathink'
@@ -24,6 +26,7 @@ export type ThinkingLevel =
  * Effort level for Opus adaptive thinking
  * Controls --settings {"effort": "<level>"} via CLI
  * Replaces ThinkingLevel when model is Opus (latest) on CLI >= 2.1.32
+ * - adaptive: Omit effort so the model chooses depth (token-efficient for simple prompts)
  * - low: Minimal thinking, skips for simple tasks
  * - medium: Moderate thinking, may skip for very simple queries
  * - high: Deep reasoning (default), almost always thinks
@@ -34,6 +37,7 @@ export type ThinkingLevel =
  */
 export type EffortLevel =
   | 'off'
+  | 'adaptive'
   | 'minimal'
   | 'low'
   | 'medium'
@@ -55,6 +59,8 @@ export type Backend =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
+  | 'antigravity'
 
 /**
  * Execution mode for Claude CLI permission handling
@@ -132,7 +138,7 @@ export interface PlanToolInput {
   plan_preview?: string
   explanation?: string
   steps?: PlanStep[]
-  source?: 'claude' | 'codex' | 'grok'
+  source?: 'claude' | 'codex' | 'grok' | 'kimi' | 'antigravity'
 }
 
 /**
@@ -166,6 +172,8 @@ export interface ChatMessage {
   plan_approved?: boolean
   /** Model used when this message was sent (user messages only) */
   model?: string
+  /** Backend used when this message was sent (user messages only) */
+  backend?: Backend
   /** Execution mode when this message was sent (user messages only) */
   execution_mode?: ExecutionMode
   /** Thinking level when this message was sent (user messages only) */
@@ -214,7 +222,7 @@ export interface Session {
   messages: ChatMessage[]
   /** Message count (populated separately for efficiency when full messages not needed) */
   message_count?: number
-  /** Backend for this session (claude, codex, opencode, cursor, or grok) */
+  /** Backend used for this session. */
   backend?: Backend
   /** Claude CLI session ID for resuming conversations */
   claude_session_id?: string
@@ -232,6 +240,10 @@ export interface Session {
   commandcode_session_id?: string
   /** Grok headless session ID for resuming conversations */
   grok_session_id?: string
+  /** Kimi Code ACP session ID for resuming conversations */
+  kimi_session_id?: string
+  /** Antigravity CLI conversation ID used for conversation continuity. */
+  antigravity_session_id?: string
   /** Selected model for this session */
   selected_model?: string
   /** Selected thinking level for this session */
@@ -263,6 +275,8 @@ export interface Session {
   pending_permission_denials?: PermissionDenial[]
   /** Pending Codex permission grant requests awaiting user approval */
   pending_codex_permission_requests?: CodexPermissionRequest[]
+  /** Pending OpenCode permission grant requests awaiting user approval */
+  pending_opencode_permission_requests?: OpenCodePermissionRequest[]
   /** Pending Codex command execution approvals awaiting user response */
   pending_codex_command_approval_requests?: CodexCommandApprovalRequest[]
   /** Pending Codex request-user-input prompts awaiting user approval */
@@ -275,8 +289,14 @@ export interface Session {
   denied_message_context?: DeniedMessageContext
   /** AI code review results for this session */
   review_results?: StoredReviewResults
-  /** Whether this session is marked for review */
+  /** Whether this session is marked for review (legacy; prefer status_override) */
   is_reviewing?: boolean
+  /**
+   * User-forced session status. Applied when the session is not in a live
+   * automatic state (running, waiting for input, permissions, …).
+   * Values: 'idle' | 'review' | 'completed' | 'cancelled'
+   */
+  status_override?: 'idle' | 'review' | 'completed' | 'cancelled' | null
   /** Whether this session is waiting for user input (AskUserQuestion, ExitPlanMode) */
   waiting_for_input?: boolean
   /** Type of waiting: 'question' for AskUserQuestion, 'plan' for ExitPlanMode */
@@ -484,6 +504,12 @@ export interface DoneEvent {
   worktree_id: string // Kept for backward compatibility
   /** True when a Codex/Opencode plan-mode run completed with content */
   waiting_for_plan?: boolean
+  /**
+   * Authoritative final assistant text from the backend (e.g. Grok).
+   * When present, prefer this over streamed chunk accumulation so
+   * leading-space word fragments cannot leave a glued optimistic message.
+   */
+  content?: string | null
 }
 
 /**
@@ -518,7 +544,7 @@ export interface ErrorEvent {
 export interface CancelledEvent {
   session_id: string
   worktree_id: string // Kept for backward compatibility
-  undo_send: boolean // True if user message should be restored to input (instant cancellation)
+  undo_send: boolean // True only when the prompt never started (restore to input)
   emitted_at_ms: number
   run_id?: string
 }
@@ -631,6 +657,40 @@ export interface CodexPermissionRequestEvent {
   request: CodexPermissionRequest
 }
 
+/**
+ * OpenCode permission request (external_directory, bash, edit, …).
+ * Surfaces `permission.asked` / `permission.v2.asked` SSE events so Jean can
+ * reply via the OpenCode Permission API instead of freezing the session.
+ */
+export interface OpenCodePermissionRequest {
+  request_id: string
+  opencode_session_id: string
+  /** Permission kind / action, e.g. "external_directory" */
+  permission: string
+  /** Patterns/resources the request covers */
+  patterns: string[]
+  /** Patterns "always" would approve for the rest of the OpenCode session */
+  always: string[]
+  metadata?: unknown
+  tool_call_id?: string | null
+  working_dir?: string | null
+  /** "v1" (default) or "v2" */
+  api_version?: string
+}
+
+export interface OpenCodePermissionRequestEvent {
+  session_id: string
+  worktree_id: string
+  request: OpenCodePermissionRequest
+}
+
+export interface OpenCodePermissionRepliedEvent {
+  session_id: string
+  worktree_id: string
+  request_id: string
+  reply: string
+}
+
 export interface CodexCommandAction {
   command: string
   type: 'read' | 'listFiles' | 'search' | 'unknown'
@@ -698,6 +758,41 @@ export interface CodexUserInputRequestEvent {
   session_id: string
   worktree_id: string
   request: CodexUserInputRequest
+}
+
+export function getCodexUserInputRequestId(
+  request: Pick<CodexUserInputRequest, 'item_id' | 'rpc_id'>
+): string {
+  return request.item_id || `codex-user-input-${request.rpc_id}`
+}
+
+export function findCodexUserInputRequest(
+  requests: CodexUserInputRequest[],
+  toolCallId: string
+): CodexUserInputRequest | undefined {
+  return requests.find(
+    request => getCodexUserInputRequestId(request) === toolCallId
+  )
+}
+
+export function upsertCodexUserInputRequest(
+  requests: CodexUserInputRequest[],
+  request: CodexUserInputRequest
+): CodexUserInputRequest[] {
+  const existingIndex = requests.findIndex(existing =>
+    request.item_id && existing.item_id
+      ? existing.item_id === request.item_id
+      : existing.rpc_id === request.rpc_id
+  )
+
+  if (existingIndex === -1) return [...requests, request]
+  if (JSON.stringify(requests[existingIndex]) === JSON.stringify(request)) {
+    return requests
+  }
+
+  const next = [...requests]
+  next[existingIndex] = request
+  return next
 }
 
 export interface CodexMcpElicitationRequest {
@@ -952,6 +1047,8 @@ export function isPlanToolCall(
  * A single todo item from TodoWrite tool
  */
 export interface Todo {
+  /** Optional id (Grok TodoWrite / ACP plan entries) for merge patches */
+  id?: string
   /** The todo content (what needs to be done) */
   content: string
   /** Present continuous form shown during execution */
@@ -965,21 +1062,188 @@ export interface Todo {
  */
 export interface TodoWriteInput {
   todos: Todo[]
+  /**
+   * Grok TodoWrite merge flag. When true, `todos` is a partial patch (often
+   * status-only with null content). Jean merges by id onto the prior list.
+   */
+  merge?: boolean
+}
+
+const TODO_WRITE_TOOL_NAMES = new Set([
+  'TodoWrite',
+  'todo_write',
+  'todowrite',
+  'Todo',
+  'Todos',
+])
+
+function isTodoStatus(value: unknown): value is Todo['status'] {
+  return (
+    value === 'pending' ||
+    value === 'in_progress' ||
+    value === 'completed' ||
+    value === 'cancelled'
+  )
 }
 
 /**
- * Type guard to check if a tool call is TodoWrite
+ * Normalize a single todo item from Claude / Grok / Codex-shaped payloads.
+ * Grok items often omit `activeForm` and may use alternate status strings.
+ *
+ * Status-only merge patches (`{ id, content: null, status }`) keep an empty
+ * content string so callers can merge onto a prior snapshot by id.
+ */
+export function normalizeTodoItem(raw: unknown): Todo | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const item = raw as Record<string, unknown>
+  const id =
+    typeof item.id === 'string' && item.id.trim()
+      ? item.id.trim()
+      : typeof item.id === 'number'
+        ? String(item.id)
+        : undefined
+  const content =
+    (typeof item.content === 'string' && item.content.trim()) ||
+    (typeof item.text === 'string' && item.text.trim()) ||
+    (typeof item.title === 'string' && item.title.trim()) ||
+    ''
+  // Require content OR id (status-only Grok merge patches).
+  if (!content && !id) return null
+
+  const activeForm =
+    (typeof item.activeForm === 'string' && item.activeForm.trim()) ||
+    (typeof item.active_form === 'string' && item.active_form.trim()) ||
+    content
+
+  let status: Todo['status'] = 'pending'
+  if (typeof item.status === 'string') {
+    const s = item.status.toLowerCase().replace(/-/g, '_')
+    if (
+      s === 'completed' ||
+      s === 'complete' ||
+      s === 'done' ||
+      s === 'finished'
+    ) {
+      status = 'completed'
+    } else if (
+      s === 'in_progress' ||
+      s === 'inprogress' ||
+      s === 'running' ||
+      s === 'active'
+    ) {
+      status = 'in_progress'
+    } else if (s === 'cancelled' || s === 'canceled' || s === 'skipped') {
+      status = 'cancelled'
+    } else if (isTodoStatus(item.status)) {
+      status = item.status
+    }
+  }
+
+  const todo: Todo = { content, activeForm, status }
+  if (id) todo.id = id
+  return todo
+}
+
+/**
+ * Fold a sequence of TodoWrite tool calls into the latest full todo list.
+ *
+ * Grok emits `merge: true` patches that only carry changed ids/statuses (often
+ * with null content). Walk chronologically and merge by id so the UI does not
+ * stick on the first snapshot or collapse to a single status-only item.
+ */
+export function foldTodoWriteToolCalls(toolCalls: ToolCall[]): Todo[] {
+  let snapshot: Todo[] = []
+
+  for (const toolCall of toolCalls) {
+    if (!isTodoWrite(toolCall)) continue
+    const input = toolCall.input as TodoWriteInput & {
+      todos: unknown[]
+    }
+    const merge = input.merge === true
+    const incoming = (input.todos ?? [])
+      .map(normalizeTodoItem)
+      .filter((todo): todo is Todo => todo !== null)
+
+    if (!merge || snapshot.length === 0) {
+      // Full replace — drop empty-content stubs with nothing to label.
+      snapshot = incoming.filter(t => t.content.length > 0)
+      continue
+    }
+
+    const next = [...snapshot]
+    for (const item of incoming) {
+      if (item.id) {
+        const idx = next.findIndex(t => t.id === item.id)
+        const prev = idx >= 0 ? next[idx] : undefined
+        if (prev) {
+          next[idx] = {
+            ...prev,
+            status: item.status,
+            content: item.content || prev.content,
+            activeForm: item.content
+              ? item.activeForm || item.content
+              : prev.activeForm,
+            id: item.id,
+          }
+        } else if (item.content) {
+          next.push(item)
+        }
+      } else if (item.content) {
+        next.push(item)
+      }
+    }
+    snapshot = next
+  }
+
+  return snapshot
+}
+
+/**
+ * Type guard to check if a tool call is TodoWrite.
+ * Accepts Claude `TodoWrite`, Grok `todo_write` / `TodoWrite` variant titles,
+ * and any tool whose input carries a todos array in the TodoWrite shape.
  */
 export function isTodoWrite(
   toolCall: ToolCall
 ): toolCall is ToolCall & { input: TodoWriteInput } {
+  if (typeof toolCall.input !== 'object' || toolCall.input === null) {
+    return false
+  }
+  const input = toolCall.input as Record<string, unknown>
+  const todos = input.todos
+  if (!Array.isArray(todos)) return false
+
+  if (TODO_WRITE_TOOL_NAMES.has(toolCall.name)) return true
+
+  // Grok ACP titles like "Updating plan" still carry variant TodoWrite in input
+  // (or after backend normalization only the todos array remains).
+  const variant = input.variant
+  if (typeof variant === 'string' && TODO_WRITE_TOOL_NAMES.has(variant)) {
+    return true
+  }
+
+  // Structural fallback: array of objects with content/status looks like todos
   return (
-    toolCall.name === 'TodoWrite' &&
-    typeof toolCall.input === 'object' &&
-    toolCall.input !== null &&
-    'todos' in toolCall.input &&
-    Array.isArray((toolCall.input as TodoWriteInput).todos)
+    todos.length > 0 &&
+    todos.every(
+      item =>
+        typeof item === 'object' &&
+        item !== null &&
+        ('content' in item || 'text' in item || 'title' in item)
+    )
   )
+}
+
+/**
+ * Extract normalized todos from a TodoWrite-shaped tool call.
+ * Drops status-only stubs with empty content (need foldTodoWriteToolCalls for merge).
+ */
+export function getTodoWriteTodos(toolCall: ToolCall): Todo[] {
+  if (!isTodoWrite(toolCall)) return []
+  const todos = (toolCall.input as TodoWriteInput).todos
+  return todos
+    .map(normalizeTodoItem)
+    .filter((todo): todo is Todo => todo !== null && todo.content.length > 0)
 }
 
 /**
@@ -991,7 +1255,7 @@ export interface CodexAgent {
   /** The prompt given to the agent (truncated for display) */
   prompt: string
   /** Agent lifecycle status */
-  status: 'in_progress' | 'completed' | 'errored'
+  status: 'in_progress' | 'completed' | 'errored' | 'interrupted'
   /** Completion message from agents_states */
   message?: string
 }

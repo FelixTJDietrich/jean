@@ -13,6 +13,7 @@ export type CliType =
   | 'opencode'
   | 'pi'
   | 'coderabbit'
+  | 'commandcode'
 
 /** Binary name used by the package manager (e.g. `brew upgrade <name>`). */
 export const CLI_BINARY_NAMES: Record<CliType, string> = {
@@ -22,6 +23,7 @@ export const CLI_BINARY_NAMES: Record<CliType, string> = {
   opencode: 'opencode',
   pi: 'pi',
   coderabbit: 'coderabbit',
+  commandcode: 'command-code',
 }
 
 /** npm package name for CLIs that ship as npm/bun globals. */
@@ -36,6 +38,7 @@ export const CLI_SELF_UPDATE_ARGS: Record<CliType, string[] | null> = {
   opencode: ['upgrade'],
   coderabbit: ['update'],
   pi: ['update', '--self'],
+  commandcode: ['update'],
   gh: null,
   codex: null,
 }
@@ -47,10 +50,16 @@ export const CLI_DISPLAY_NAMES: Record<CliType, string> = {
   opencode: 'OpenCode CLI',
   pi: 'PI CLI',
   coderabbit: 'CodeRabbit CLI',
+  commandcode: 'Command Code CLI',
 }
 
 /** Get [command, args] for updating a PATH-mode CLI, respecting package manager.
- *  Returns null when the CLI has no self-update command and no known package manager. */
+ *  Returns null when the CLI has no self-update command and no known package manager.
+ *
+ *  Prefer self-update (`claude update`, `opencode upgrade`, …) over Homebrew when
+ *  available. Brew package names often mismatch install method (formula vs cask
+ *  `claude-code`), which produced "Cask 'claude-code' is not installed" (issue #387).
+ */
 export function getPathUpdateAction(
   cliPath: string | null | undefined,
   packageManager: string | null | undefined,
@@ -59,11 +68,11 @@ export function getPathUpdateAction(
   npmPkg?: string,
   targetVersion?: string
 ): [string, string[]] | null {
-  if (packageManager === 'homebrew') {
-    return ['brew', ['upgrade', brewPkg]]
-  }
   if (selfUpdateArgs) {
     return [cliPath ?? brewPkg, selfUpdateArgs]
+  }
+  if (packageManager === 'homebrew') {
+    return ['brew', ['upgrade', brewPkg]]
   }
   if (packageManager === 'bun' && npmPkg && targetVersion) {
     return ['bun', ['install', '-g', `${npmPkg}@${targetVersion}`]]

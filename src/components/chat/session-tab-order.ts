@@ -1,14 +1,25 @@
 import type { SessionCardData } from './session-card-utils'
 
 const STATUS_PRIORITY: Record<string, number> = {
-  waiting: 0,
+  // Actionable waiting — highest priority in tab order
   permission: 0,
+  command_approval: 0,
+  tool_approval: 0,
+  mcp_input: 0,
+  input_required: 0,
+  plan_approval: 0,
+  waiting: 0,
+  // Active runs
   planning: 1,
+  scheduled: 1,
   vibing: 2,
   yoloing: 3,
   reviewing: 4,
+  // Terminal / review
   review: 4,
   completed: 4,
+  cancelled: 4,
+  crashed: 4,
   idle: 5,
 }
 
@@ -49,4 +60,24 @@ export function buildReorderedSessionIdsWithinStatus(
   ids.splice(fromIndex, 1)
   ids.splice(toIndex, 0, draggedSessionId)
   return ids
+}
+
+/**
+ * Resolve which session ChatWindow should mount in SessionChatModal.
+ *
+ * When the sessions query is transiently empty (invalidate after send, web
+ * reconnect), keep the store's active session so ChatWindow is not unmounted —
+ * unmounting blanks the modal and shows FloatingDock instead of chat input.
+ */
+export function resolveModalSessionId(
+  activeSessionId: string | undefined,
+  sessionIds: readonly string[]
+): string | null {
+  if (
+    activeSessionId &&
+    (sessionIds.length === 0 || sessionIds.includes(activeSessionId))
+  ) {
+    return activeSessionId
+  }
+  return sessionIds[0] ?? null
 }

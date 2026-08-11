@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
+import { ChevronRight } from 'lucide-react'
 import type { CliBackend, CustomCliProfile } from '@/types/preferences'
 import { usePreferences } from '@/services/preferences'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
 import {
@@ -25,6 +27,13 @@ import {
   formatCursorModelLabel,
   formatOpencodeModelLabel,
 } from '@/components/chat/toolbar/toolbar-utils'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 
 export interface ApprovalModelOverride {
   backend: CliBackend
@@ -106,6 +115,7 @@ export function ApprovalModelSubmenu({
 }: ApprovalModelSubmenuProps) {
   const { data: preferences } = usePreferences()
   const { installedBackends } = useInstalledBackends()
+  const isMobile = useIsMobile()
   const { data: availableOpencodeModels } = useAvailableOpencodeModels({
     enabled: installedBackends.includes('opencode'),
   })
@@ -114,9 +124,10 @@ export function ApprovalModelSubmenu({
   })
 
   const selectedProvider = preferences?.default_provider ?? null
-  const customCliProfiles = preferences?.custom_cli_profiles ?? []
+  // Prefer the preferences array reference so useMemo is stable when empty/default.
+  const customCliProfiles = preferences?.custom_cli_profiles
   const claudeModelOptions = useMemo(
-    () => getClaudeModelOptions(selectedProvider, customCliProfiles),
+    () => getClaudeModelOptions(selectedProvider, customCliProfiles ?? []),
     [selectedProvider, customCliProfiles]
   )
   const opencodeModelOptions = useMemo(
@@ -139,6 +150,7 @@ export function ApprovalModelSubmenu({
   )
 
   const [search, setSearch] = useState('')
+  const [mobilePickerOpen, setMobilePickerOpen] = useState(false)
   const sections = useMemo(
     () =>
       buildBackendModelSections({
@@ -160,19 +172,99 @@ export function ApprovalModelSubmenu({
     const query = search.trim().toLowerCase()
     if (!query) return sections
 
-    return sections
-      .map(section => ({
-        ...section,
-        options: section.options.filter(option =>
-          `${section.label} ${option.label} ${option.value}`
-            .toLowerCase()
-            .includes(query)
-        ),
-      }))
-      .filter(section => section.options.length > 0)
+    return sections.flatMap(section => {
+      const options = section.options.filter(option =>
+        `${section.label} ${option.label} ${option.value}`
+          .toLowerCase()
+          .includes(query)
+      )
+      return options.length > 0 ? [{ ...section, options }] : []
+    })
   }, [search, sections])
 
   if (sections.length === 0) return null
+
+  if (isMobile) {
+    return (
+      <>
+        <DropdownMenuItem
+          disabled={disabled}
+          onSelect={event => {
+            event.preventDefault()
+            setSearch('')
+            setMobilePickerOpen(true)
+          }}
+        >
+          {label}
+          <ChevronRight className="ml-auto size-4" />
+        </DropdownMenuItem>
+        <Sheet open={mobilePickerOpen} onOpenChange={setMobilePickerOpen}>
+          <SheetContent
+            side="bottom"
+            className="flex h-[75svh] max-h-[75svh] min-h-0 overflow-hidden rounded-t-xl p-0"
+            showCloseButton={false}
+          >
+            <SheetHeader className="shrink-0 border-b px-4 py-3">
+              <SheetTitle className="text-base">
+                Select Backend &amp; Model
+              </SheetTitle>
+              <SheetDescription className="sr-only">
+                Search and select the backend and model for this action.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="shrink-0 border-b p-2">
+                <Input
+                  value={search}
+                  onChange={event => setSearch(event.target.value)}
+                  placeholder="Search models..."
+                  className="h-9 text-base"
+                />
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+                {filteredSections.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                    No models found.
+                  </div>
+                ) : (
+                  filteredSections.map(section => (
+                    <section key={section.backend} className="py-1">
+                      <h3 className="px-4 py-2 text-xs font-medium text-muted-foreground">
+                        {section.label}
+                      </h3>
+                      <div className="px-2">
+                        {section.options.map(option => (
+                          <button
+                            key={`${section.backend}:${option.value}`}
+                            type="button"
+                            className="flex min-h-12 w-full items-center rounded-sm px-2 py-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                            onClick={() => {
+                              setMobilePickerOpen(false)
+                              onSelect({
+                                backend: section.backend,
+                                model: option.value,
+                              })
+                            }}
+                          >
+                            <span className="flex min-w-0 flex-col">
+                              <span className="truncate">{option.label}</span>
+                              <span className="truncate text-xs text-muted-foreground">
+                                {option.value}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  ))
+                )}
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
+      </>
+    )
+  }
 
   return (
     <DropdownMenuSub>

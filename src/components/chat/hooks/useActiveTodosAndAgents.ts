@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { isTodoWrite, isPlanToolCall } from '@/types/chat'
+import { foldTodoWriteToolCalls, isPlanToolCall } from '@/types/chat'
 import type {
   ToolCall,
   ChatMessage,
@@ -85,9 +85,12 @@ function normalizeCodexAgentStatus(
   if (agentStatus === 'completed' || agentStatus === 'shutdown') {
     return 'completed'
   }
+  if (agentStatus === 'interrupted') {
+    // Authoritative interrupted terminal state — do not conflate with error
+    return 'interrupted'
+  }
   if (
     agentStatus === 'errored' ||
-    agentStatus === 'interrupted' ||
     agentStatus === 'notFound' ||
     toolCallStatus === 'failed'
   ) {
@@ -102,7 +105,8 @@ function truncateAgentPrompt(prompt: string): string {
 
 export function extractCodexAgents(
   toolCalls: ToolCall[],
-  isSending: boolean
+  isSending: boolean,
+  parentTurnCancelled = false
 ): CodexAgent[] {
   const agents = new Map<string, CodexAgent>()
 
@@ -152,9 +156,20 @@ export function extractCodexAgents(
     }
   }
 
+  // Codex sub_agent_activity has no "completed" kind. A normal parent turn end
+  // is therefore the terminal completion signal for agents that still have a
+  // running state. Keep cancellation distinct so abandoned work is not green.
   return Array.from(agents.values()).map(agent => {
     if (isSending || agent.status !== 'in_progress') return agent
-    return { ...agent, status: 'completed' }
+    return {
+      ...agent,
+      status: parentTurnCancelled
+        ? ('interrupted' as const)
+        : ('completed' as const),
+      message: parentTurnCancelled
+        ? (agent.message ?? 'Interrupted before completion')
+        : agent.message,
+    }
   })
 }
 
@@ -190,15 +205,14 @@ export function useActiveTodosAndAgents({
       return { todos: [], sourceMessageId: null, isFromStreaming: false }
 
     if (isSending && currentToolCalls.length > 0) {
-      // Prefer TodoWrite tool calls
-      for (let i = currentToolCalls.length - 1; i >= 0; i--) {
-        const tc = currentToolCalls[i]
-        if (tc && isTodoWrite(tc)) {
-          return {
-            todos: tc.input.todos,
-            sourceMessageId: null,
-            isFromStreaming: true,
-          }
+      // Fold TodoWrite calls chronologically so Grok merge:true patches update
+      // the full list instead of sticking on the first snapshot.
+      const todos = foldTodoWriteToolCalls(currentToolCalls)
+      if (todos.length > 0) {
+        return {
+          todos,
+          sourceMessageId: null,
+          isFromStreaming: true,
         }
       }
       // Fall back to plan steps (Codex plans surface steps as todos)
@@ -213,15 +227,12 @@ export function useActiveTodosAndAgents({
     }
 
     if (lastAssistantMessage?.tool_calls) {
-      // Prefer TodoWrite tool calls
-      for (let i = lastAssistantMessage.tool_calls.length - 1; i >= 0; i--) {
-        const tc = lastAssistantMessage.tool_calls[i]
-        if (tc && isTodoWrite(tc)) {
-          return {
-            todos: tc.input.todos,
-            sourceMessageId: lastAssistantMessage.id,
-            isFromStreaming: false,
-          }
+      const todos = foldTodoWriteToolCalls(lastAssistantMessage.tool_calls)
+      if (todos.length > 0) {
+        return {
+          todos,
+          sourceMessageId: lastAssistantMessage.id,
+          isFromStreaming: false,
         }
       }
       // Fall back to plan steps
@@ -252,21 +263,23 @@ export function useActiveTodosAndAgents({
     if (!activeSessionId)
       return { agents: [], sourceMessageId: null, isFromStreaming: false }
 
-    const toolCalls =
-      isSending && currentToolCalls.length > 0
-        ? currentToolCalls
-        : (lastAssistantMessage?.tool_calls ?? [])
+    // A new turn starts with no tool calls. Do not reuse the previous turn's
+    // agents in that gap, or their persisted running state appears active again.
+    const toolCalls = isSending
+      ? currentToolCalls
+      : (lastAssistantMessage?.tool_calls ?? [])
 
-    const agents = extractCodexAgents(toolCalls, isSending)
+    const agents = extractCodexAgents(
+      toolCalls,
+      isSending,
+      lastAssistantMessage?.cancelled === true
+    )
 
-    const sourceId =
-      isSending && currentToolCalls.length > 0
-        ? null
-        : (lastAssistantMessage?.id ?? null)
+    const sourceId = isSending ? null : (lastAssistantMessage?.id ?? null)
     return {
       agents,
       sourceMessageId: sourceId,
-      isFromStreaming: isSending && currentToolCalls.length > 0,
+      isFromStreaming: isSending && agents.length > 0,
     }
   }, [activeSessionId, isSending, currentToolCalls, lastAssistantMessage])
 

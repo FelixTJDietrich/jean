@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   connectTransport,
@@ -11,14 +17,23 @@ import {
   hasPreloadedData,
   listen,
   onEstablishedWsDisconnect,
+  usesWebSocketBackend,
   type InitialData,
 } from '@/lib/transport'
-import { isNativeApp } from '@/lib/environment'
+import {
+  isLocalBackend,
+  isNativeApp,
+  setNativeOpenAllowed,
+} from '@/lib/environment'
 import { isMobileWebAccess } from '@/lib/mobile-web'
+import { useNativeWindowCloseGuard } from '@/hooks/useNativeWindowCloseGuard'
+import { QuitConfirmationDialog } from '@/components/layout/QuitConfirmationDialog'
 import { setServerPlatform } from '@/lib/platform'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
+import { mergeWorktreesPreservingOptimistic } from '@/lib/worktree-list-cache'
 import type { Session, WorktreeSessions } from '@/types/chat'
+import type { Worktree } from '@/types/projects'
 import { initializeCommandSystem } from './lib/commands'
 import { logger } from './lib/logger'
 import { toast } from 'sonner'
@@ -38,7 +53,19 @@ import {
   useOpencodeCliStatus,
   useOpencodeCliAuth,
 } from './services/opencode-cli'
+import { useCursorCliStatus, useCursorCliAuth } from './services/cursor-cli'
+import { usePiCliStatus, usePiCliAuth } from './services/pi-cli'
+import {
+  useCommandCodeCliStatus,
+  useCommandCodeCliAuth,
+} from './services/commandcode-cli'
+import { useGrokCliStatus, useGrokCliAuth } from './services/grok-cli'
+import { useKimiCliStatus, useKimiCliAuth } from './services/kimi-cli'
 import { useUIStore } from './store/ui-store'
+import {
+  resolveInstallPendingAction,
+  shouldOfferUpdateCheck,
+} from './lib/app-update'
 import type { AppPreferences } from './types/preferences'
 import { useChatStore } from './store/chat-store'
 import { useProjectsStore } from './store/projects-store'
@@ -46,8 +73,10 @@ import { useFontSettings } from './hooks/use-font-settings'
 import { usePreventFileDropNavigation } from './hooks/usePreventFileDropNavigation'
 import { useLinuxFileDrop } from './hooks/useLinuxFileDrop'
 import { useZoom } from './hooks/use-zoom'
+import { useExternalDisplayZoomTip } from './hooks/use-external-display-zoom-tip'
 import { useImmediateSessionStateSave } from './hooks/useImmediateSessionStateSave'
 import { useCliVersionCheck } from './hooks/useCliVersionCheck'
+import { useServerUpdateCheck } from './hooks/useServerUpdateCheck'
 import { useQueueProcessor } from './hooks/useQueueProcessor'
 import { useBackgroundInvestigation } from './hooks/useBackgroundInvestigation'
 import { useAutoArchiveOnMerge } from './hooks/useAutoArchiveOnMerge'
@@ -70,6 +99,15 @@ import {
 import { useExternalLinkInterceptor } from './hooks/useExternalLinkInterceptor'
 import { WebAccessAuthScreen } from './components/web/WebAccessAuthScreen'
 import { peekWebReloadState, saveWebReloadState } from './lib/web-reload-state'
+import {
+  clearConnectionSwitch,
+  getActiveRemoteConnection,
+  isConnectionSwitchPending,
+} from './lib/remote-connections'
+import { RemoteConnectionRecovery } from './components/remote/RemoteConnectionRecovery'
+import { getStartupOnboardingAction } from './lib/startup-onboarding'
+import { dismissTransientUi } from './lib/dismiss-transient-ui'
+import { JeanLoadingScreen } from './components/shared/JeanLoadingScreen'
 
 interface AutoFixStoppedEvent {
   projectId: string
@@ -78,38 +116,27 @@ interface AutoFixStoppedEvent {
   error: string
 }
 
-function WebLoadingScreen({ label }: { label: string }) {
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-background">
-      <p
-        role="status"
-        className="whitespace-nowrap text-[16px] leading-[26px] text-muted-foreground"
-        style={{
-          fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
-        }}
-      >
-        {label}
-      </p>
-    </div>
-  )
+function handleWsAuthTokenSubmit(token: string) {
+  localStorage.setItem('jean-http-token', token)
+  window.location.reload()
 }
 
 /** Full-screen auth error overlay for web access mode. */
 function WsAuthErrorOverlay() {
   const authError = useWsAuthError()
+  const remote = getActiveRemoteConnection()
 
   if (!authError) return null
 
-  const handleTokenSubmit = (token: string) => {
-    localStorage.setItem('jean-http-token', token)
-    window.location.reload()
+  if (remote) {
+    return <RemoteConnectionRecovery connection={remote} error={authError} />
   }
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-background/90">
       <WebAccessAuthScreen
         authError={authError}
-        onTokenSubmit={handleTokenSubmit}
+        onTokenSubmit={handleWsAuthTokenSubmit}
       />
     </div>
   )
@@ -117,8 +144,10 @@ function WsAuthErrorOverlay() {
 
 function App() {
   const mobileWebAccess = isMobileWebAccess()
+  const webBackend = usesWebSocketBackend()
+  const wsAuthError = useWsAuthError()
   // Track preloading state for web view
-  const [isPreloading, setIsPreloading] = useState(!isNativeApp())
+  const [isPreloading, setIsPreloading] = useState(webBackend)
   const [platformVersion, setPlatformVersion] = useState(0)
   const queryClient = useQueryClient()
   const { data: preferences } = usePreferences()
@@ -126,6 +155,11 @@ function App() {
   const featureTourOpen = useUIStore(state => state.featureTourOpen)
   const jeanMcpIntroOpen = useUIStore(state => state.jeanMcpIntroOpen)
   const hasStartedTransportRef = useRef(false)
+
+  // Keep quit working during preloading and server-switch overlays (MainWindow
+  // may be unmounted). Production-only; uses destroy() so Windows cannot
+  // silently ignore close while an async handler is registered.
+  useNativeWindowCloseGuard()
 
   const captureWebReloadState = useCallback(() => {
     const { sessionChatModalOpen, sessionChatModalWorktreeId } =
@@ -159,8 +193,6 @@ function App() {
   const pendingUpdateRef = useRef<any>(null)
 
   useEffect(() => {
-    if (!isNativeApp()) return
-
     invoke<'mac' | 'windows' | 'linux'>('get_server_platform')
       .then(platform => {
         setServerPlatform(platform)
@@ -169,7 +201,7 @@ function App() {
       .catch(error => {
         logger.warn('Failed to load server platform', { error })
       })
-  }, [])
+  }, [webBackend])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined
@@ -186,19 +218,38 @@ function App() {
     return () => unlisten?.()
   }, [])
 
+  const relaunchApp = useCallback(async () => {
+    const { relaunch } = await import('@tauri-apps/plugin-process')
+    await relaunch()
+  }, [])
+
   const installAppUpdate = useCallback(
     async (update: {
       version: string
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       downloadAndInstall: (cb: (event: any) => void) => Promise<void>
     }) => {
+      const ui = useUIStore.getState()
+
+      // Already installed this session — only relaunch is needed (#507).
+      if (ui.updateReadyVersion) {
+        await relaunchApp()
+        return
+      }
+      if (ui.isUpdateInstalling) {
+        return
+      }
+
       let totalBytes = 0
       let downloadedBytes = 0
       const toastId = toast.loading(`Downloading update ${update.version}...`)
 
-      // Clear the pending indicator since we're installing now
-      useUIStore.getState().setPendingUpdateVersion(null)
-      pendingUpdateRef.current = null
+      // Mark in-progress so auto-check cannot re-open the modal mid-download.
+      // Keep pendingUpdateRef + version badge until success so retries work and
+      // the title bar still shows progress (#507).
+      ui.setIsUpdateInstalling(true)
+      ui.setPendingUpdateVersion(update.version)
+      ui.setUpdateModalVersion(null)
 
       try {
         await update.downloadAndInstall(event => {
@@ -223,20 +274,43 @@ function App() {
           }
         })
 
+        // Jean-managed Codex 0.147+ needs a sibling code-mode host. Older Jean
+        // versions did not install it, so repair only that missing helper after
+        // updating Jean instead of downloading the full Codex CLI again.
+        try {
+          await invoke('install_missing_codex_code_mode_host')
+        } catch (codexError) {
+          logger.warn('Failed to install missing Codex code-mode host', {
+            error: codexError,
+          })
+        }
+
+        // Package is on disk; app must relaunch. Clear the download handle and
+        // record ready state so further UI actions relaunch instead of re-downloading.
+        pendingUpdateRef.current = null
+        const store = useUIStore.getState()
+        store.setIsUpdateInstalling(false)
+        store.setUpdateReadyVersion(update.version)
+        store.setUpdateModalVersion(null)
+        store.setPendingUpdateVersion(null)
+
         toast.success(`Update ${update.version} installed!`, {
           id: toastId,
           duration: Infinity,
           action: {
             label: 'Restart',
-            onClick: async () => {
-              const { relaunch } = await import('@tauri-apps/plugin-process')
-              await relaunch()
+            onClick: () => {
+              void relaunchApp()
             },
           },
         })
       } catch (updateError) {
         const errorStr = String(updateError)
         logger.error(`Update installation failed: ${errorStr}`)
+        const store = useUIStore.getState()
+        store.setIsUpdateInstalling(false)
+        // Restore title-bar badge so the user can retry without waiting for re-check
+        store.setPendingUpdateVersion(update.version)
         if (errorStr.includes('invalid updater binary format')) {
           toast.error(
             `Auto-update not supported for this installation type. Please update manually.`,
@@ -250,8 +324,32 @@ function App() {
         }
       }
     },
-    []
+    [relaunchApp]
   )
+
+  /** Native shell: run Tauri updater when a web client requests desktop install. */
+  const runNativeDesktopUpdateInstall = useCallback(async () => {
+    if (!isNativeApp()) return
+    try {
+      if (pendingUpdateRef.current) {
+        await installAppUpdate(pendingUpdateRef.current)
+        return
+      }
+      const { check } = await import('@tauri-apps/plugin-updater')
+      const update = await check()
+      if (!update) {
+        toast.success('You are running the latest version')
+        useUIStore.getState().setPendingUpdateVersion(null)
+        useUIStore.getState().setUpdateModalVersion(null)
+        return
+      }
+      pendingUpdateRef.current = update
+      await installAppUpdate(update)
+    } catch (error) {
+      logger.error('Host-requested desktop update failed', { error })
+      toast.error(`Update failed: ${String(error)}`, { duration: 8000 })
+    }
+  }, [installAppUpdate])
 
   // Seed TanStack Query cache and Zustand state from bulk initial data.
   const seedCache = useCallback(
@@ -263,6 +361,13 @@ function App() {
 
       if (data.serverPlatform) {
         setServerPlatform(data.serverPlatform)
+      }
+      if (typeof data.nativeOpenAllowed === 'boolean') {
+        setNativeOpenAllowed(data.nativeOpenAllowed)
+      }
+      // Force a re-render so non-reactive environment helpers (platform,
+      // canOpenNativeApps) update UI after /api/init.
+      if (data.serverPlatform || typeof data.nativeOpenAllowed === 'boolean') {
         setPlatformVersion(version => version + 1)
       }
 
@@ -270,14 +375,20 @@ function App() {
       if (data.projects) {
         queryClient.setQueryData(projectsQueryKeys.list(), data.projects)
       }
-      // Seed worktrees for each project
+      // Seed worktrees for each project (preserve in-flight pending/deleting)
       if (data.worktreesByProject) {
         for (const [projectId, worktrees] of Object.entries(
           data.worktreesByProject
         )) {
+          const previous = queryClient.getQueryData<Worktree[]>(
+            projectsQueryKeys.worktrees(projectId)
+          )
           queryClient.setQueryData(
             projectsQueryKeys.worktrees(projectId),
-            worktrees
+            mergeWorktreesPreservingOptimistic(
+              worktrees as Worktree[],
+              previous
+            )
           )
         }
       }
@@ -313,6 +424,10 @@ function App() {
       // Also restore Zustand state for reviewing/waiting status
       if (data.sessionsByWorktree) {
         const reviewingUpdates: Record<string, boolean> = {}
+        const statusOverrideUpdates: Record<
+          string,
+          'idle' | 'review' | 'completed' | 'cancelled'
+        > = {}
         const waitingUpdates: Record<string, boolean> = {}
         const sessionMappings: Record<string, string> = {}
 
@@ -335,10 +450,35 @@ function App() {
           const wts = sessionsData as WorktreeSessions
           for (const session of wts.sessions) {
             sessionMappings[session.id] = worktreeId
-            if (session.is_reviewing) {
+            const override = session.status_override
+            if (
+              override === 'idle' ||
+              override === 'review' ||
+              override === 'completed' ||
+              override === 'cancelled'
+            ) {
+              statusOverrideUpdates[session.id] = override
+              if (override === 'review') {
+                reviewingUpdates[session.id] = true
+              }
+            } else if (session.is_reviewing) {
               reviewingUpdates[session.id] = true
+              statusOverrideUpdates[session.id] = 'review'
             }
-            if (session.waiting_for_input) {
+            // Mid-turn Codex/Claude approvals keep waiting_for_input true while
+            // the turn is still running. Also treat pending approval queues as
+            // waiting so remote reconnects keep indicators (issue #626).
+            const hasPendingMidTurnApproval =
+              (session.pending_codex_command_approval_requests?.length ?? 0) >
+                0 ||
+              (session.pending_codex_permission_requests?.length ?? 0) > 0 ||
+              (session.pending_codex_user_input_requests?.length ?? 0) > 0 ||
+              (session.pending_codex_mcp_elicitation_requests?.length ?? 0) >
+                0 ||
+              (session.pending_codex_dynamic_tool_call_requests?.length ?? 0) >
+                0 ||
+              (session.pending_permission_denials?.length ?? 0) > 0
+            if (session.waiting_for_input || hasPendingMidTurnApproval) {
               waitingUpdates[session.id] = true
             }
           }
@@ -356,8 +496,10 @@ function App() {
           }
         }
         // Clear stale waiting/reviewing state for sessions actively running a turn.
-        // The server persists these flags from the previous turn's completion;
-        // if a new turn is in-flight they're stale and would show approve buttons.
+        // The server may still have previous-turn waiting flags on disk; a new
+        // turn without pending approvals should not show approve buttons.
+        // Keep waiting when the running turn itself is paused on mid-turn
+        // approvals (Codex command/permission prompts — issue #626).
         if (data.runningSessions?.length) {
           const runningSessionIds = new Set(data.runningSessions)
           for (const sessionId of data.runningSessions) {
@@ -368,15 +510,19 @@ function App() {
               ([sessionId]) => !runningSessionIds.has(sessionId)
             )
           )
-          const filteredWaitingUpdates = Object.fromEntries(
-            Object.entries(waitingUpdates).filter(
+          const filteredStatusOverrideUpdates = Object.fromEntries(
+            Object.entries(statusOverrideUpdates).filter(
               ([sessionId]) => !runningSessionIds.has(sessionId)
             )
           )
+          // waitingUpdates already includes mid-turn pending approvals; do not
+          // strip those for running sessions.
           storeUpdates.reviewingSessions = filteredReviewingUpdates
-          storeUpdates.waitingForInputSessionIds = filteredWaitingUpdates
+          storeUpdates.sessionStatusOverrides = filteredStatusOverrideUpdates
+          storeUpdates.waitingForInputSessionIds = waitingUpdates
         } else {
           storeUpdates.reviewingSessions = reviewingUpdates
+          storeUpdates.sessionStatusOverrides = statusOverrideUpdates
           storeUpdates.waitingForInputSessionIds = waitingUpdates
         }
         // Replace (not merge) reviewing/waiting state — server is source of truth.
@@ -395,14 +541,30 @@ function App() {
       // more messages from an event or query response racing the bootstrap.
       if (data.activeSessions) {
         const activeReviewingUpdates: Record<string, boolean> = {}
+        const activeStatusOverrideUpdates: Record<
+          string,
+          'idle' | 'review' | 'completed' | 'cancelled'
+        > = {}
         const activeWaitingUpdates: Record<string, boolean> = {}
 
         for (const [sessionId, initSession] of Object.entries(
           data.activeSessions
         )) {
           const session = initSession as Session
-          if (session.is_reviewing) {
+          const override = session.status_override
+          if (
+            override === 'idle' ||
+            override === 'review' ||
+            override === 'completed' ||
+            override === 'cancelled'
+          ) {
+            activeStatusOverrideUpdates[sessionId] = override
+            if (override === 'review') {
+              activeReviewingUpdates[sessionId] = true
+            }
+          } else if (session.is_reviewing) {
             activeReviewingUpdates[sessionId] = true
+            activeStatusOverrideUpdates[sessionId] = 'review'
           }
           if (session.waiting_for_input) {
             activeWaitingUpdates[sessionId] = true
@@ -439,6 +601,7 @@ function App() {
 
         if (
           Object.keys(activeReviewingUpdates).length > 0 ||
+          Object.keys(activeStatusOverrideUpdates).length > 0 ||
           Object.keys(activeWaitingUpdates).length > 0
         ) {
           beginSessionStateHydration()
@@ -448,6 +611,10 @@ function App() {
                 data.sessionsByWorktree === undefined
                   ? activeReviewingUpdates
                   : state.reviewingSessions,
+              sessionStatusOverrides:
+                data.sessionsByWorktree === undefined
+                  ? activeStatusOverrideUpdates
+                  : state.sessionStatusOverrides,
               waitingForInputSessionIds:
                 data.sessionsByWorktree === undefined
                   ? activeWaitingUpdates
@@ -510,7 +677,10 @@ function App() {
       })
 
       for (const { sessionId, message } of runningSnapshotMessages) {
-        hydrateRunningSnapshot(sessionId, message, { allowWhileSending: true })
+        hydrateRunningSnapshot(sessionId, message, {
+          allowWhileSending: true,
+          dedupeReplayedOutput: true,
+        })
         queryClient.setQueryData<Session>(
           chatQueryKeys.session(sessionId),
           old =>
@@ -563,9 +733,16 @@ function App() {
     [queryClient]
   )
 
-  // Preload initial data via HTTP for web view (faster than waiting for WebSocket)
+  // Preload initial data via HTTP while opening the WebSocket in parallel.
+  // Previously these were sequential (HTTP → then WS), which doubled the
+  // "Loading Jean..." wall time on web access.
   useEffect(() => {
-    if (isNativeApp()) return
+    if (!webBackend) return
+
+    if (!hasStartedTransportRef.current) {
+      hasStartedTransportRef.current = true
+      connectTransport()
+    }
 
     const initialSelectedProjectId =
       peekWebReloadState()?.projectId ??
@@ -589,7 +766,7 @@ function App() {
       .finally(() => {
         setIsPreloading(false)
       })
-  }, [queryClient, seedCache])
+  }, [queryClient, seedCache, webBackend])
 
   // Global safety net for uncaught async errors / promise rejections.
   // Without this, a thrown invoke() (e.g. auth/network failure) can leave the
@@ -664,11 +841,17 @@ function App() {
   // Apply zoom level from preferences + keyboard shortcuts
   useZoom()
 
+  // One-time tip when non-100% zoom is used on a 1× external-style display
+  useExternalDisplayZoomTip()
+
   // Save reviewing/waiting state immediately (no debounce) to ensure persistence on reload
   useImmediateSessionStateSave()
 
   // Check for CLI updates on startup (shows toast notification if updates available)
   useCliVersionCheck()
+
+  // Headless jean-server binary updates (Web Access only)
+  useServerUpdateCheck()
 
   // Global streaming event listeners - must be at App level so they stay active
   // even when ChatWindow is unmounted (e.g., when viewing a different worktree)
@@ -677,23 +860,25 @@ function App() {
   // Keep Codex usage UI fresh when the app-server pushes account rate-limit updates.
   useCodexUsageUpdateListener()
 
-  // Browser mode: only open WebSocket after preload + listener registration.
-  // This lets us replay buffered server events before live events start arriving.
+  // Browser mode: WebSocket starts in parallel with HTTP preload (see above).
+  // Bootstrap replay events are ingested into the transport buffer before live
+  // listeners attach; WS buffers events until React listeners register.
+  // Native remote clients keep the shell and show RemoteConnectionRecovery —
+  // dismiss open overlays so they cannot trap pointer events (issue #623).
+  // Pure web-access reloads so in-memory UI state is rebuilt cleanly.
   useEffect(() => {
-    if (isNativeApp()) return
+    if (!webBackend) return
 
     return onEstablishedWsDisconnect(() => {
+      if (isNativeApp()) {
+        dismissTransientUi()
+        return
+      }
       logger.info('WebSocket disconnected, reloading web app')
       captureWebReloadState()
       window.location.reload()
     })
-  }, [captureWebReloadState])
-
-  useEffect(() => {
-    if (isNativeApp() || isPreloading || hasStartedTransportRef.current) return
-    hasStartedTransportRef.current = true
-    connectTransport()
-  }, [isPreloading])
+  }, [captureWebReloadState, webBackend])
 
   // Global queue processor - must be at App level so queued messages execute
   // even when the worktree is not focused (ChatWindow unmounted)
@@ -715,7 +900,7 @@ function App() {
   // backend work.
   const wsConnected = useWsConnectionStatus()
   useEffect(() => {
-    if (isNativeApp() || !wsConnected) return
+    if (!webBackend || !wsConnected) return
 
     // First connect: invalidate non-preloaded queries. If the HTTP preload
     // failed, invalidate everything so it fetches over the open WebSocket.
@@ -738,7 +923,7 @@ function App() {
       )
       queryClient.invalidateQueries()
     }
-  }, [wsConnected, queryClient])
+  }, [wsConnected, queryClient, webBackend])
 
   // Add native-app class to body for desktop-only CSS (cursor, user-select, etc.)
   useEffect(() => {
@@ -768,103 +953,186 @@ function App() {
   }, [])
 
   // Check CLI installation status after the first paint.
+  // Include every AI backend Jean supports so remote hosts that only have
+  // Grok/Pi/etc. are not treated as "setup incomplete".
+  const nativeCli = cliCheckReady && isNativeApp()
   const { data: claudeStatus, isLoading: isClaudeStatusLoading } =
-    useClaudeCliStatus({ enabled: cliCheckReady && isNativeApp() })
+    useClaudeCliStatus({ enabled: nativeCli })
   const { data: codexStatus, isLoading: isCodexStatusLoading } =
-    useCodexCliStatus({ enabled: cliCheckReady && isNativeApp() })
+    useCodexCliStatus({ enabled: nativeCli })
   const { data: opencodeStatus, isLoading: isOpencodeStatusLoading } =
-    useOpencodeCliStatus({ enabled: cliCheckReady && isNativeApp() })
+    useOpencodeCliStatus({ enabled: nativeCli })
+  const { data: cursorStatus, isLoading: isCursorStatusLoading } =
+    useCursorCliStatus({ enabled: nativeCli })
+  const { data: piStatus, isLoading: isPiStatusLoading } = usePiCliStatus({
+    enabled: nativeCli,
+  })
+  const { data: commandcodeStatus, isLoading: isCommandcodeStatusLoading } =
+    useCommandCodeCliStatus({ enabled: nativeCli })
+  const { data: grokStatus, isLoading: isGrokStatusLoading } =
+    useGrokCliStatus({ enabled: nativeCli })
+  const { data: kimiStatus, isLoading: isKimiStatusLoading } =
+    useKimiCliStatus({ enabled: nativeCli })
   const { data: ghStatus, isLoading: isGhStatusLoading } = useGhCliStatus({
-    enabled: cliCheckReady && isNativeApp(),
+    enabled: nativeCli,
   })
 
   // Check CLI authentication status (only when installed)
   const { data: claudeAuth, isLoading: isClaudeAuthLoading } = useClaudeCliAuth(
-    { enabled: cliCheckReady && !!claudeStatus?.installed && isNativeApp() }
+    { enabled: nativeCli && !!claudeStatus?.installed }
   )
   const { data: codexAuth, isLoading: isCodexAuthLoading } = useCodexCliAuth({
-    enabled: cliCheckReady && !!codexStatus?.installed && isNativeApp(),
+    enabled: nativeCli && !!codexStatus?.installed,
   })
   const { data: opencodeAuth, isLoading: isOpencodeAuthLoading } =
     useOpencodeCliAuth({
-      enabled: cliCheckReady && !!opencodeStatus?.installed && isNativeApp(),
+      enabled: nativeCli && !!opencodeStatus?.installed,
     })
+  const { data: cursorAuth, isLoading: isCursorAuthLoading } =
+    useCursorCliAuth({
+      enabled: nativeCli && !!cursorStatus?.installed,
+    })
+  const { data: piAuth, isLoading: isPiAuthLoading } = usePiCliAuth({
+    enabled: nativeCli && !!piStatus?.installed,
+  })
+  const { data: commandcodeAuth, isLoading: isCommandcodeAuthLoading } =
+    useCommandCodeCliAuth({
+      enabled: nativeCli && !!commandcodeStatus?.installed,
+    })
+  const { data: grokAuth, isLoading: isGrokAuthLoading } = useGrokCliAuth({
+    enabled: nativeCli && !!grokStatus?.installed,
+  })
+  const { data: kimiAuth, isLoading: isKimiAuthLoading } = useKimiCliAuth({
+    enabled: nativeCli && !!kimiStatus?.installed,
+  })
   const { data: ghAuth, isLoading: isGhAuthLoading } = useGhCliAuth({
-    enabled: cliCheckReady && !!ghStatus?.installed && isNativeApp(),
+    enabled: nativeCli && !!ghStatus?.installed,
   })
 
   // Show onboarding if GitHub CLI is not ready, or no AI backend is ready.
-  // Only in native app - web view uses the desktop's CLIs via WebSocket
+  // Only in native app - pure web access uses the host's already-setup CLIs.
   useEffect(() => {
     if (!isNativeApp()) return
     if (!cliCheckReady) return
 
-    // Wait until the status queries have actually resolved before deciding.
-    if (!claudeStatus || !codexStatus || !opencodeStatus || !ghStatus) return
-
-    const isLoading =
-      isClaudeStatusLoading ||
-      isCodexStatusLoading ||
-      isOpencodeStatusLoading ||
-      isGhStatusLoading ||
-      (claudeStatus?.installed && isClaudeAuthLoading) ||
-      (codexStatus?.installed && isCodexAuthLoading) ||
-      (opencodeStatus?.installed && isOpencodeAuthLoading) ||
-      (ghStatus?.installed && isGhAuthLoading)
-    if (isLoading) return
-
-    const ghReady = !!ghStatus?.installed && !!ghAuth?.authenticated
-    const claudeReady = !!claudeStatus?.installed && !!claudeAuth?.authenticated
-    const codexReady = !!codexStatus?.installed && !!codexAuth?.authenticated
-    const opencodeReady =
-      !!opencodeStatus?.installed && !!opencodeAuth?.authenticated
-    const hasAiBackendReady = claudeReady || codexReady || opencodeReady
-
-    if (useUIStore.getState().onboardingDismissed) return
-
-    // On Windows, show onboarding if WSL mode hasn't been chosen yet
+    const onboarding = useUIStore.getState()
     const prefs = queryClient.getQueryData<AppPreferences>(['preferences'])
-    if (isWindows && prefs && !prefs.wsl_mode_chosen) {
-      logger.info('Windows WSL mode not chosen, showing onboarding')
-      useUIStore.getState().setOnboardingOpen(true)
+    // WSL mode only applies to the local Windows shell, not remote servers.
+    const requiresWslChoice = !!(
+      isLocalBackend() &&
+      isWindows &&
+      prefs &&
+      !prefs.wsl_mode_chosen
+    )
+    const action = getStartupOnboardingAction({
+      aiStatuses: [
+        claudeStatus,
+        codexStatus,
+        opencodeStatus,
+        cursorStatus,
+        piStatus,
+        commandcodeStatus,
+        grokStatus,
+        kimiStatus,
+      ],
+      aiAuth: [
+        claudeAuth,
+        codexAuth,
+        opencodeAuth,
+        cursorAuth,
+        piAuth,
+        commandcodeAuth,
+        grokAuth,
+        kimiAuth,
+      ],
+      ghStatus,
+      ghAuth,
+      onboardingOpen: onboarding.onboardingOpen,
+      onboardingDismissed: onboarding.onboardingDismissed,
+      onboardingManuallyTriggered: onboarding.onboardingManuallyTriggered,
+      requiresWslChoice,
+    })
+
+    if (action === 'wait' || action === 'none') return
+
+    if (action === 'ready') {
+      if (prefs && !prefs.has_seen_feature_tour) {
+        onboarding.setFeatureTourOpen(true)
+      }
       return
     }
 
-    if (!ghReady || !hasAiBackendReady) {
-      logger.info('CLI setup needed, showing onboarding', {
-        claudeInstalled: claudeStatus?.installed,
-        codexInstalled: codexStatus?.installed,
-        opencodeInstalled: opencodeStatus?.installed,
-        ghInstalled: ghStatus?.installed,
-        claudeAuth: claudeAuth?.authenticated,
-        codexAuth: codexAuth?.authenticated,
-        opencodeAuth: opencodeAuth?.authenticated,
-        ghAuth: ghAuth?.authenticated,
-      })
-      useUIStore.getState().setOnboardingOpen(true)
-    } else {
-      // CLIs already set up — show feature tour if not yet seen
-      const prefs = queryClient.getQueryData<AppPreferences>(['preferences'])
+    if (action === 'close') {
+      onboarding.setOnboardingOpen(false)
       if (prefs && !prefs.has_seen_feature_tour) {
-        useUIStore.getState().setFeatureTourOpen(true)
+        onboarding.setFeatureTourOpen(true)
       }
+      return
     }
+
+    if (requiresWslChoice) {
+      logger.info('Windows WSL mode not chosen, showing onboarding')
+      onboarding.setOnboardingOpen(true)
+      return
+    }
+
+    logger.info('CLI setup needed, showing onboarding', {
+      claudeInstalled: claudeStatus?.installed,
+      codexInstalled: codexStatus?.installed,
+      opencodeInstalled: opencodeStatus?.installed,
+      cursorInstalled: cursorStatus?.installed,
+      piInstalled: piStatus?.installed,
+      commandcodeInstalled: commandcodeStatus?.installed,
+      grokInstalled: grokStatus?.installed,
+      kimiInstalled: kimiStatus?.installed,
+      ghInstalled: ghStatus?.installed,
+      claudeAuth: claudeAuth?.authenticated,
+      codexAuth: codexAuth?.authenticated,
+      opencodeAuth: opencodeAuth?.authenticated,
+      cursorAuth: cursorAuth?.authenticated,
+      piAuth: piAuth?.authenticated,
+      commandcodeAuth: commandcodeAuth?.authenticated,
+      grokAuth: grokAuth?.authenticated,
+      kimiAuth: kimiAuth?.authenticated,
+      ghAuth: ghAuth?.authenticated,
+    })
+    onboarding.setOnboardingOpen(true)
   }, [
     claudeStatus,
     codexStatus,
     opencodeStatus,
+    cursorStatus,
+    piStatus,
+    commandcodeStatus,
+    grokStatus,
+    kimiStatus,
     ghStatus,
     claudeAuth,
     codexAuth,
     opencodeAuth,
+    cursorAuth,
+    piAuth,
+    commandcodeAuth,
+    grokAuth,
+    kimiAuth,
     ghAuth,
     isClaudeStatusLoading,
     isCodexStatusLoading,
     isOpencodeStatusLoading,
+    isCursorStatusLoading,
+    isPiStatusLoading,
+    isCommandcodeStatusLoading,
+    isGrokStatusLoading,
+    isKimiStatusLoading,
     isGhStatusLoading,
     isClaudeAuthLoading,
     isCodexAuthLoading,
     isOpencodeAuthLoading,
+    isCursorAuthLoading,
+    isPiAuthLoading,
+    isCommandcodeAuthLoading,
+    isGrokAuthLoading,
+    isKimiAuthLoading,
     isGhAuthLoading,
     cliCheckReady,
     platformVersion,
@@ -879,25 +1147,54 @@ function App() {
     if (preferences.has_seen_jean_mcp_intro) return
     if (onboardingOpen || featureTourOpen || jeanMcpIntroOpen) return
 
-    if (!claudeStatus || !codexStatus || !opencodeStatus || !ghStatus) return
+    const aiStatuses = [
+      claudeStatus,
+      codexStatus,
+      opencodeStatus,
+      cursorStatus,
+      piStatus,
+      commandcodeStatus,
+      grokStatus,
+      kimiStatus,
+    ]
+    const aiAuth = [
+      claudeAuth,
+      codexAuth,
+      opencodeAuth,
+      cursorAuth,
+      piAuth,
+      commandcodeAuth,
+      grokAuth,
+      kimiAuth,
+    ]
+    if (aiStatuses.some(status => !status) || !ghStatus) return
 
     const isLoading =
       isClaudeStatusLoading ||
       isCodexStatusLoading ||
       isOpencodeStatusLoading ||
+      isCursorStatusLoading ||
+      isPiStatusLoading ||
+      isCommandcodeStatusLoading ||
+      isGrokStatusLoading ||
+      isKimiStatusLoading ||
       isGhStatusLoading ||
       (claudeStatus?.installed && isClaudeAuthLoading) ||
       (codexStatus?.installed && isCodexAuthLoading) ||
       (opencodeStatus?.installed && isOpencodeAuthLoading) ||
+      (cursorStatus?.installed && isCursorAuthLoading) ||
+      (piStatus?.installed && isPiAuthLoading) ||
+      (commandcodeStatus?.installed && isCommandcodeAuthLoading) ||
+      (grokStatus?.installed && isGrokAuthLoading) ||
+      (kimiStatus?.installed && isKimiAuthLoading) ||
       (ghStatus?.installed && isGhAuthLoading)
     if (isLoading) return
 
     const ghReady = !!ghStatus?.installed && !!ghAuth?.authenticated
-    const claudeReady = !!claudeStatus?.installed && !!claudeAuth?.authenticated
-    const codexReady = !!codexStatus?.installed && !!codexAuth?.authenticated
-    const opencodeReady =
-      !!opencodeStatus?.installed && !!opencodeAuth?.authenticated
-    const hasAiBackendReady = claudeReady || codexReady || opencodeReady
+    const hasAiBackendReady = aiStatuses.some(
+      (status, index) =>
+        !!status?.installed && !!aiAuth[index]?.authenticated
+    )
 
     // If setup is incomplete, onboarding owns the startup surface.
     if (!ghReady || !hasAiBackendReady) return
@@ -915,18 +1212,38 @@ function App() {
     claudeStatus,
     codexStatus,
     opencodeStatus,
+    cursorStatus,
+    piStatus,
+    commandcodeStatus,
+    grokStatus,
+    kimiStatus,
     ghStatus,
     claudeAuth,
     codexAuth,
     opencodeAuth,
+    cursorAuth,
+    piAuth,
+    commandcodeAuth,
+    grokAuth,
+    kimiAuth,
     ghAuth,
     isClaudeStatusLoading,
     isCodexStatusLoading,
     isOpencodeStatusLoading,
+    isCursorStatusLoading,
+    isPiStatusLoading,
+    isCommandcodeStatusLoading,
+    isGrokStatusLoading,
+    isKimiStatusLoading,
     isGhStatusLoading,
     isClaudeAuthLoading,
     isCodexAuthLoading,
     isOpencodeAuthLoading,
+    isCursorAuthLoading,
+    isPiAuthLoading,
+    isCommandcodeAuthLoading,
+    isGrokAuthLoading,
+    isKimiAuthLoading,
     isGhAuthLoading,
     cliCheckReady,
   ])
@@ -962,9 +1279,10 @@ function App() {
 
   // Kill all terminals on page refresh/close (backup for Rust-side cleanup)
   useEffect(() => {
-    if (!isNativeApp()) return
+    if (!isNativeApp() || webBackend) return
 
     const handleBeforeUnload = () => {
+      if (isConnectionSwitchPending()) return
       // Best-effort sync cleanup for refresh scenarios
       // Note: async operations may not complete, but Rust-side RunEvent::Exit
       // will handle proper cleanup on app quit
@@ -974,7 +1292,17 @@ function App() {
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [])
+  }, [webBackend])
+
+  // Stable install/relaunch for event listeners — always latest without re-subscribing.
+  const onInstallAppUpdate = useEffectEvent(
+    (update: NonNullable<typeof pendingUpdateRef.current>) => {
+      void installAppUpdate(update)
+    }
+  )
+  const onRelaunchApp = useEffectEvent(() => {
+    void relaunchApp()
+  })
 
   // Initialize command system and cleanup on app startup
   useEffect(() => {
@@ -989,16 +1317,43 @@ function App() {
     })
 
     // Auto-updater logic - check for updates 5 seconds after app loads
+    // (native shell only; web clients use useServerUpdateCheck → host check)
     const checkForUpdates = async () => {
       if (!isNativeApp()) return
-      // Don't re-show modal if user already dismissed an update
-      if (useUIStore.getState().pendingUpdateVersion) return
+      const ui = useUIStore.getState()
+      // Don't re-offer while deferred, downloading, or already installed (#507)
+      if (
+        !shouldOfferUpdateCheck({
+          pendingUpdateVersion: ui.pendingUpdateVersion,
+          updateReadyVersion: ui.updateReadyVersion,
+          isUpdateInstalling: ui.isUpdateInstalling,
+        })
+      ) {
+        return
+      }
 
       try {
         const { check } = await import('@tauri-apps/plugin-updater')
 
         const update = await check()
         if (update) {
+          // Re-check guards after the async network call — install may have started
+          const after = useUIStore.getState()
+          if (
+            !shouldOfferUpdateCheck({
+              pendingUpdateVersion: after.pendingUpdateVersion,
+              updateReadyVersion: after.updateReadyVersion,
+              isUpdateInstalling: after.isUpdateInstalling,
+            })
+          ) {
+            try {
+              await update.close?.()
+            } catch {
+              // Resource may already be released
+            }
+            return
+          }
+
           logger.info(`Update available: ${update.version}`)
           pendingUpdateRef.current = update
           useUIStore.getState().setUpdateModalVersion(update.version)
@@ -1009,11 +1364,37 @@ function App() {
       }
     }
 
-    // Listen for install trigger from title bar indicator
+    // Listen for install trigger from title bar indicator / modal
     const handleInstallPending = () => {
-      if (pendingUpdateRef.current) {
-        installAppUpdate(pendingUpdateRef.current)
+      const ui = useUIStore.getState()
+      const action = resolveInstallPendingAction({
+        updateReadyVersion: ui.updateReadyVersion,
+        isUpdateInstalling: ui.isUpdateInstalling,
+        hasPendingUpdateObject: Boolean(pendingUpdateRef.current),
+      })
+      if (action === 'relaunch') {
+        onRelaunchApp()
+        return
       }
+      if (action === 'install' && pendingUpdateRef.current) {
+        onInstallAppUpdate(pendingUpdateRef.current)
+        return
+      }
+      // Already downloading — ignore duplicate install triggers (#507)
+      if (ui.isUpdateInstalling) return
+
+      // Web / remote: ask the host to install (desktop event or jean-server binary)
+      const version =
+        ui.pendingUpdateVersion || ui.updateModalVersion
+      if (!version) {
+        logger.warn(
+          'install-pending-update fired with no version or update object'
+        )
+        return
+      }
+      void import('@/hooks/useServerUpdateCheck').then(({ applyServerUpdate }) =>
+        applyServerUpdate(version)
+      )
     }
     window.addEventListener('install-pending-update', handleInstallPending)
 
@@ -1040,7 +1421,7 @@ function App() {
         webAccessSoundsEnabled: prefs?.web_access_sounds_enabled ?? true,
       })
 
-      if (isNativeApp()) {
+      if (isNativeApp() && !webBackend && !isConnectionSwitchPending()) {
         // Kill any orphaned terminals from previous native app session/reload.
         // Web access clients must not kill server-owned terminals when their
         // browser tab reloads, sleeps, or is discarded.
@@ -1072,9 +1453,14 @@ function App() {
           const { sendingSessionIds, removeSendingSession } =
             useChatStore.getState()
           const resumableIds = new Set(resumable.map(r => r.session_id))
-          for (const sessionId of Object.keys(sendingSessionIds)) {
-            if (!resumableIds.has(sessionId)) {
-              removeSendingSession(sessionId)
+          // Web bootstrap already restored the registry's authoritative running
+          // set. Recovery can omit a live run when its metadata snapshot is
+          // temporarily unavailable, so only reconcile stale local state here.
+          if (!webBackend) {
+            for (const sessionId of Object.keys(sendingSessionIds)) {
+              if (!resumableIds.has(sessionId)) {
+                removeSendingSession(sessionId)
+              }
             }
           }
 
@@ -1169,9 +1555,12 @@ function App() {
                 }
               }
 
+              // All backends need snapshot dedupe: Grok/Pi/Kimi re-emit tool
+              // updates and resume tails from the start of the run log. Without
+              // this, web reconnect while a turn is running doubles the stream.
               hydrateRunningSnapshot(session.session_id, lastMsg, {
                 allowWhileSending: true,
-                dedupeReplayedOutput: sessionSnapshot?.backend === 'claude',
+                dedupeReplayedOutput: true,
               })
 
               queryClient.setQueryData<Session>(
@@ -1207,6 +1596,8 @@ function App() {
         .catch(error => {
           logger.error('Failed to check resumable sessions', { error })
         })
+
+      clearConnectionSwitch()
     }, 2500)
 
     // Check for updates 5 seconds after app loads, then every 30 minutes
@@ -1219,21 +1610,51 @@ function App() {
       window.removeEventListener('install-pending-update', handleInstallPending)
       window.removeEventListener('update-available', handleUpdateAvailable)
     }
-  }, [installAppUpdate])
+  }, [webBackend])
 
-  // Show loading screen while preloading initial data (web view only)
-  if (isPreloading) {
-    return <WebLoadingScreen label="Loading Jean..." />
+  // Web clients request desktop install via apply_server_update → this event.
+  // Only the *host* native shell should run Tauri's updater (not a remote client
+  // that happens to receive the same event over the WebSocket).
+  useEffect(() => {
+    if (!isNativeApp()) return
+    let unlisten: (() => void) | undefined
+    listen<{ version?: string }>('host:install-desktop-update', () => {
+      if (!isLocalBackend()) return
+      void runNativeDesktopUpdateInstall()
+    }).then(fn => {
+      unlisten = fn
+    })
+    return () => unlisten?.()
+  }, [runNativeDesktopUpdateInstall])
+
+  // Show loading screen while preloading initial data (web view only).
+  // QuitConfirmationDialog stays mounted so X/quit can still confirm or
+  // destroy the native window while the overlay is up.
+  //
+  // When HTTP preload succeeds we render the shell immediately — invokes queue
+  // until the WebSocket finishes connecting (started in parallel). Only block
+  // on WS when preload failed and we have nothing to show.
+  const blockOnWs =
+    webBackend && !wsConnected && !wsAuthError && !hasPreloadedData()
+
+  if (isPreloading || blockOnWs) {
+    return (
+      <>
+        <JeanLoadingScreen />
+        {webBackend && <WsAuthErrorOverlay />}
+        {isNativeApp() && <QuitConfirmationDialog />}
+      </>
+    )
   }
 
   return (
     <ErrorBoundary>
       <ThemeProvider>
         <MainWindow />
-        {!isNativeApp() && !wsConnected && (
-          <WebLoadingScreen label="Loading Jean..." />
-        )}
-        {!isNativeApp() && <WsAuthErrorOverlay />}
+        {webBackend && <WsAuthErrorOverlay />}
+        {/* App-level dialog so quit confirmation wins over loading overlay
+            even if MainWindow's copy is covered / not yet mounted. */}
+        {isNativeApp() && <QuitConfirmationDialog />}
       </ThemeProvider>
     </ErrorBoundary>
   )
