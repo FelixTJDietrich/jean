@@ -74,6 +74,27 @@ AI reviews shares one Code Review session, and `review_results` stores the
 backend/model results together so the review panel can switch between them;
 entries are created with a running status so the dropdown can show loading
 state before each result arrives.
+
+### Client and Server Preference Ownership
+
+Preferences use a strict ownership boundary. Display, input, notification, and
+native-application choices are client-local and persist in the versioned
+`jean-client-preferences-v1` browser storage record. Workflow and operational
+configuration—including favorites, AI defaults, Magic Prompts, Git behavior,
+providers, MCP, CLI sources, integrations, and Web Access—is instance-wide on
+the selected Jean service.
+
+`usePreferences()` temporarily overlays client values onto the legacy server
+response so existing consumers remain compatible. `usePatchPreferences()`
+partitions updates: client keys never cross the backend transport, while server
+keys continue to use backend persistence. New code can use
+`useClientPreferences()` directly.
+
+Servers expose `get_server_preferences`, `update_server_preferences`, and
+`get_server_capabilities`. Server preference responses omit client fields and
+redact secrets to configured flags. Updates use an opaque revision string to
+detect concurrent edits. Capabilities provide the server-owned Magic Prompt
+catalog/defaults; the React UI retains bundled fallbacks for older servers.
 Duplicate pairs are rejected while running. Job progress emits
 `review-job:updated`.
 

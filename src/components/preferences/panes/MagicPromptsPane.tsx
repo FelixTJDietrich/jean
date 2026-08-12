@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
+import { useServerCapabilities } from '@/services/server-capabilities'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
@@ -744,6 +745,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   searchTargetPromptKey = null,
 }) => {
   const { data: preferences } = usePreferences()
+  const { data: serverCapabilities } = useServerCapabilities()
   const patchPreferences = usePatchPreferences()
   const [selectedKey, setSelectedKey] =
     useState<keyof MagicPrompts>('investigate_issue')
@@ -879,7 +881,17 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     [preferences?.custom_cli_profiles]
   )
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const selectedConfig = PROMPT_CONFIGS.find(c => c.key === selectedKey)!
+  const bundledSelectedConfig = PROMPT_CONFIGS.find(c => c.key === selectedKey)!
+  const serverPrompt = serverCapabilities?.magicPrompts.find(
+    prompt => prompt.id === selectedKey
+  )
+  const selectedConfig = serverPrompt
+    ? {
+        ...bundledSelectedConfig,
+        label: serverPrompt.label,
+        defaultValue: serverPrompt.defaultPrompt,
+      }
+    : bundledSelectedConfig
   const currentValue =
     currentPrompts[selectedKey] ?? selectedConfig.defaultValue
   const rawCurrentModel = selectedConfig.modelKey

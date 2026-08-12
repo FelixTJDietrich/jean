@@ -131,6 +131,16 @@ pub async fn dispatch_command(
             let result = crate::load_preferences(app.clone()).await?;
             to_value(result)
         }
+        "get_server_preferences" => to_value(crate::get_server_preferences(app.clone()).await?),
+        "update_server_preferences" => {
+            let patch: Value = from_field(&args, "patch")?;
+            let expected_revision: String = field(&args, "expectedRevision", "expected_revision")?;
+            let result =
+                crate::update_server_preferences(app.clone(), patch, expected_revision).await?;
+            emit_cache_invalidation(app, &["preferences", "server-preferences"]);
+            to_value(result)
+        }
+        "get_server_capabilities" => to_value(crate::get_server_capabilities().await?),
         "save_preferences" => {
             let preferences = from_field(&args, "preferences")?;
             crate::save_preferences(app.clone(), preferences).await?;

@@ -102,6 +102,7 @@ import { useRemotePicker } from '@/hooks/useRemotePicker'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { chatQueryKeys, refreshWorktreeSessionsCaches } from '@/services/chat'
 import {
+  clearWorktreePr,
   linkWorktreePr,
   saveWorktreePr,
   projectsQueryKeys,
@@ -448,6 +449,7 @@ export function MagicModal() {
   )
   const [isDetectingLinkPr, setIsDetectingLinkPr] = useState(false)
   const [isLinkingPr, setIsLinkingPr] = useState(false)
+  const [isUnlinkingPr, setIsUnlinkingPr] = useState(false)
   const [resolveSelectionMode, setResolveSelectionMode] =
     useState<ResolveSelectionMode>('settings-default')
   const [customResolveBackend, setCustomResolveBackend] =
@@ -2362,6 +2364,35 @@ ${resolveInstructions}`
     worktree?.project_id,
   ])
 
+  const handleUnlinkPr = useCallback(async () => {
+    if (!selectedWorktreeId || !worktree || !hasOpenPr) return
+
+    const prNumber = worktree.pr_number
+    setIsUnlinkingPr(true)
+    setLinkPrError(null)
+    try {
+      await clearWorktreePr(selectedWorktreeId)
+      queryClient.invalidateQueries({
+        queryKey: projectsQueryKeys.worktrees(worktree.project_id),
+      })
+      queryClient.invalidateQueries({
+        queryKey: [...projectsQueryKeys.all, 'worktree', selectedWorktreeId],
+      })
+      triggerImmediateGitPoll()
+      if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
+
+      toast.success(prNumber ? `Unlinked PR #${prNumber}` : 'Unlinked PR')
+      setLinkPrDialogOpen(false)
+      setLinkPrNumber('')
+    } catch (error) {
+      const message = `Failed to unlink PR: ${error}`
+      setLinkPrError(message)
+      toast.error(message)
+    } finally {
+      setIsUnlinkingPr(false)
+    }
+  }, [hasOpenPr, queryClient, selectedWorktreeId, worktree])
+
   const confirmRevertLastCommit = useCallback(() => {
     setRevertConfirmOpen(false)
     setMagicModalOpen(false)
@@ -2799,7 +2830,7 @@ ${resolveInstructions}`
                     handleLinkPrSubmit()
                   }
                 }}
-                disabled={isDetectingLinkPr}
+                disabled={isDetectingLinkPr || isUnlinkingPr}
                 autoFocus
               />
               {isDetectingLinkPr && (
@@ -2822,24 +2853,37 @@ ${resolveInstructions}`
               </p>
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setLinkPrDialogOpen(false)}
-                disabled={isLinkingPr || isDetectingLinkPr}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleLinkPrSubmit}
-                disabled={isLinkingPr || isDetectingLinkPr}
-              >
-                {isDetectingLinkPr
-                  ? 'Checking…'
-                  : isLinkingPr
-                    ? 'Linking…'
-                    : 'Link PR'}
-              </Button>
+            <div className="flex justify-between gap-2">
+              <div>
+                {hasOpenPr && (
+                  <Button
+                    variant="destructive"
+                    onClick={handleUnlinkPr}
+                    disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                  >
+                    {isUnlinkingPr ? 'Unlinking…' : 'Unlink PR'}
+                  </Button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setLinkPrDialogOpen(false)}
+                  disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleLinkPrSubmit}
+                  disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                >
+                  {isDetectingLinkPr
+                    ? 'Checking…'
+                    : isLinkingPr
+                      ? 'Linking…'
+                      : 'Link PR'}
+                </Button>
+              </div>
             </div>
           </div>
         </DialogContent>

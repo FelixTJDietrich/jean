@@ -32,6 +32,7 @@ pub use runtime::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,8 +66,8 @@ mod server_update;
 mod terminal;
 mod version;
 
-pub use version::{app_version, set_app_version};
 pub use prerequisites::*;
+pub use version::{app_version, set_app_version};
 
 // Desktop-only open helpers (native Tauri commands delegate here so editor
 // launch logic stays shared and complete: binary mapping, -g goto args,
@@ -892,9 +893,27 @@ mod tests {
     use super::{
         default_global_system_prompt, default_model, parse_cli_args_from,
         resolve_headless_bind_host, resolve_headless_token_required, resolve_http_server_bind_host,
-        validate_headless_security, AppPreferences,
+        server_preferences_value, validate_headless_security, AppPreferences,
     };
     use serde_json::json;
+
+    #[test]
+    fn server_preferences_exclude_client_fields_and_redact_secrets() {
+        let mut preferences = AppPreferences::default();
+        preferences.theme = "dark".to_string();
+        preferences.favorite_models = vec!["codex:gpt-5.6-sol".to_string()];
+        preferences.linear_api_key = Some("secret".to_string());
+        preferences.http_server_token = Some("token".to_string());
+
+        let value = server_preferences_value(&preferences).unwrap();
+
+        assert!(value.get("theme").is_none());
+        assert_eq!(value["favorite_models"], json!(["codex:gpt-5.6-sol"]));
+        assert!(value.get("linear_api_key").is_none());
+        assert_eq!(value["linear_api_key_configured"], json!(true));
+        assert!(value.get("http_server_token").is_none());
+        assert_eq!(value["http_server_token_configured"], json!(true));
+    }
 
     #[test]
     fn default_global_system_prompt_prefers_interactive_plan_questions() {
@@ -3291,6 +3310,161 @@ async fn patch_preferences(app: AppHandle, patch: Value) -> Result<(), String> {
     let merged: AppPreferences =
         serde_json::from_value(current_json).map_err(|e| format!("Merge error: {e}"))?;
     save_preferences(app, merged).await
+}
+
+const SERVER_PREFERENCES_SCHEMA_VERSION: u32 = 1;
+
+const CLIENT_ONLY_PREFERENCE_KEYS: &[&str] = &[
+    "theme",
+    "terminal",
+    "terminal_renderer",
+    "terminal_font",
+    "terminal_font_size",
+    "editor",
+    "open_in",
+    "ui_font_size",
+    "chat_font_size",
+    "ui_font",
+    "chat_font",
+    "font_weight",
+    "keybindings",
+    "syntax_theme_dark",
+    "syntax_theme_light",
+    "compact_chat_view_enabled",
+    "file_edit_mode",
+    "waiting_sound",
+    "review_sound",
+    "web_access_sounds_enabled",
+    "desktop_notifications_enabled",
+    "debug_mode_enabled",
+    "has_seen_feature_tour",
+    "has_seen_external_display_zoom_tip",
+    "zoom_level",
+    "mobile_zoom_level",
+    "sync_zoom_levels",
+    "confirm_session_close",
+    "expand_tool_calls_by_default",
+    "window_vibrancy",
+    "finished_session_animation_enabled",
+    "terminal_background",
+    "terminal_background_custom",
+];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPreferencesEnvelope {
+    pub schema_version: u32,
+    pub revision: String,
+    pub preferences: Value,
+}
+
+fn preferences_revision(value: &Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn server_preferences_value(preferences: &AppPreferences) -> Result<Value, String> {
+    let mut value =
+        serde_json::to_value(preferences).map_err(|e| format!("Serialize error: {e}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or("Preferences must be an object")?;
+    for key in CLIENT_ONLY_PREFERENCE_KEYS {
+        object.remove(*key);
+    }
+    for key in ["linear_api_key", "sentry_auth_token", "http_server_token"] {
+        let configured = object
+            .get(key)
+            .is_some_and(|value| value.as_str().is_some_and(|secret| !secret.is_empty()));
+        object.remove(key);
+        object.insert(format!("{key}_configured"), Value::Bool(configured));
+    }
+    Ok(value)
+}
+
+pub async fn get_server_preferences(app: AppHandle) -> Result<ServerPreferencesEnvelope, String> {
+    let preferences = load_preferences(app).await?;
+    let value = server_preferences_value(&preferences)?;
+    Ok(ServerPreferencesEnvelope {
+        schema_version: SERVER_PREFERENCES_SCHEMA_VERSION,
+        revision: preferences_revision(&value).to_string(),
+        preferences: value,
+    })
+}
+
+pub async fn update_server_preferences(
+    app: AppHandle,
+    patch: Value,
+    expected_revision: String,
+) -> Result<ServerPreferencesEnvelope, String> {
+    let current = get_server_preferences(app.clone()).await?;
+    if current.revision != expected_revision {
+        return Err("Server preferences changed; reload settings and try again".to_string());
+    }
+    let patch_object = patch
+        .as_object()
+        .ok_or("Preference patch must be an object")?;
+    if let Some(key) = patch_object
+        .keys()
+        .find(|key| CLIENT_ONLY_PREFERENCE_KEYS.contains(&key.as_str()))
+    {
+        return Err(format!("'{key}' is a client-only preference"));
+    }
+    patch_preferences(app.clone(), patch).await?;
+    get_server_preferences(app).await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MagicPromptCapability {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub default_prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerCapabilitiesEnvelope {
+    pub schema_version: u32,
+    pub app_version: String,
+    pub magic_prompts: Vec<MagicPromptCapability>,
+}
+
+pub async fn get_server_capabilities() -> Result<ServerCapabilitiesEnvelope, String> {
+    let prompts = [
+        ("investigate_issue", "Investigate issue", default_investigate_issue_prompt()),
+        ("investigate_pr", "Investigate pull request", default_investigate_pr_prompt()),
+        ("pr_content", "Pull request content", default_pr_content_prompt()),
+        ("commit_message", "Commit message", default_commit_message_prompt()),
+        ("code_review", "Code review", default_code_review_prompt()),
+        ("final_review", "Final review", "Perform a final, audit-only review before merge. Report only actionable, high-confidence findings introduced by the current changes.".to_string()),
+        ("context_summary", "Context summary", default_context_summary_prompt()),
+        ("resolve_conflicts", "Resolve conflicts", default_resolve_conflicts_prompt()),
+        ("investigate_workflow_run", "Investigate workflow run", default_investigate_workflow_run_prompt()),
+        ("release_notes", "Release notes", default_release_notes_prompt()),
+        ("session_naming", "Session naming", default_session_naming_prompt()),
+        ("parallel_execution", "Parallel execution", default_parallel_execution_prompt()),
+        ("global_system_prompt", "Global system prompt", default_global_system_prompt()),
+        ("provider_switch_handoff", "Provider switch handoff", default_provider_switch_handoff_prompt()),
+        ("investigate_security_alert", "Investigate security alert", default_investigate_security_alert_prompt()),
+        ("investigate_advisory", "Investigate advisory", default_investigate_advisory_prompt()),
+        ("investigate_linear_issue", "Investigate Linear issue", default_investigate_linear_issue_prompt()),
+        ("investigate_sentry_issue", "Investigate Sentry issue", default_investigate_sentry_issue_prompt()),
+        ("review_comments", "Review comments", default_review_comments_prompt()),
+    ];
+    Ok(ServerCapabilitiesEnvelope {
+        schema_version: 1,
+        app_version: app_version().to_string(),
+        magic_prompts: prompts
+            .into_iter()
+            .map(|(id, label, default_prompt)| MagicPromptCapability {
+                id,
+                label,
+                default_prompt,
+            })
+            .collect(),
+    })
 }
 
 async fn set_window_vibrancy(_app: AppHandle, _enabled: bool) -> Result<(), String> {
