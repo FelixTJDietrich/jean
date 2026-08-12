@@ -18,12 +18,18 @@ let grokInstalled: boolean
 let kimiInstalled: boolean
 let isMobile: boolean
 let defaultExecutionMode: 'plan' | 'build' | 'yolo'
+let defaultBackend: 'claude' | 'codex'
 
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
     data: {
       default_new_session_kind: 'chat',
       default_execution_mode: defaultExecutionMode,
+      default_backend: defaultBackend,
+      selected_model: 'claude-opus-4-8[1m]',
+      selected_codex_model: 'gpt-5.6-sol',
+      default_effort_level: 'max',
+      default_codex_reasoning_effort: 'xhigh',
     },
   }),
 }))
@@ -140,6 +146,7 @@ describe('NewSessionModeModal', () => {
     kimiInstalled = false
     isMobile = false
     defaultExecutionMode = 'plan'
+    defaultBackend = 'claude'
     invoke.mockResolvedValue({
       commandArgs: ['--context-arg', 'context-value'],
     })
@@ -180,7 +187,11 @@ describe('NewSessionModeModal', () => {
     fireEvent.keyDown(window, { key: 'Enter' })
 
     expect(mutate).toHaveBeenCalledWith(
-      { worktreeId: 'worktree-1', worktreePath: '/tmp/worktree-1' },
+      {
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        backend: 'claude',
+      },
       expect.any(Object)
     )
     expect(useChatStore.getState().activeSessionIds['worktree-1']).toBe(
@@ -188,6 +199,37 @@ describe('NewSessionModeModal', () => {
     )
     expect(useUIStore.getState().sessionPrimarySurface['session-1']).toBe(
       'chat'
+    )
+  })
+
+  it('applies the configured model and effort to a new chat session', () => {
+    defaultBackend = 'codex'
+    mutate.mockImplementation(
+      (
+        _args: unknown,
+        opts?: { onSuccess?: (session: { id: string }) => void }
+      ) => opts?.onSuccess?.({ id: 'session-defaults' })
+    )
+    useUIStore.getState().openNewSessionModeModal({
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree-1',
+      origin: 'chat',
+    })
+
+    render(<NewSessionModeModal />)
+    fireEvent.keyDown(window, { key: 'Enter' })
+
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({ backend: 'codex' }),
+      expect.any(Object)
+    )
+    expect(invoke).toHaveBeenCalledWith(
+      'update_session_state',
+      expect.objectContaining({
+        sessionId: 'session-defaults',
+        selectedModel: 'gpt-5.6-sol',
+        selectedEffortLevel: 'xhigh',
+      })
     )
   })
 
@@ -211,7 +253,11 @@ describe('NewSessionModeModal', () => {
 
     await waitFor(() => {
       expect(mutate).toHaveBeenCalledWith(
-        { worktreeId: 'worktree-1', worktreePath: '/tmp/worktree-1' },
+        {
+          worktreeId: 'worktree-1',
+          worktreePath: '/tmp/worktree-1',
+          backend: 'claude',
+        },
         expect.any(Object)
       )
     })
@@ -1045,12 +1091,15 @@ describe('NewSessionModeModal', () => {
     fireEvent.keyDown(window, { key: 'Enter' })
 
     expect(useChatStore.getState().executionModes['session-yolo']).toBe('yolo')
-    expect(invoke).toHaveBeenCalledWith('update_session_state', {
-      worktreeId: 'worktree-1',
-      worktreePath: '/tmp/worktree-1',
-      sessionId: 'session-yolo',
-      selectedExecutionMode: 'yolo',
-    })
+    expect(invoke).toHaveBeenCalledWith(
+      'update_session_state',
+      expect.objectContaining({
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        sessionId: 'session-yolo',
+        selectedExecutionMode: 'yolo',
+      })
+    )
   })
 
   it('shows fixed option descriptions without truncation', () => {

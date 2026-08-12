@@ -5771,6 +5771,10 @@ pub async fn get_project_branches(
 }
 
 /// Update project settings
+fn checkout_project_default_branch(project_path: &str, branch: &str) -> Result<(), String> {
+    git::checkout_branch(project_path, branch)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_project_settings(
     app: AppHandle,
@@ -5814,7 +5818,10 @@ pub async fn update_project_settings(
             project.default_branch,
             branch
         );
-        project.default_branch = branch;
+        if branch != project.default_branch {
+            checkout_project_default_branch(&project.path, &branch)?;
+            project.default_branch = branch;
+        }
     }
 
     if let Some(servers) = enabled_mcp_servers {
@@ -13884,6 +13891,28 @@ mod tests {
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn changing_default_branch_checks_out_branch_in_project_repository() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo dir");
+        run_test_git(&repo, &["init", "-b", "main"]);
+        run_test_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_test_git(&repo, &["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("README.md"), "test\n").expect("write file");
+        run_test_git(&repo, &["add", "."]);
+        run_test_git(&repo, &["commit", "-m", "initial"]);
+        run_test_git(&repo, &["branch", "v4.x"]);
+
+        checkout_project_default_branch(repo.to_str().unwrap(), "v4.x")
+            .expect("checkout default branch");
+
+        assert_eq!(
+            git::get_current_branch(repo.to_str().unwrap()).unwrap(),
+            "v4.x"
         );
     }
 
