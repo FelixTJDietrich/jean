@@ -1438,18 +1438,33 @@ Investigate the loaded GitHub {issueWord} ({issueRefs})
 <instructions>
 
 1. Read the issue context file(s) to understand the full problem description and comments
-2. Analyze the problem: expected vs actual behavior, error messages, reproduction steps
-3. Explore the codebase to find relevant code
-4. Identify root cause and constraints
-5. Check for regression if this is a bug fix
-6. Propose solution with specific files, risks, and test cases
+2. Analyze the problem:
+   - What is the expected vs actual behavior?
+   - Are there error messages, stack traces, or reproduction steps?
+3. Explore the codebase to find relevant code:
+   - Search for files/functions mentioned in the {issueWord}
+   - Read source files to understand current implementation
+   - Trace the affected code path
+4. Identify root cause:
+   - Where does the bug originate OR where should the feature be implemented?
+   - What constraints/edge cases need handling?
+   - Any related issues or tech debt?
+5. Check for regression:
+   - If this is a bug fix, determine if this is a regression
+   - Look at git history or related code to understand if the feature previously worked
+   - Identify what change may have caused the regression
+6. Propose solution:
+   - Clear explanation of needed changes
+   - Specific files to modify
+   - Potential risks/trade-offs
+   - Test cases to verify
 
 </instructions>
 
 
 <guidelines>
 
-- Be thorough but focused
+- Be thorough but focused - investigate deeply without getting sidetracked
 - Ask clarifying questions if requirements are unclear
 - If multiple solutions exist, explain trade-offs
 - Reference specific file paths and line numbers
@@ -1469,9 +1484,18 @@ Investigate the loaded GitHub {prWord} ({prRefs})
 <instructions>
 
 1. Read the PR context file(s) to understand the full description, reviews, and comments
-2. Understand what the PR is trying to accomplish and branch info (head → base)
-3. Explore the codebase to understand the context
-4. Analyze if the implementation matches the PR description
+2. Understand the changes:
+   - What is the PR trying to accomplish?
+   - What branches are involved (head → base)?
+   - Are there any review comments or requested changes?
+3. Explore the codebase to understand the context:
+   - Check out the PR branch if needed
+   - Read the files being modified
+   - Understand the current implementation
+4. Analyze the approach:
+   - Does the implementation match the PR description?
+   - Are there any concerns raised in reviews?
+   - What feedback has been given?
 5. Security review - check the changes for:
    - Malicious or obfuscated code (eval, encoded strings, hidden network calls, data exfiltration)
    - Suspicious dependency additions or version changes (typosquatting, hijacked packages)
@@ -1480,15 +1504,21 @@ Investigate the loaded GitHub {prWord} ({prRefs})
    - Unsafe deserialization, command injection, SQL injection, XSS
    - Weakened auth/permissions (removed checks, broadened access, disabled validation)
    - Suspicious file system or environment variable access
-6. Identify action items from reviewer feedback
-7. Propose next steps to get the PR merged
+6. Identify action items:
+   - What changes are requested by reviewers?
+   - Are there any failing checks or tests?
+   - What needs to be done to get this PR merged?
+7. Propose next steps:
+   - Address reviewer feedback
+   - Specific files to modify
+   - Test cases to add or update
 
 </instructions>
 
 
 <guidelines>
 
-- Be thorough but focused
+- Be thorough but focused - investigate deeply without getting sidetracked
 - Pay attention to reviewer feedback and requested changes
 - Flag any security concerns prominently, even minor ones
 - If multiple approaches exist, explain trade-offs
@@ -1684,15 +1714,25 @@ After resolving each file's conflicts, stage it with `git add`. Then run the app
 }
 
 fn default_investigate_workflow_run_prompt() -> String {
-    r#"Investigate the failed GitHub Actions workflow run for "{workflowName}" on branch `{branch}`.
+    r#"<task>
 
-**Context:**
+Investigate the failed GitHub Actions workflow run for "{workflowName}" on branch `{branch}`
+
+</task>
+
+
+<context>
+
 - Workflow: {workflowName}
 - Commit/PR: {displayTitle}
 - Branch: {branch}
 - Run URL: {runUrl}
 
-**Instructions:**
+</context>
+
+
+<instructions>
+
 1. Use the GitHub CLI to fetch the workflow run logs: `gh run view {runId} --log-failed`
 2. Read the error output carefully to identify the failure cause
 3. Explore the relevant code in the codebase to understand the context
@@ -1703,7 +1743,18 @@ fn default_investigate_workflow_run_prompt() -> String {
 8. If CI fails, inspect the new failure logs, fix the issue, run local checks, commit, push, and monitor the newest commit
 9. Repeat until the latest pushed commit is green
 
-If progress is blocked by infrastructure, permissions, or a non-actionable external failure, stop and report the blocker clearly."#
+</instructions>
+
+
+<guidelines>
+
+- Be thorough but focused on the failure
+- If the error is in CI config (.github/workflows), explain the fix
+- If the error is in code, reference specific file paths and line numbers
+- If it's a flaky test, suggest how to make it more reliable
+- If progress is blocked by infrastructure, permissions, or a non-actionable external failure, stop and report the blocker clearly
+
+</guidelines>"#
         .to_string()
 }
 
@@ -2024,7 +2075,7 @@ fn default_global_system_prompt() -> String {
 - Write detailed specs upfront to reduce ambiguity
 - Keep plans concise but complete enough for zero-context handoff (YOLO/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex `<proposed_plan>` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question.
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline as a short numbered list of options (1, 2, 3...) and tell the user to reply with a number.
 - For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in `<proposed_plan>...</proposed_plan>` so Jean can show the approval UI. Do not use the `update_plan` checklist tool in plan mode.
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete `<proposed_plan>` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.
@@ -2079,6 +2130,11 @@ fn default_global_system_prompt() -> String {
 - **Clickable References**: When output mentions issues, PRs, security advisories/alerts, Linear issues, Sentry issues, or other external resources, include clickable links when available so users can open them directly.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## GitHub Issue and Discussion Discovery
+- After making changes and before the final response, search the current repository's existing GitHub issues and discussions for items completely fixed by the changes, related items, and similar reports or discussions.
+- Include the results in both the main response and the `## Recap`, with clickable links when available, and label each item as fully fixed, related, or similar. If no matches are found or the search is unavailable, say so explicitly.
+- Do not claim an issue is fixed unless the changes fully satisfy it. Do not close or update issues or discussions unless the user explicitly asks.
 
 ## Jean Worktree Policy
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.

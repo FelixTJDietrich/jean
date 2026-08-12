@@ -173,6 +173,15 @@ describe('magic prompt preference resolvers', () => {
     )
   })
 
+  it('keeps fixing and pushing workflow failures until the pushed commit is green', () => {
+    const prompt = DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT.toLowerCase()
+
+    expect(prompt).toContain('commit and push')
+    expect(prompt).toContain('newly pushed commit')
+    expect(prompt).toContain('periodically')
+    expect(prompt).toContain('until the latest pushed commit is green')
+  })
+
   it('keeps automatic recaps on by default', () => {
     expect(defaultPreferences.auto_recaps_enabled).toBe(true)
   })

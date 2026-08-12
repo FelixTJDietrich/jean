@@ -385,7 +385,11 @@ Investigate the failed GitHub Actions workflow run for "{workflowName}" on branc
 2. Read the error output carefully to identify the failure cause
 3. Explore the relevant code in the codebase to understand the context
 4. Determine if this is a code issue, configuration issue, or flaky test
-5. Propose a fix with specific files and changes needed
+5. Implement the fix and run the relevant local checks
+6. Commit and push the changes
+7. Periodically monitor CI for the newly pushed commit until it completes
+8. If CI fails, inspect the new failure logs, fix the issue, run local checks, commit, push, and monitor the newest commit
+9. Repeat until the latest pushed commit is green
 
 </instructions>
 
@@ -396,6 +400,7 @@ Investigate the failed GitHub Actions workflow run for "{workflowName}" on branc
 - If the error is in CI config (.github/workflows), explain the fix
 - If the error is in code, reference specific file paths and line numbers
 - If it's a flaky test, suggest how to make it more reliable
+- If progress is blocked by infrastructure, permissions, or a non-actionable external failure, stop and report the blocker clearly
 
 </guidelines>`
 
@@ -632,7 +637,9 @@ export const DEFAULT_PARALLEL_EXECUTION_PROMPT = `In plan mode, structure plans 
 
 When launching multiple Task subagents, prefer sending them in a single message rather than sequentially. Group independent work items (e.g., editing separate files, researching unrelated questions) into parallel Task calls. Only sequence Tasks when one depends on another's output.
 
-Instruct each sub-agent to briefly outline its approach before implementing, so it can course-correct early without formal plan mode overhead.`
+Instruct each sub-agent to briefly outline its approach before implementing, so it can course-correct early without formal plan mode overhead.
+
+When specifying subagent_type for Task tool calls, always use the fully qualified name exactly as listed in the system prompt (e.g., "code-simplifier:code-simplifier", not just "code-simplifier"). If the agent type contains a colon, include the full namespace:name string.`
 
 /** Default global system prompt (must match DEFAULT_GLOBAL_SYSTEM_PROMPT in src-tauri) */
 export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `Always use ASD-STE100 Simplified Technical English when you talk to me.
