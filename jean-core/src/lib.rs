@@ -1697,8 +1697,30 @@ fn default_investigate_workflow_run_prompt() -> String {
 2. Read the error output carefully to identify the failure cause
 3. Explore the relevant code in the codebase to understand the context
 4. Determine if this is a code issue, configuration issue, or flaky test
-5. Propose a fix with specific files and changes needed"#
+5. Implement the fix and run the relevant local checks
+6. Commit and push the changes
+7. Periodically monitor CI for the newly pushed commit until it completes
+8. If CI fails, inspect the new failure logs, fix the issue, run local checks, commit, push, and monitor the newest commit
+9. Repeat until the latest pushed commit is green
+
+If progress is blocked by infrastructure, permissions, or a non-actionable external failure, stop and report the blocker clearly."#
         .to_string()
+}
+
+#[cfg(test)]
+mod investigate_workflow_prompt_tests {
+    use super::default_investigate_workflow_run_prompt;
+
+    #[test]
+    fn workflow_investigation_keeps_fixing_pushed_commits_until_ci_is_green() {
+        let prompt = default_investigate_workflow_run_prompt();
+        let normalized = prompt.to_lowercase();
+
+        assert!(normalized.contains("commit and push"));
+        assert!(normalized.contains("newly pushed commit"));
+        assert!(normalized.contains("periodically"));
+        assert!(normalized.contains("until the latest pushed commit is green"));
+    }
 }
 
 fn default_investigate_security_alert_prompt() -> String {
