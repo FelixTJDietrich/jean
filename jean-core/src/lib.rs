@@ -796,7 +796,7 @@ fn default_commandcode_model() -> String {
 }
 
 fn default_grok_model() -> String {
-    "grok/grok-4.5".to_string()
+    "grok/grok-4.6".to_string()
 }
 
 fn default_kimi_model() -> String {
@@ -2308,7 +2308,7 @@ pub fn is_pi_model(model: &str) -> bool {
 }
 
 /// Returns true if the given model string identifies a Grok model.
-/// Grok model IDs are prefixed with "grok/" (e.g. "grok/grok-4.5").
+/// Grok model IDs are prefixed with "grok/" (e.g. "grok/grok-4.6").
 pub fn is_grok_model(model: &str) -> bool {
     model.starts_with("grok/")
 }

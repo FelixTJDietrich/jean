@@ -938,7 +938,7 @@ fn default_model_for_backend(backend: &str) -> String {
         "cursor" => "cursor/auto".to_string(),
         "pi" => "pi/sonnet".to_string(),
         "commandcode" => "commandcode/default".to_string(),
-        "grok" => "grok/grok-4.5".to_string(),
+        "grok" => "grok/grok-4.6".to_string(),
         "antigravity" => "antigravity/auto".to_string(),
         _ => "claude-opus-4-8[1m]".to_string(),
     }
@@ -1297,7 +1297,7 @@ mod tests {
         );
         assert_eq!(
             default_model_for_backend("grok"),
-            "grok/grok-4.5".to_string()
+            "grok/grok-4.6".to_string()
         );
         assert_eq!(
             default_model_for_backend("antigravity"),

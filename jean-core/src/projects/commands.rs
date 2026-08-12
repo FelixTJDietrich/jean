@@ -13222,9 +13222,7 @@ fn collect_skills_from_dir_inner(
 
         let skill_file = path.join("SKILL.md");
         let is_skill_file = match std::fs::symlink_metadata(&skill_file) {
-            Ok(metadata) => {
-                metadata.file_type().is_file() && !metadata.file_type().is_symlink()
-            }
+            Ok(metadata) => metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => {
                 log::warn!("Failed to inspect skill file {skill_file:?}: {error}");
@@ -13896,7 +13894,9 @@ mod tests {
 
         assert_eq!(skills.len(), 2);
         assert_eq!(
-            skills.get("flat").and_then(|skill| skill.description.as_deref()),
+            skills
+                .get("flat")
+                .and_then(|skill| skill.description.as_deref()),
             Some("Flat skill")
         );
         assert_eq!(
@@ -13989,11 +13989,8 @@ mod tests {
         std::fs::create_dir_all(&linked_file_skill).expect("linked file skill dir");
         std::fs::write(outside.join("SKILL.md"), "# Outside\n").expect("outside skill");
         symlink(&outside, root.join("linked-directory")).expect("directory symlink");
-        symlink(
-            outside.join("SKILL.md"),
-            linked_file_skill.join("SKILL.md"),
-        )
-        .expect("skill file symlink");
+        symlink(outside.join("SKILL.md"), linked_file_skill.join("SKILL.md"))
+            .expect("skill file symlink");
 
         let skills = collect_test_skills(&root);
 

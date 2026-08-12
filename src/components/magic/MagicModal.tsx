@@ -612,7 +612,7 @@ export function MagicModal() {
               : backend === 'kimi'
                 ? (preferences?.selected_kimi_model ?? 'kimi/default')
                 : backend === 'grok'
-                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.5')
+                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
                   : backend === 'antigravity'
                     ? (preferences?.selected_antigravity_model ??
                       'antigravity/auto')
@@ -648,7 +648,7 @@ export function MagicModal() {
               : backend === 'kimi'
                 ? (preferences?.selected_kimi_model ?? 'kimi/default')
                 : backend === 'grok'
-                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.5')
+                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
                   : backend === 'antigravity'
                     ? (preferences?.selected_antigravity_model ??
                       'antigravity/auto')
