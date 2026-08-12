@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { ChatInput } from './ChatInput'
 import { invoke } from '@/lib/transport'
+import type * as EnvironmentModule from '@/lib/environment'
 import { useUIStore } from '@/store/ui-store'
 import {
   appendPromptMetadataToPlainText,
@@ -34,7 +35,7 @@ vi.mock('@/hooks/use-mobile', () => ({
 }))
 
 vi.mock('@/lib/environment', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/lib/environment')>()),
+  ...(await importOriginal<typeof EnvironmentModule>()),
   isNativeApp: () => nativeState.value,
 }))
 
