@@ -197,7 +197,8 @@ fn tool_registry_session() -> Value {
         {"name":"get_usage","description":"Fetch subscription/usage snapshots for Claude, Codex, and/or Grok (same data as Jean Settings → Usage). Use to decide whether to switch models when a plan is near limits. Optional backend filters to one provider; omit or pass \"all\" for every available snapshot. Per-backend failures are reported in errors without failing the whole call.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","grok","all"],"default":"all","description":"Which provider usage to fetch. Default all."}},"additionalProperties":false}},
         {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
+        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"get_run_environments","description":"List Jean Run-command / panel-command dev environments. Returns whether each is running, worktree/base-session identity, startup command, listening/configured ports, and http URL when a port is known. Optional worktreeId or projectId filters. Does not include full-screen CLI session terminals.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string","description":"Optional worktree id to filter to one worktree or base session."},"projectId":{"type":"string","description":"Optional project id to filter to that project's worktrees."}},"additionalProperties":false}}
     ])
 }
 
@@ -1224,6 +1225,22 @@ async fn run_tool(
             dispatch_command(app, "run_review_with_ai", Value::Object(payload))
                 .await
                 .map_err(ToolError::internal)
+        }
+        "get_run_environments" => {
+            let worktree_id =
+                optional_str(&args, "worktreeId").or_else(|| optional_str(&args, "worktree_id"));
+            let project_id =
+                optional_str(&args, "projectId").or_else(|| optional_str(&args, "project_id"));
+            dispatch_command(
+                app,
+                "get_run_environments",
+                json!({
+                    "worktreeId": worktree_id,
+                    "projectId": project_id
+                }),
+            )
+            .await
+            .map_err(ToolError::internal)
         }
         "get_current_context" => {
             if source == "anon" {
@@ -2650,6 +2667,7 @@ mod tests {
             "set_session_model",
             "archive_session",
             "unarchive_session",
+            "get_run_environments",
         ] {
             assert!(names.contains(expected), "missing MCP tool {expected}");
         }
@@ -2674,6 +2692,30 @@ mod tests {
         assert!(
             send_desc.contains("selected model"),
             "send_chat_message description should mention session model fallback"
+        );
+
+        let run_envs = find_tool(&tools, "get_run_environments");
+        assert!(
+            run_envs["inputSchema"]
+                .get("required")
+                .map(|required| required.as_array().is_some_and(|items| items.is_empty()))
+                .unwrap_or(true),
+            "get_run_environments should not require filters"
+        );
+        assert!(run_envs["inputSchema"]["properties"]
+            .get("worktreeId")
+            .is_some());
+        assert!(run_envs["inputSchema"]["properties"]
+            .get("projectId")
+            .is_some());
+        assert!(
+            !RATE_LIMITED_TOOLS.contains(&"get_run_environments"),
+            "get_run_environments is read-only and should not be rate-limited"
+        );
+        let run_desc = run_envs["description"].as_str().unwrap_or("");
+        assert!(
+            run_desc.contains("running"),
+            "get_run_environments description should mention running state"
         );
     }
 

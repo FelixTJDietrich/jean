@@ -871,6 +871,7 @@ async fn approve_plan_and_start_yolo(
         None,
         entry.provider.clone(),
         Some(entry.backend.clone()),
+        None,
     )
     .await?;
 

@@ -264,13 +264,7 @@ const backendLabel: Record<CliType, string> = {
   gh: 'GitHub CLI',
 }
 
-const BETA_BACKENDS = new Set<AIBackend>([
-  'pi',
-  'commandcode',
-  'grok',
-  'kimi',
-  'antigravity',
-])
+const BETA_BACKENDS = new Set<AIBackend>(['antigravity'])
 
 function magicDefaultsForBackend(
   backend: AIBackend

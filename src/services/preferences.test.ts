@@ -222,6 +222,11 @@ describe('model option helpers', () => {
       'Do NOT create git worktrees manually'
     )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean MCP/tools')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean Run Environment')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('get_run_environments')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'test against its `url`, port, and startup command'
+    )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'VERY IMPORTANT: Keep Code Simple'
     )
