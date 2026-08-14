@@ -149,6 +149,21 @@ vi.mock('@/services/gh-cli', () => ({
   useGhPathDetection: () => pathResult(true, '/usr/bin/gh'),
 }))
 
+vi.mock('@/services/prerequisites', () => ({
+  checkSystemPrerequisites: vi.fn().mockResolvedValue({
+    gitInstalled: true,
+    gitVersion: '2.50.0',
+    nodeInstalled: true,
+    nodeVersion: '24.0.0',
+    npmInstalled: true,
+    npmVersion: '11.0.0',
+    platform: 'linux',
+    automaticInstallSupported: false,
+    automaticInstallCommand: null,
+    manualInstallUrl: 'https://nodejs.org/en/download',
+  }),
+}))
+
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
     data: {

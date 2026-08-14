@@ -440,25 +440,21 @@ function executeKeybindingAction(
 
       const resolvedWorktreePath = targetWorktreePath
 
-      // Fetch run scripts - use fetchQuery to handle uncached dashboard worktrees
+      // Always read jean.json from disk. A cached copy stays stale after
+      // the branch is updated from latest or Settings saves a new command.
       ;(async () => {
-        let runScripts = queryClient.getQueryData<string[]>([
-          'run-scripts',
-          resolvedWorktreePath,
-        ])
-
-        if (runScripts === undefined) {
-          try {
-            runScripts = await queryClient.fetchQuery<string[]>({
-              queryKey: ['run-scripts', resolvedWorktreePath],
-              queryFn: () =>
-                invoke<string[]>('get_run_scripts', {
-                  worktreePath: resolvedWorktreePath,
-                }),
-            })
-          } catch {
-            runScripts = []
-          }
+        let runScripts: string[] = []
+        try {
+          runScripts = await queryClient.fetchQuery<string[]>({
+            queryKey: ['run-scripts', resolvedWorktreePath],
+            queryFn: () =>
+              invoke<string[]>('get_run_scripts', {
+                worktreePath: resolvedWorktreePath,
+              }),
+            staleTime: 0,
+          })
+        } catch {
+          runScripts = []
         }
 
         const firstScript = runScripts?.[0]

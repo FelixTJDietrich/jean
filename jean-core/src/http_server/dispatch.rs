@@ -2089,7 +2089,7 @@ pub async fn dispatch_command(
         }
         "get_run_scripts" => {
             let parsed = parse_worktree_path_args(&args)?;
-            let result = crate::terminal::get_run_scripts(parsed.worktree_path).await;
+            let result = crate::terminal::get_run_scripts(app.clone(), parsed.worktree_path).await;
             to_value(result)
         }
         "get_package_scripts" => {
@@ -2099,7 +2099,7 @@ pub async fn dispatch_command(
         }
         "get_ports" => {
             let parsed = parse_worktree_path_args(&args)?;
-            let result = crate::terminal::get_ports(parsed.worktree_path).await;
+            let result = crate::terminal::get_ports(app.clone(), parsed.worktree_path).await;
             to_value(result)
         }
         "get_terminal_listening_ports" => {
