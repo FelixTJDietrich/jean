@@ -515,6 +515,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               isDisabled={false}
               hasOpenPr={hasOpenPr}
               hasIssueContexts={loadedIssueContexts.length > 0}
+              hasSentryContexts={loadedSentryContexts.length > 0}
               hasPrContexts={loadedPRContexts.length > 0}
               onSaveContext={onSaveContext}
               onLoadContext={onLoadContext}

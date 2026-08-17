@@ -164,6 +164,15 @@ describe('useInvestigateHandlers', () => {
       await result.current.handleInvestigate('sentry-issue')
     })
 
+    expect(invoke).toHaveBeenCalledWith(
+      'get_sentry_issue_context_contents',
+      {
+        sessionId: 'base-session',
+        worktreeId: 'worktree-1',
+        projectId: 'project-1',
+      }
+    )
+
     expect(sendMessage.mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         message: expect.stringContaining(

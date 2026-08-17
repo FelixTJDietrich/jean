@@ -58,6 +58,7 @@ import {
   useLoadedAdvisoryContexts,
 } from '@/services/github'
 import { usePreferences } from '@/services/preferences'
+import { useLoadedSentryContexts } from '@/services/sentry'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
 import { useAvailableKimiModels } from '@/services/kimi-cli'
@@ -208,7 +209,7 @@ interface MagicColumns {
   all: MagicSection[]
 }
 
-type InvestigateType = 'issue' | 'pr' | 'advisory'
+type InvestigateType = 'issue' | 'pr' | 'advisory' | 'sentry-issue'
 type InvestigateSelectionMode = 'settings-default' | 'custom'
 type ResolveSelectionMode = 'settings-default' | 'custom'
 
@@ -216,18 +217,21 @@ const INVESTIGATE_MODEL_KEYS = {
   issue: 'investigate_issue_model',
   pr: 'investigate_pr_model',
   advisory: 'investigate_advisory_model',
+  'sentry-issue': 'investigate_sentry_issue_model',
 } as const
 
 const INVESTIGATE_PROVIDER_KEYS = {
   issue: 'investigate_issue_provider',
   pr: 'investigate_pr_provider',
   advisory: 'investigate_advisory_provider',
+  'sentry-issue': 'investigate_sentry_issue_provider',
 } as const
 
 const INVESTIGATE_BACKEND_KEYS = {
   issue: 'investigate_issue_backend',
   pr: 'investigate_pr_backend',
   advisory: 'investigate_advisory_backend',
+  'sentry-issue': 'investigate_sentry_issue_backend',
 } as const
 
 const RESOLVE_CONFLICTS_MODEL_KEY = 'resolve_conflicts_model'
@@ -477,7 +481,13 @@ export function MagicModal() {
     activeSessionId ?? selectedWorktreeId,
     selectedWorktreeId
   )
+  const { data: sentryContexts } = useLoadedSentryContexts(
+    activeSessionId ?? selectedWorktreeId,
+    selectedWorktreeId,
+    worktree?.project_id ?? null
+  )
   const hasIssueContexts = (issueContexts?.length ?? 0) > 0
+  const hasSentryContexts = (sentryContexts?.length ?? 0) > 0
   const hasPrContexts = (prContexts?.length ?? 0) > 0
   const hasAdvisoryContexts = (advisoryContexts?.length ?? 0) > 0
 
@@ -2501,13 +2511,15 @@ ${resolveInstructions}`
       ) {
         const type: InvestigateType =
           option === 'investigate-issue'
-            ? 'issue'
+            ? hasIssueContexts
+              ? 'issue'
+              : 'sentry-issue'
             : option === 'investigate-pr'
               ? 'pr'
               : 'advisory'
         const hasContexts =
-          type === 'issue'
-            ? hasIssueContexts
+          type === 'issue' || type === 'sentry-issue'
+            ? hasIssueContexts || hasSentryContexts
             : type === 'pr'
               ? hasPrContexts
               : hasAdvisoryContexts
@@ -2758,7 +2770,8 @@ ${resolveInstructions}`
                           (isOnCanvas &&
                             !CANVAS_ALLOWED_OPTIONS.has(option.id)) ||
                           (option.id === 'investigate-issue' &&
-                            !hasIssueContexts) ||
+                            !hasIssueContexts &&
+                            !hasSentryContexts) ||
                           (option.id === 'investigate-pr' && !hasPrContexts) ||
                           (option.id === 'investigate-advisory' &&
                             !hasAdvisoryContexts) ||
@@ -2910,7 +2923,9 @@ ${resolveInstructions}`
                 ? 'PR'
                 : investigateType === 'advisory'
                   ? 'Advisory'
-                  : 'Issue'}
+                  : investigateType === 'sentry-issue'
+                    ? 'Sentry Issue'
+                    : 'Issue'}
             </DialogTitle>
           </DialogHeader>
 

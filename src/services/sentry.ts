@@ -97,12 +97,12 @@ export function useLoadedSentryContexts(
 ) {
   return useQuery({
     queryKey: sentryQueryKeys.loadedContexts(sessionId ?? ''),
-    queryFn: () =>
-      invoke<SentryIssueContext[]>('get_sentry_issue_context_contents', {
+    queryFn: async () =>
+      (await invoke<SentryIssueContext[]>('get_sentry_issue_context_contents', {
         sessionId,
         worktreeId,
         projectId,
-      }),
+      })) ?? [],
     enabled: !!sessionId && !!projectId,
   })
 }

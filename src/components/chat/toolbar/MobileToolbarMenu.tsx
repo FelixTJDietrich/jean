@@ -34,6 +34,7 @@ interface MobileToolbarMenuProps {
   isDisabled: boolean
   hasOpenPr: boolean
   hasIssueContexts: boolean
+  hasSentryContexts?: boolean
   hasPrContexts: boolean
 
   onSaveContext: () => void
@@ -54,6 +55,7 @@ export function MobileToolbarMenu({
   isDisabled,
   hasOpenPr,
   hasIssueContexts,
+  hasSentryContexts = false,
   hasPrContexts,
   onSaveContext,
   onLoadContext,
@@ -355,13 +357,16 @@ export function MobileToolbarMenu({
           Investigate
         </div>
         <DropdownMenuItem
-          disabled={!hasIssueContexts}
+          disabled={!hasIssueContexts && !hasSentryContexts}
           onClick={() => {
-            if (!hasIssueContexts) return
+            if (!hasIssueContexts && !hasSentryContexts) return
             setMenuOpen(false)
             window.dispatchEvent(
               new CustomEvent('magic-command', {
-                detail: { command: 'investigate', type: 'issue' },
+                detail: {
+                  command: 'investigate',
+                  type: hasIssueContexts ? 'issue' : 'sentry-issue',
+                },
               })
             )
           }}
