@@ -11308,7 +11308,8 @@ const RELEASE_NOTES_PROMPT: &str = r#"Generate release notes for changes since t
 
 ## Instructions
 
-- Write a concise release title.
+- Use the release version only as the release title (for example, `0.1.74`); do not prefix or suffix it with the app name or any other words.
+- Do not repeat the app name or release version at the top of the release notes body; start directly with the release content or first category heading.
 - Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
 - Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.
 - Inspect PR titles, PR bodies, and PR commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_RELEASE_NOTES_PROMPT,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS,
   COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
@@ -22,6 +23,15 @@ import {
   resolveMagicPromptBackend,
   resolveMagicPromptProvider,
 } from './preferences'
+
+describe('default release notes prompt', () => {
+  it('requires a version-only title without an app/version body heading', () => {
+    expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain('release version only')
+    expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain(
+      'Do not repeat the app name or release version at the top'
+    )
+  })
+})
 
 describe('magic prompt preference resolvers', () => {
   it('defines an audit-only final review prompt with tabular output', () => {
