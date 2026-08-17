@@ -261,21 +261,35 @@ export function MobileSettingsMenu({
   const usesEffortControl =
     modelReasoning?.type === 'effort' ||
     (modelReasoning === undefined &&
-      (useAdaptiveThinking || isCodex || isPi || isGrok || isKimi || isAntigravity))
+      (useAdaptiveThinking ||
+        isCodex ||
+        isPi ||
+        isGrok ||
+        isKimi ||
+        isAntigravity))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
       : isAntigravity
         ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
         : isPi
-        ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
-        : isCodex
-          ? withAdaptiveEffortOption(CODEX_EFFORT_LEVEL_OPTIONS, selectedModel)
-          : isKimi
-            ? withAdaptiveEffortOption(KIMI_EFFORT_LEVEL_OPTIONS, selectedModel)
-            : isGrok
-              ? withAdaptiveEffortOption(GROK_EFFORT_LEVEL_OPTIONS, selectedModel)
-              : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
+          ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
+          : isCodex
+            ? withAdaptiveEffortOption(
+                CODEX_EFFORT_LEVEL_OPTIONS,
+                selectedModel
+              )
+            : isKimi
+              ? withAdaptiveEffortOption(
+                  KIMI_EFFORT_LEVEL_OPTIONS,
+                  selectedModel
+                )
+              : isGrok
+                ? withAdaptiveEffortOption(
+                    GROK_EFFORT_LEVEL_OPTIONS,
+                    selectedModel
+                  )
+                : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
@@ -756,7 +770,9 @@ export function MobileSettingsMenu({
                             }
                             onCheckedChange={() => onToggleMcpServer(key)}
                             onSelect={keepMenuOpenOnSelect}
-                            disabled={server.disabled || backend === 'antigravity'}
+                            disabled={
+                              server.disabled || backend === 'antigravity'
+                            }
                             className={
                               server.disabled ? 'opacity-50' : undefined
                             }
@@ -1116,7 +1132,7 @@ export function MobileSettingsMenu({
                       {ctx.url && (
                         <button
                           type="button"
-                        aria-label="Open external link"
+                          aria-label="Open external link"
                           className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                           onClick={e => {
                             e.stopPropagation()
