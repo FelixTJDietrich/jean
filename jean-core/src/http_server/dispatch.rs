@@ -3655,6 +3655,19 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "load_sentry_issue_context" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let result = crate::projects::load_sentry_issue_context(
+                app.clone(),
+                session_id,
+                project_id,
+                issue_id,
+            )
+            .await?;
+            to_value(result)
+        }
         "remove_linear_issue_context" => {
             let session_id: String = field(&args, "sessionId", "session_id")?;
             let project_id: String = field(&args, "projectId", "project_id")?;

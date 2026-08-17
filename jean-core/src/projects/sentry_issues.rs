@@ -443,6 +443,24 @@ pub fn get_session_sentry_refs(app: &AppHandle, session_id: &str) -> Result<Vec<
         .collect())
 }
 
+pub async fn load_sentry_issue_context(
+    app: AppHandle,
+    session_id: String,
+    project_id: String,
+    issue_id: String,
+) -> Result<SentryIssueContext, String> {
+    let config = get_sentry_config(&app, &project_id)?;
+    let context = get_sentry_issue(app.clone(), project_id, issue_id).await?;
+    let contexts_dir = get_github_contexts_dir(&app)?;
+    std::fs::create_dir_all(&contexts_dir)
+        .map_err(|e| format!("Failed to create git-context directory: {e}"))?;
+    let path = contexts_dir.join(format!("{}-sentry-{}.md", config.project_name, context.id));
+    std::fs::write(path, &context.content)
+        .map_err(|e| format!("Failed to write Sentry context file: {e}"))?;
+    add_sentry_reference(&app, &config.project_name, &context.id, &session_id)?;
+    Ok(context)
+}
+
 pub async fn get_sentry_issue_context_contents(
     app: AppHandle,
     session_id: String,

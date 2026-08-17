@@ -196,4 +196,22 @@ describe('LoadContextModal Linear context viewer', () => {
       await screen.findByText(/Expected markdown content from Linear/)
     ).toBeInTheDocument()
   })
+
+  it('offers Sentry as a context source', async () => {
+    render(
+      <LoadContextModal
+        open={true}
+        onOpenChange={vi.fn()}
+        worktreeId="wt-1"
+        worktreePath="/repo/worktree"
+        activeSessionId="session-1"
+        projectName="Jean"
+        projectId="project-1"
+      />
+    )
+
+    expect(
+      await screen.findByRole('button', { name: /Sentry/ })
+    ).toBeInTheDocument()
+  })
 })
