@@ -99,7 +99,7 @@ Then confirm to the user that PR #<PR_NUMBER> was updated, show the full clickab
 const RELEASE_OUTPUT_CONTRACT = `## Release output requirements
 
 - Determine the release version from the project's current version metadata.
-- Use the release version only as the release title (for example, \`0.1.74\`). Do not prefix or suffix it with the app name or any other words.
+- Use only the release version as the release title and prefix the release version with \`v\` (for example, \`v0.1.74\`). Do not add the app name, other words, or a second \`v\` if the version already has one.
 - Do not repeat the app name or release version at the top of the release notes body. Start the body directly with the release content or its first category heading.
 - In the \`Create release on GitHub\` link, the title query parameter must contain that same version-only title, and the body query parameter must contain the notes without an app-name/version heading.`
 

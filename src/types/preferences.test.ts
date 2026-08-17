@@ -25,8 +25,11 @@ import {
 } from './preferences'
 
 describe('default release notes prompt', () => {
-  it('requires a version-only title without an app/version body heading', () => {
-    expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain('release version only')
+  it('requires a v-prefixed version title without an app/version body heading', () => {
+    expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain(
+      'prefix the release version with `v`'
+    )
+    expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain('`v0.1.74`')
     expect(DEFAULT_RELEASE_NOTES_PROMPT).toContain(
       'Do not repeat the app name or release version at the top'
     )

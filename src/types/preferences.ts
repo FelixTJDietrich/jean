@@ -599,7 +599,7 @@ export const DEFAULT_RELEASE_NOTES_PROMPT = `Generate release notes for changes 
 
 ## Instructions
 
-- Use the release version only as the release title (for example, \`0.1.74\`); do not prefix or suffix it with the app name or any other words.
+- Use only the release version as the release title and prefix the release version with \`v\` (for example, \`v0.1.74\`); do not add the app name, other words, or a second \`v\` if the version already has one.
 - Do not repeat the app name or release version at the top of the release notes body; start directly with the release content or first category heading.
 - Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
 - Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.

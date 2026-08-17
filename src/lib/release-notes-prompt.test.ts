@@ -18,8 +18,8 @@ describe('buildReleaseNotesFromTagSessionPrompt', () => {
     expect(prompt).toContain('Create release on GitHub')
     expect(prompt).toContain('/releases/new?')
     expect(prompt).toContain('URL-encode the title and complete Markdown body')
-    expect(prompt).toContain('release version only')
-    expect(prompt).toContain('Do not prefix or suffix it with the app name')
+    expect(prompt).toContain('prefix the release version with `v`')
+    expect(prompt).toContain('`v0.1.74`')
     expect(prompt).toContain(
       'Do not repeat the app name or release version at the top of the release notes body'
     )
@@ -37,7 +37,7 @@ describe('buildReleaseNotesFromTagSessionPrompt', () => {
     )
 
     expect(prompt).toContain('Use this custom style for v4.2.0 (Jean 4.2).')
-    expect(prompt).toContain('release version only')
+    expect(prompt).toContain('prefix the release version with `v`')
     expect(prompt).toContain(
       'title query parameter must contain that same version-only title'
     )
