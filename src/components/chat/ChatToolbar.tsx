@@ -119,6 +119,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
+  loadedSentryContexts,
   attachedSavedContexts,
   onOpenMagicModal,
   onSaveContext,
@@ -303,6 +304,7 @@ export const ChatToolbar = memo(function ChatToolbar({
     handleViewSecurityAlert,
     handleViewAdvisory,
     handleViewLinear,
+    handleViewSentry,
   } = useContextViewer({
     activeSessionId,
     activeWorktreePath,
@@ -557,12 +559,14 @@ export const ChatToolbar = memo(function ChatToolbar({
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
+              loadedSentryContexts={loadedSentryContexts}
               attachedSavedContexts={attachedSavedContexts}
               handleViewIssue={handleViewIssue}
               handleViewPR={handleViewPR}
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}
+              handleViewSentry={handleViewSentry}
               handleViewSavedContext={handleViewSavedContext}
               availableMcpServers={availableMcpServers}
               enabledMcpServers={enabledMcpServers}
@@ -640,6 +644,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
+              loadedSentryContexts={loadedSentryContexts}
               attachedSavedContexts={attachedSavedContexts}
               providerDropdownOpen={providerDropdownOpen}
               thinkingDropdownOpen={thinkingDropdownOpen}
@@ -666,6 +671,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}
+              handleViewSentry={handleViewSentry}
               handleViewSavedContext={handleViewSavedContext}
             />
 

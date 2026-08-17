@@ -42,7 +42,7 @@ interface LinearIssueContextContent {
 }
 
 export interface ViewingContext {
-  type: 'issue' | 'pr' | 'security' | 'advisory' | 'saved' | 'linear'
+  type: 'issue' | 'pr' | 'security' | 'advisory' | 'saved' | 'linear' | 'sentry'
   number?: number
   ghsaId?: string
   slug?: string
@@ -116,6 +116,9 @@ export function useLoadContextHandlers({
   const [loadingSentryIds, setLoadingSentryIds] = useState<Set<string>>(
     new Set()
   )
+  const [removingSentryIds, setRemovingSentryIds] = useState<Set<string>>(
+    new Set()
+  )
   const [generatingSessionId, setGeneratingSessionId] = useState<string | null>(
     null
   )
@@ -139,6 +142,7 @@ export function useLoadContextHandlers({
     setLoadingLinearIds(new Set())
     setRemovingLinearIds(new Set())
     setLoadingSentryIds(new Set())
+    setRemovingSentryIds(new Set())
     setLoadingSlugs(new Set())
     setRemovingSlugs(new Set())
     setGeneratingSessionId(null)
@@ -653,6 +657,58 @@ export function useLoadContextHandlers({
     [activeSessionId, projectId, refetchSentryContexts, onClearSearch]
   )
 
+  const handleRefreshSentryIssue = useCallback(
+    (context: SentryIssueContext) =>
+      handleSelectSentryIssue({
+        id: context.id,
+        shortId: context.shortId,
+        title: context.title,
+        permalink: context.permalink,
+        culprit: '',
+        level: '',
+        status: '',
+        count: '',
+        userCount: 0,
+        firstSeen: '',
+        lastSeen: '',
+        project: { id: '', name: '', slug: '' },
+      }),
+    [handleSelectSentryIssue]
+  )
+
+  const handleRemoveSentryIssue = useCallback(
+    async (context: SentryIssueContext) => {
+      if (!activeSessionId || !projectId) return
+      setRemovingSentryIds(previous => new Set(previous).add(context.id))
+      try {
+        await invoke('remove_sentry_issue_context', {
+          sessionId: activeSessionId,
+          projectId,
+          issueId: context.id,
+        })
+        await refetchSentryContexts()
+        toast.success(`Removed ${context.shortId} from context`)
+      } catch (error) {
+        toast.error(`Failed to remove Sentry issue: ${error}`)
+      } finally {
+        setRemovingSentryIds(previous => {
+          const next = new Set(previous)
+          next.delete(context.id)
+          return next
+        })
+      }
+    },
+    [activeSessionId, projectId, refetchSentryContexts]
+  )
+
+  const handleViewSentryIssue = useCallback((context: SentryIssueContext) => {
+    setViewingContext({
+      type: 'sentry',
+      title: `${context.shortId}: ${context.title}`,
+      content: context.content,
+    })
+  }, [])
+
   // Context handlers
   const handleDeleteContext = useCallback(
     async (e: React.MouseEvent, context: SavedContext) => {
@@ -913,6 +969,7 @@ export function useLoadContextHandlers({
     loadingLinearIds,
     removingLinearIds,
     loadingSentryIds,
+    removingSentryIds,
     loadingSlugs,
     removingSlugs,
     generatingSessionId,
@@ -964,6 +1021,9 @@ export function useLoadContextHandlers({
     handleViewLinearIssue,
     handleSelectLinearIssue,
     handleSelectSentryIssue,
+    handleRefreshSentryIssue,
+    handleRemoveSentryIssue,
+    handleViewSentryIssue,
 
     // Context/session handlers
     handleDeleteContext,

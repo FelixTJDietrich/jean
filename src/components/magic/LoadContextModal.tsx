@@ -29,7 +29,7 @@ import { linearQueryKeys } from '@/services/linear'
 import { GitHubItemsTab } from './GitHubItemsTab'
 import { SecurityAlertsTab } from './SecurityAlertsTab'
 import { LinearItemsTab } from './LinearItemsTab'
-import { SentryIssuesTab } from '@/components/worktree/SentryIssuesTab'
+import { SentryItemsTab } from './SentryItemsTab'
 import { ContextsTab } from './ContextsTab'
 import { useLoadContextData } from './hooks/useLoadContextData'
 import { useLoadContextHandlers } from './hooks/useLoadContextHandlers'
@@ -487,10 +487,18 @@ export function LoadContextModal({
           )}
 
           {activeTab === 'sentry' && (
-            <SentryIssuesTab
+            <SentryItemsTab
               projectId={projectId ?? ''}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
+              searchInputRef={searchInputRef}
+              loadedContexts={data.loadedSentryContexts ?? []}
+              isLoadingContexts={data.isLoadingSentryContexts}
+              loadingIds={handlers.loadingSentryIds}
+              removingIds={handlers.removingSentryIds}
+              onView={handlers.handleViewSentryIssue}
+              onRefreshContext={handlers.handleRefreshSentryIssue}
+              onRemove={handlers.handleRemoveSentryIssue}
               issues={data.filteredSentryIssues}
               isLoading={data.isLoadingSentryIssues}
               isRefetching={data.isRefetchingSentryIssues}
@@ -499,11 +507,6 @@ export function LoadContextModal({
               selectedIndex={selectedIndex}
               setSelectedIndex={setSelectedIndex}
               onSelectIssue={handlers.handleSelectSentryIssue}
-              onInvestigateIssue={handlers.handleSelectSentryIssue}
-              creatingFromId={
-                handlers.loadingSentryIds.values().next().value ?? null
-              }
-              searchInputRef={searchInputRef}
             />
           )}
 
@@ -569,7 +572,8 @@ export function LoadContextModal({
           (handlers.viewingContext.type === 'saved' ||
             handlers.viewingContext.type === 'security' ||
             handlers.viewingContext.type === 'advisory' ||
-            handlers.viewingContext.type === 'linear') && (
+            handlers.viewingContext.type === 'linear' ||
+            handlers.viewingContext.type === 'sentry') && (
             <Dialog
               open={true}
               onOpenChange={() => handlers.setViewingContext(null)}
@@ -583,6 +587,8 @@ export function LoadContextModal({
                       <ShieldAlert className="h-4 w-4 text-orange-500" />
                     ) : handlers.viewingContext.type === 'linear' ? (
                       <LinearIcon className="h-4 w-4 text-violet-500" />
+                    ) : handlers.viewingContext.type === 'sentry' ? (
+                      <Bug className="h-4 w-4 text-orange-500" />
                     ) : (
                       <FolderOpen className="h-4 w-4 text-blue-500" />
                     )}

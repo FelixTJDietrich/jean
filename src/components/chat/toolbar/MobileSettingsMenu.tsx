@@ -28,6 +28,7 @@ import {
   Sparkles,
   Star,
   Terminal,
+  Bug,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -65,6 +66,7 @@ import type {
   AttachedSavedContext,
 } from '@/types/github'
 import type { LoadedLinearIssueContext } from '@/types/linear'
+import type { SentryIssueContext } from '@/types/sentry'
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -152,6 +154,7 @@ interface MobileSettingsMenuProps {
   loadedSecurityContexts: LoadedSecurityAlertContext[]
   loadedAdvisoryContexts: LoadedAdvisoryContext[]
   loadedLinearContexts: LoadedLinearIssueContext[]
+  loadedSentryContexts: SentryIssueContext[]
   attachedSavedContexts: AttachedSavedContext[]
 
   handleViewIssue: (ctx: LoadedIssueContext) => void
@@ -159,6 +162,7 @@ interface MobileSettingsMenuProps {
   handleViewSecurityAlert: (ctx: LoadedSecurityAlertContext) => void
   handleViewAdvisory: (ctx: LoadedAdvisoryContext) => void
   handleViewLinear: (ctx: LoadedLinearIssueContext) => void
+  handleViewSentry: (ctx: SentryIssueContext) => void
   handleViewSavedContext: (ctx: AttachedSavedContext) => void
 
   availableMcpServers: McpServerInfo[]
@@ -206,12 +210,14 @@ export function MobileSettingsMenu({
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
+  loadedSentryContexts,
   attachedSavedContexts,
   handleViewIssue,
   handleViewPR,
   handleViewSecurityAlert,
   handleViewAdvisory,
   handleViewLinear,
+  handleViewSentry,
   handleViewSavedContext,
   availableMcpServers,
   enabledMcpServers,
@@ -508,6 +514,7 @@ export function MobileSettingsMenu({
     loadedSecurityContexts.length > 0 ||
     loadedAdvisoryContexts.length > 0 ||
     loadedLinearContexts.length > 0 ||
+    loadedSentryContexts.length > 0 ||
     attachedSavedContexts.length > 0
   const hasToggleableMcpServers = availableMcpServers.some(
     server => !server.disabled
@@ -1123,13 +1130,55 @@ export function MobileSettingsMenu({
                   ))}
                 </>
               )}
-              {attachedSavedContexts.length > 0 && (
+              {loadedSentryContexts.length > 0 && (
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0) && (
+                    <DropdownMenuSeparator />
+                  )}
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Sentry Issues
+                  </DropdownMenuLabel>
+                  {loadedSentryContexts.map(ctx => (
+                    <DropdownMenuItem
+                      key={ctx.id}
+                      onClick={() => {
+                        setMenuOpen(false)
+                        handleViewSentry(ctx)
+                      }}
+                    >
+                      <Bug className="h-4 w-4 text-orange-500" />
+                      <span className="truncate">
+                        {ctx.shortId} {ctx.title}
+                      </span>
+                      {ctx.permalink && (
+                        <button
+                          type="button"
+                          aria-label="Open external link"
+                          className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+                          onClick={event => {
+                            event.stopPropagation()
+                            openExternal(ctx.permalink)
+                          }}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                        </button>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+              {attachedSavedContexts.length > 0 && (
+                <>
+                  {(loadedIssueContexts.length > 0 ||
+                    loadedPRContexts.length > 0 ||
+                    loadedSecurityContexts.length > 0 ||
+                    loadedAdvisoryContexts.length > 0 ||
+                    loadedLinearContexts.length > 0 ||
+                    loadedSentryContexts.length > 0) && (
                     <DropdownMenuSeparator />
                   )}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">

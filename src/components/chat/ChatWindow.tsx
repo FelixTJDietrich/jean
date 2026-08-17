@@ -66,6 +66,7 @@ import {
   useAttachedSavedContexts,
 } from '@/services/github'
 import { useLoadedLinearIssueContexts } from '@/services/linear'
+import { useLoadedSentryContexts } from '@/services/sentry'
 import { useChatStore, DEFAULT_THINKING_LEVEL } from '@/store/chat-store'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { getLabelTextColor } from '@/lib/label-colors'
@@ -688,6 +689,11 @@ export function ChatWindow({
 
   // Loaded Linear issue contexts for indicator
   const { data: loadedLinearContexts } = useLoadedLinearIssueContexts(
+    activeSessionId ?? null,
+    activeWorktreeId ?? null,
+    worktree?.project_id ?? null
+  )
+  const { data: loadedSentryContexts } = useLoadedSentryContexts(
     activeSessionId ?? null,
     activeWorktreeId ?? null,
     worktree?.project_id ?? null
@@ -3813,6 +3819,9 @@ export function ChatWindow({
                                     }
                                     loadedLinearContexts={
                                       loadedLinearContexts ?? []
+                                    }
+                                    loadedSentryContexts={
+                                      loadedSentryContexts ?? []
                                     }
                                     attachedSavedContexts={
                                       attachedSavedContexts ?? []
