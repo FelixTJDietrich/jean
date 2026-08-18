@@ -197,6 +197,7 @@ interface ChatUIState {
 
   // Setup script results per worktree (from jean.json) - stays at worktree level
   setupScriptResults: Record<string, SetupScriptResult>
+  dismissedSetupScripts: Record<string, boolean>
 
   // Pending images per session (before sending)
   pendingImages: Record<string, PendingImage[]>
@@ -530,6 +531,7 @@ interface ChatUIState {
   // Actions - Setup script results (worktree-based)
   addSetupScriptResult: (worktreeId: string, result: SetupScriptResult) => void
   clearSetupScriptResult: (worktreeId: string) => void
+  dismissSetupScript: (worktreeId: string) => void
 
   // Actions - Pending images (session-based)
   addPendingImage: (sessionId: string, image: PendingImage) => void
@@ -760,6 +762,7 @@ export const useChatStore = create<ChatUIState>()(
       lastSentMessages: {},
       lastSentAttachments: {},
       setupScriptResults: {},
+      dismissedSetupScripts: {},
       pendingImages: {},
       pendingFiles: {},
       pendingSkills: {},
@@ -2515,6 +2518,21 @@ export const useChatStore = create<ChatUIState>()(
           },
           undefined,
           'clearSetupScriptResult'
+        ),
+
+      dismissSetupScript: worktreeId =>
+        set(
+          state => {
+            if (state.dismissedSetupScripts[worktreeId]) return state
+            return {
+              dismissedSetupScripts: {
+                ...state.dismissedSetupScripts,
+                [worktreeId]: true,
+              },
+            }
+          },
+          undefined,
+          'dismissSetupScript'
         ),
 
       // Pending images (session-based)

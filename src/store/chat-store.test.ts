@@ -54,6 +54,7 @@ describe('ChatStore', () => {
       errors: {},
       lastSentMessages: {},
       setupScriptResults: {},
+      dismissedSetupScripts: {},
       pendingImages: {},
       pendingFiles: {},
       pendingTextFiles: {},
@@ -72,6 +73,14 @@ describe('ChatStore', () => {
       sessionLabels: {},
       savingContext: {},
       skippedQuestionSessions: {},
+    })
+  })
+
+  it('persists setup-script dismissal per worktree in store state', () => {
+    useChatStore.getState().dismissSetupScript('worktree-1')
+
+    expect(useChatStore.getState().dismissedSetupScripts).toEqual({
+      'worktree-1': true,
     })
   })
 

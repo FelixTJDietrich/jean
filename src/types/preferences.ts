@@ -60,8 +60,6 @@ export interface MagicPrompts {
   commit_message: string | null
   /** Prompt for AI code review */
   code_review: string | null
-  /** Prompt for a final, audit-only review before merge */
-  final_review: string | null
   /** Prompt for context summarization */
   context_summary: string | null
   /** Prompt for resolving git conflicts (appended to conflict resolution messages) */
@@ -295,40 +293,6 @@ Approval status:
 - needs_discussion if product or design clarification is required before judging the change.
 - approved if no blocking findings remain.
 </instructions>`
-
-/** Default prompt for the audit-only final review session */
-export const DEFAULT_FINAL_REVIEW_PROMPT = `<task>Perform a final pre-merge audit of the current branch or linked pull request.</task>
-
-<instructions>
-This is an audit only. Do not modify files, dependencies, generated artifacts, git state, commits, branches, pull requests, issues, or any other local or remote state.
-
-Inspect the complete diff against the intended base branch, including committed, staged, unstaged, and untracked changes. Read the surrounding code and repository instructions needed to verify behavior. If a pull request is linked or discoverable, inspect its title, body, commits, checks, review state, and related GitHub issues using read-only operations.
-
-Report only actionable, high-confidence concerns introduced or materially worsened by these changes. Check for:
-- correctness bugs, edge cases, data loss, race conditions, and regressions;
-- security, authorization, privacy, secret handling, and supply-chain risks;
-- API, serialization, persistence, configuration, and backward-compatibility breaks;
-- unsafe or incomplete database migrations and rollback/deployment-order risks;
-- migrations created in this unreleased change that can be consolidated (for example, creating a table and adding its new column in a later migration). Never recommend rewriting migrations that may already have been released or applied;
-- missing, misleading, flaky, or insufficient tests for changed behavior;
-- concrete performance or resource-usage regressions;
-- dependency, CI, documentation, observability, and error-handling gaps that affect merge safety;
-- accidental files, dead code, unnecessary complexity, or scope unrelated to the pull request.
-
-Search open GitHub issues for issues fully fixed by these changes. Suggest an auto-close reference only when the implementation completely satisfies the issue and the issue belongs to the repository being merged. Never suggest closing partially addressed, merely related, duplicate, or uncertain issues. Use the exact PR-body text \`Fixes #123\` (or an unambiguous cross-repository reference when required).
-
-Do not implement fixes. Do not update the pull request. Do not close issues.
-</instructions>
-
-<output_format>
-Return the audit as Markdown tables, using \`None\` rows when a table has no entries. Keep any session-required recap content in table form too.
-
-1. Merge readiness: columns \`Status | Value\` with overall verdict, confidence, and the most important required action.
-2. Findings: columns \`Severity | Area | Location | Finding | Evidence | Recommendation\`.
-3. Migration consolidation: columns \`Migrations | Opportunity | Safety condition | Recommendation\`.
-4. GitHub issues fixed: columns \`Issue | Why it is fully fixed | Confidence | Suggested PR text\`. Include clickable issue links when available and put exact text such as \`Fixes #123\` in the final column.
-5. Verification gaps: columns \`Check | Result | Evidence or command\`.
-</output_format>`
 
 /** Default prompt for context summarization */
 export const DEFAULT_CONTEXT_SUMMARY_PROMPT = `<task>Summarize the following conversation for future context loading</task>
@@ -786,7 +750,6 @@ export const DEFAULT_MAGIC_PROMPTS: MagicPrompts = {
   pr_content: null,
   commit_message: null,
   code_review: null,
-  final_review: null,
   context_summary: null,
   resolve_conflicts: null,
   investigate_workflow_run: null,
@@ -812,7 +775,6 @@ export interface MagicPromptModels {
   pr_content_model: MagicPromptModel
   commit_message_model: MagicPromptModel
   code_review_model: MagicPromptModel
-  final_review_model: MagicPromptModel
   context_summary_model: MagicPromptModel
   resolve_conflicts_model: MagicPromptModel
   release_notes_model: MagicPromptModel
@@ -835,7 +797,6 @@ export interface MagicPromptReasoningEfforts {
   pr_content_effort: MagicPromptReasoningEffort
   commit_message_effort: MagicPromptReasoningEffort
   code_review_effort: MagicPromptReasoningEffort
-  final_review_effort: MagicPromptReasoningEffort
   context_summary_effort: MagicPromptReasoningEffort
   resolve_conflicts_effort: MagicPromptReasoningEffort
   release_notes_effort: MagicPromptReasoningEffort
@@ -855,7 +816,6 @@ export const DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels = {
   pr_content_model: 'sonnet',
   commit_message_model: 'sonnet',
   code_review_model: 'claude-opus-4-8[1m]',
-  final_review_model: 'claude-opus-4-8[1m]',
   context_summary_model: 'claude-opus-4-8[1m]',
   resolve_conflicts_model: 'claude-opus-4-8[1m]',
   release_notes_model: 'sonnet',
@@ -877,7 +837,6 @@ function makeMagicPromptModelsPreset(
     pr_content_model: model,
     commit_message_model: model,
     code_review_model: model,
-    final_review_model: model,
     context_summary_model: model,
     resolve_conflicts_model: model,
     release_notes_model: model,
@@ -943,7 +902,6 @@ export const DEFAULT_MAGIC_PROMPT_EFFORTS: MagicPromptReasoningEfforts = {
   pr_content_effort: null,
   commit_message_effort: null,
   code_review_effort: null,
-  final_review_effort: null,
   context_summary_effort: null,
   resolve_conflicts_effort: null,
   release_notes_effort: null,
@@ -972,7 +930,6 @@ export interface MagicPromptModes {
   /** Mode for sessions created when sending code-review findings to fix */
   code_review_fix_mode: MagicPromptExecutionMode
   review_comments_mode: MagicPromptExecutionMode
-  final_review_mode: MagicPromptExecutionMode
   resolve_conflicts_mode: MagicPromptExecutionMode
 }
 
@@ -987,7 +944,6 @@ export const DEFAULT_MAGIC_PROMPT_MODES: MagicPromptModes = {
   investigate_sentry_issue_mode: 'plan',
   code_review_fix_mode: 'plan',
   review_comments_mode: 'plan',
-  final_review_mode: 'yolo',
   resolve_conflicts_mode: 'yolo',
 }
 
@@ -1014,7 +970,6 @@ export const CODEX_DEFAULT_MAGIC_PROMPT_EFFORTS: MagicPromptReasoningEfforts = {
   pr_content_effort: 'low',
   commit_message_effort: 'low',
   code_review_effort: 'medium',
-  final_review_effort: 'medium',
   context_summary_effort: 'medium',
   resolve_conflicts_effort: 'medium',
   release_notes_effort: 'low',
@@ -1043,7 +998,6 @@ export interface MagicPromptProviders {
   pr_content_provider: string | null
   commit_message_provider: string | null
   code_review_provider: string | null
-  final_review_provider: string | null
   context_summary_provider: string | null
   resolve_conflicts_provider: string | null
   release_notes_provider: string | null
@@ -1063,7 +1017,6 @@ export const DEFAULT_MAGIC_PROMPT_PROVIDERS: MagicPromptProviders = {
   pr_content_provider: null,
   commit_message_provider: null,
   code_review_provider: null,
-  final_review_provider: null,
   context_summary_provider: null,
   resolve_conflicts_provider: null,
   release_notes_provider: null,
@@ -1087,7 +1040,6 @@ export interface MagicPromptBackends {
   pr_content_backend: string | null
   commit_message_backend: string | null
   code_review_backend: string | null
-  final_review_backend: string | null
   context_summary_backend: string | null
   resolve_conflicts_backend: string | null
   release_notes_backend: string | null
@@ -1107,7 +1059,6 @@ export const DEFAULT_MAGIC_PROMPT_BACKENDS: MagicPromptBackends = {
   pr_content_backend: null,
   commit_message_backend: null,
   code_review_backend: null,
-  final_review_backend: null,
   context_summary_backend: null,
   resolve_conflicts_backend: null,
   release_notes_backend: null,
@@ -1127,7 +1078,6 @@ function makeBackendsPreset(backend: string): MagicPromptBackends {
     pr_content_backend: backend,
     commit_message_backend: backend,
     code_review_backend: backend,
-    final_review_backend: backend,
     context_summary_backend: backend,
     resolve_conflicts_backend: backend,
     release_notes_backend: backend,

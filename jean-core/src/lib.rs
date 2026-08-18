@@ -2854,6 +2854,10 @@ pub struct UIState {
     #[serde(default)]
     pub pending_text_files: std::collections::HashMap<String, Vec<PendingTextFileDraft>>,
 
+    /// Worktree IDs whose setup-script status card was dismissed
+    #[serde(default)]
+    pub dismissed_setup_scripts: Vec<String>,
+
     /// Whether the review sidebar is visible
     #[serde(default)]
     pub review_sidebar_visible: Option<bool>,
@@ -3054,6 +3058,7 @@ impl Default for UIState {
             input_drafts: std::collections::HashMap::new(),
             pending_images: std::collections::HashMap::new(),
             pending_text_files: std::collections::HashMap::new(),
+            dismissed_setup_scripts: Vec::new(),
             review_sidebar_visible: None,
             modal_terminal_open: std::collections::HashMap::new(),
             modal_terminal_dock_mode: None,
