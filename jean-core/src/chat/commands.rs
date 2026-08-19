@@ -9246,6 +9246,28 @@ pub async fn remove_queued_message(
 /// Update a specific queued message's text by its `id` field.
 /// Returns `false` when the message is no longer queued.
 /// Holds the metadata lock across the entire read-modify-write to prevent TOCTOU races.
+fn update_queued_message_text(
+    queued_messages: &mut [serde_json::Value],
+    message_id: &str,
+    message: &str,
+) -> bool {
+    let Some(queued) = queued_messages
+        .iter_mut()
+        .find(|queued| queued.get("id").and_then(|value| value.as_str()) == Some(message_id))
+    else {
+        return false;
+    };
+
+    let Some(queued) = queued.as_object_mut() else {
+        return false;
+    };
+    queued.insert(
+        "message".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    true
+}
+
 pub async fn update_queued_message(
     app: AppHandle,
     _worktree_id: String,
@@ -9255,25 +9277,9 @@ pub async fn update_queued_message(
     message: String,
 ) -> Result<bool, String> {
     let (updated, queue) = with_existing_metadata_mut(&app, &session_id, |metadata| {
-        let Some(idx) = metadata
-            .queued_messages
-            .iter()
-            .position(|m| m.get("id").and_then(|v| v.as_str()) == Some(message_id.as_str()))
-        else {
-            return (false, metadata.queued_messages.clone());
-        };
-
-        if queued_message_supports_any_steering(&metadata.queued_messages[idx]) {
-            return (false, metadata.queued_messages.clone());
-        }
-
-        let queued = &mut metadata.queued_messages[idx];
-        if let Some(obj) = queued.as_object_mut() {
-            obj.insert("message".to_string(), serde_json::Value::String(message));
-            return (true, metadata.queued_messages.clone());
-        }
-
-        (false, metadata.queued_messages.clone())
+        let updated =
+            update_queued_message_text(&mut metadata.queued_messages, &message_id, &message);
+        (updated, metadata.queued_messages.clone())
     })?;
 
     if updated {
@@ -10609,6 +10615,18 @@ mod tests {
             &grok_with_image,
             "grok"
         ));
+    }
+
+    #[test]
+    fn queued_message_text_edit_updates_steerable_backends() {
+        let mut queue = vec![serde_json::json!({
+            "id": "m1",
+            "message": "original",
+            "backend": "codex",
+        })];
+
+        assert!(update_queued_message_text(&mut queue, "m1", "edited"));
+        assert_eq!(queue[0]["message"], "edited");
     }
 
     #[test]
