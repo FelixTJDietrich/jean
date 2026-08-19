@@ -2132,7 +2132,9 @@ export default function useStreamingEvents({
                 const hydratedCancelledAssistant =
                   lastHydratedMessage?.role === 'assistant' &&
                   lastHydratedMessage.cancelled === true
-                if (hydratedCancelledAssistant) {
+                const currentDraft =
+                  useChatStore.getState().inputDrafts[session_id] ?? ''
+                if (hydratedCancelledAssistant && !currentDraft) {
                   useChatStore.getState().clearInputDraft(session_id)
                 }
               })
