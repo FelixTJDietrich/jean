@@ -40,6 +40,31 @@ const PLAN_DIALOG_APPROVAL_ACTIONS = new Set<KeybindingAction>([
   'approve_plan_worktree_yolo',
 ])
 
+interface RunEnvironmentStartedEvent {
+  worktreeId: string
+  terminalId: string
+  command: string
+}
+
+export function handleRunEnvironmentStarted(
+  payload: RunEnvironmentStartedEvent
+): void {
+  const terminalStore = useTerminalStore.getState()
+  terminalStore.registerStartedRun(
+    payload.worktreeId,
+    payload.terminalId,
+    payload.command
+  )
+
+  const uiState = useUIStore.getState()
+  if (
+    uiState.sessionChatModalOpen &&
+    uiState.sessionChatModalWorktreeId === payload.worktreeId
+  ) {
+    terminalStore.setModalTerminalOpen(payload.worktreeId, true)
+  }
+}
+
 export function shouldLetPlanDialogHandleAction(
   action: KeybindingAction,
   planDialogOpen: boolean
@@ -997,6 +1022,10 @@ export function useMainWindowEventListeners() {
     const setupMenuListeners = async () => {
       logger.debug('Setting up menu event listeners')
       const unlisteners = await Promise.all([
+        listen<RunEnvironmentStartedEvent>(
+          'run-environment:started',
+          event => handleRunEnvironmentStarted(event.payload)
+        ),
         listen<{ sessionId: string }>('terminal:working', event => {
           const sessionId = event.payload?.sessionId
           if (!sessionId) return

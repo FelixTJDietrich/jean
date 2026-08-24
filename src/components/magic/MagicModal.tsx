@@ -20,6 +20,7 @@ import {
   Link2,
   ShieldAlert,
   Loader2,
+  FlaskConical,
 } from 'lucide-react'
 import {
   Dialog,
@@ -149,6 +150,7 @@ type MagicOption =
   | 'merge-pr'
   | 'review-comments'
   | 'revert-last-commit'
+  | 'smoke-test'
 
 interface TriggerCodeRabbitPrReviewResponse {
   pr_number: number
@@ -308,6 +310,12 @@ function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
 
   const right: MagicSection[] = [
     {
+      header: 'Test',
+      options: [
+        { id: 'smoke-test', label: 'Smoke Test', icon: FlaskConical, key: 'X' },
+      ],
+    },
+    {
       header: 'Pull Request',
       options: [
         {
@@ -409,6 +417,7 @@ const KEY_TO_OPTION: Record<string, MagicOption> = {
   y: 'investigate-advisory',
   n: 'merge-pr',
   z: 'revert-last-commit',
+  x: 'smoke-test',
 }
 
 export function MagicModal() {

@@ -893,6 +893,18 @@ describe('ChatStore', () => {
       expect(isQuestionAnswered('session-1', 'tool-1')).toBe(false)
     })
 
+    it('rolls back an answered question when submitting the backend response fails', () => {
+      const store = useChatStore.getState()
+      store.markQuestionAnswered('session-1', 'tool-1', [
+        { questionIndex: 0, selectedOptions: [1] },
+      ])
+
+      store.clearQuestionAnswer('session-1', 'tool-1')
+
+      expect(store.isQuestionAnswered('session-1', 'tool-1')).toBe(false)
+      expect(store.getSubmittedAnswers('session-1', 'tool-1')).toBeUndefined()
+    })
+
     it('tracks question skipping', () => {
       const { setQuestionsSkipped, areQuestionsSkipped } =
         useChatStore.getState()

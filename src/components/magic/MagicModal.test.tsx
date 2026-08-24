@@ -602,6 +602,14 @@ describe('MagicModal manual PR link', () => {
     ).toBeInTheDocument()
   })
 
+  it('shows the smoke test magic command', () => {
+    render(<MagicModal />)
+
+    expect(
+      screen.getByRole('button', { name: /smoke test/i })
+    ).toBeInTheDocument()
+  })
+
   it('starts commit and push actions directly with loading notifications when chat is active', async () => {
     const user = userEvent.setup()
     mocks.activeWorktreePath = '/repo/worktree'
