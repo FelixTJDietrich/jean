@@ -745,23 +745,24 @@ Address the following review comments from PR #{prNumber}
 
 </guidelines>`
 
-export const DEFAULT_SMOKE_TEST_PROMPT = `Smoke test the feature or fix developed in source session {source_session_id}.
+export const DEFAULT_SMOKE_TEST_PROMPT = `Smoke test the feature or fix in worktree {worktree_id}.
 
-1. Use the Jean MCP read_session_messages tool with sessionId {source_session_id} to read the most recent source-session messages. Start with a small limit and fetch more only when needed. Identify the requested behavior, implementation decisions, and expected result.
-2. Inspect the current worktree path, current branch, git status, changed files and diff. Use the source-session context and actual branch changes together to decide what must be tested. Confirm that the branch and worktree match the code under test.
+1. Inspect worktree {worktree_id}: resolve its path, current branch, git status, changed files and diff. Treat the actual worktree changes as the source of truth for identifying the feature or fix, its intended behavior, and what must be tested. Read relevant repository documentation, tasks, issues, commits, and code when needed. Confirm that the branch and worktree match the code under test.
+2. Use the changed code and surrounding implementation to determine the expected behavior, affected interfaces, risks, and realistic success and failure scenarios. Do not require a source chat session to understand or test the worktree.
 3. Call the Jean MCP get_run_environments tool for the current worktree before starting a server.
    - Reuse an existing environment when available.
    - Do not guess a port or start a duplicate server.
    - If no environment is running, call the Jean MCP start_run_environment tool for the current worktree. This starts the command configured in jean.json. Do not invent or launch a separate command.
-4. When needed, start the development server and confirm it is serving the current worktree and branch rather than another checkout or stale build.
-5. Run relevant automated tests and record their results.
-6. Test every applicable interface, including API or HTTP endpoints, MCP tools, desktop or web UI, and mobile UI when available.
-7. Exercise the main success path, important edge cases, validation errors, and failure recovery.
-8. You may create, update, and delete clearly identifiable temporary resources to test the behavior fully. Do not modify or delete existing user resources. Clean up all temporary resources and report any cleanup failure.
-9. Recheck the final application state after cleanup.
+4. When needed, start the development server and confirm it is serving the current worktree and branch rather than another checkout or stale build. Wait for the environment to become ready and stable before running any real end-to-end tests: poll its detected URL, health endpoint, ports, or logs as appropriate until startup has completed and repeated checks succeed. If it does not stabilize within a reasonable timeout, capture the startup failure and do not run misleading end-to-end checks against it.
+5. Discover and prepare the prerequisites for realistic testing. Infer what is needed from the worktree changes, repository documentation, configuration, environment templates, test fixtures, available Jean context, and the running application's API, MCP, and UI. This can include authentication, accounts, permissions, database records, files, external-service substitutes, and related resources. Locate and use safe credentials or documented local/test authentication already available to the environment without printing secrets. Create temporary prerequisite data when permitted. Do not declare a prerequisite unavailable until you have actively looked for a supported way to obtain or create it.
+6. Run relevant automated tests and record their results.
+7. Test every applicable interface, including API or HTTP endpoints, MCP tools, desktop or web UI, and mobile UI when available.
+8. Exercise the main success path, important edge cases, validation errors, asynchronous completion, and failure recovery. Poll long-running operations through their real success or failure state instead of stopping after submission.
+9. You may create, update, and delete clearly identifiable temporary resources to test the behavior fully. Do not modify or delete existing user resources. Clean up all temporary resources and report any cleanup failure.
+10. Recheck the final application state after cleanup.
 
 Report:
-- Source session, worktree path, and branch tested
+- Worktree ID, path, and branch tested
 - Development-server command, URL, and port
 - Automated tests and results
 - Each interface and scenario tested

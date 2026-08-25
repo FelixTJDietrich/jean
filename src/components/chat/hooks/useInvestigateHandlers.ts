@@ -1138,10 +1138,7 @@ export function useInvestigateHandlers({
     const promptTemplate =
       preferences?.magic_prompts?.smoke_test?.trim() ||
       DEFAULT_SMOKE_TEST_PROMPT
-    const prompt = promptTemplate.replaceAll(
-      '{source_session_id}',
-      activeSessionId ?? 'unavailable'
-    )
+    const prompt = promptTemplate.replaceAll('{worktree_id}', worktreeId)
     const model =
       preferences?.magic_prompt_models?.smoke_test_model ??
       selectedModelRef.current

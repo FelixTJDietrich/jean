@@ -147,8 +147,9 @@ describe('useInvestigateHandlers', () => {
     const sent = vi.mocked(sendMessage.mutate).mock.calls[0]?.[0] as {
       message: string
     }
-    expect(sent.message).toContain('base-session')
-    expect(sent.message).not.toContain('{source_session_id}')
+    expect(sent.message).toContain('worktree-1')
+    expect(sent.message).not.toContain('{worktree_id}')
+    expect(sent.message).not.toContain('base-session')
   })
 
   it('uses the dedicated Sentry prompt and execution settings', async () => {

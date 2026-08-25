@@ -43,11 +43,18 @@ describe('magic prompt preference resolvers', () => {
       'claude-opus-4-8[1m]'
     )
     expect(defaultPreferences.magic_prompt_modes.smoke_test_mode).toBe('yolo')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('{source_session_id}')
+    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('{worktree_id}')
+    expect(DEFAULT_SMOKE_TEST_PROMPT).not.toContain('{source_session_id}')
     expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('current branch')
     expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('changed files and diff')
     expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('get_run_environments')
     expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('start_run_environment')
+    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain(
+      'Wait for the environment to become ready and stable'
+    )
+    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain(
+      'Discover and prepare the prerequisites for realistic testing'
+    )
   })
 
   it('defines an audit-only final review prompt with tabular output', () => {

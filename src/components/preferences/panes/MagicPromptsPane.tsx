@@ -363,8 +363,8 @@ const PROMPT_SECTIONS: PromptSection[] = [
           'Prompt for testing the current work through the development server and available interfaces.',
         variables: [
           {
-            name: '{source_session_id}',
-            description: 'Session containing the work and conversation to test',
+            name: '{worktree_id}',
+            description: 'Worktree containing the feature or fix to test',
           },
         ],
         defaultValue: DEFAULT_SMOKE_TEST_PROMPT,

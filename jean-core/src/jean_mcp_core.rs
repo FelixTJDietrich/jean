@@ -1453,6 +1453,12 @@ async fn run_tool(
                 .cloned()
                 .ok_or_else(|| ToolError::internal("Started Run environment was not found"))?;
 
+            let mut ui_state = crate::load_ui_state(app.clone()).await.unwrap_or_default();
+            register_run_in_ui_state(&mut ui_state, &worktree_id, &terminal_id, &command);
+            if let Err(error) = crate::save_ui_state(app.clone(), ui_state).await {
+                log::warn!("Failed to persist MCP-started Run environment UI state: {error}");
+            }
+
             app.emit_all(
                 "run-environment:started",
                 &json!({
@@ -2541,6 +2547,44 @@ fn ensure_mcp_session_can_run(
     .map_err(ToolError::invalid_params)
 }
 
+fn register_run_in_ui_state(
+    state: &mut crate::UIState,
+    worktree_id: &str,
+    terminal_id: &str,
+    command: &str,
+) {
+    let terminals = state
+        .terminal_instances
+        .entry(worktree_id.to_string())
+        .or_default();
+    if !terminals.iter().any(|terminal| terminal.id == terminal_id) {
+        let label = command
+            .split_whitespace()
+            .next()
+            .and_then(|part| std::path::Path::new(part).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(command)
+            .chars()
+            .take(20)
+            .collect();
+        terminals.push(crate::TerminalInstancePersisted {
+            id: terminal_id.to_string(),
+            command: Some(command.to_string()),
+            command_args: None,
+            label,
+            kind: Some("panel".to_string()),
+            session_id: None,
+        });
+    }
+    state
+        .terminal_active_ids
+        .insert(worktree_id.to_string(), terminal_id.to_string());
+    state
+        .terminal_panel_open
+        .insert(worktree_id.to_string(), true);
+    state.terminal_visible = Some(true);
+}
+
 fn rate_check(source: &str, tool: &str, limit_per_minute: u32) -> bool {
     if limit_per_minute == 0 {
         return true;
@@ -2576,6 +2620,21 @@ pub fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_run_is_added_to_persisted_worktree_ui_state() {
+        let mut state = crate::UIState::default();
+
+        register_run_in_ui_state(&mut state, "worktree-1", "run-from-mcp", "bun run dev");
+
+        let terminals = &state.terminal_instances["worktree-1"];
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].id, "run-from-mcp");
+        assert_eq!(terminals[0].command.as_deref(), Some("bun run dev"));
+        assert_eq!(state.terminal_active_ids["worktree-1"], "run-from-mcp");
+        assert_eq!(state.terminal_panel_open["worktree-1"], true);
+        assert_eq!(state.terminal_visible, Some(true));
+    }
 
     #[test]
     fn running_session_move_is_deferred_for_persistent_mcp_clients() {
