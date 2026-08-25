@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => {
   return {
     setMagicModalOpen: vi.fn(),
     selectWorktree: vi.fn(),
+    setActiveWorktree: vi.fn(),
+    setPendingMagicCommand: vi.fn(),
     invokeMock: vi.fn(),
     invalidateQueries: vi.fn(),
     triggerImmediateGitPoll: vi.fn(),
@@ -124,8 +126,8 @@ vi.mock('@/store/chat-store', () => ({
         worktreePaths: mocks.worktreePaths as Record<string, string>,
         setWorktreeLoading: vi.fn(),
         clearWorktreeLoading: vi.fn(),
-        setActiveWorktree: vi.fn(),
-        setPendingMagicCommand: vi.fn(),
+        setActiveWorktree: mocks.setActiveWorktree,
+        setPendingMagicCommand: mocks.setPendingMagicCommand,
         registerWorktreePath: mocks.registerWorktreePath,
         getWorktreePath: (worktreeId: string) =>
           mocks.worktreePaths[worktreeId],
@@ -608,6 +610,23 @@ describe('MagicModal manual PR link', () => {
     expect(
       screen.getByRole('button', { name: /smoke test/i })
     ).toBeInTheDocument()
+  })
+
+  it('allows smoke test from the worktree canvas without an existing session', async () => {
+    const user = userEvent.setup()
+    render(<MagicModal />)
+
+    const smokeTest = screen.getByRole('button', { name: /smoke test/i })
+    expect(smokeTest).toBeEnabled()
+    await user.click(smokeTest)
+
+    expect(mocks.setActiveWorktree).toHaveBeenCalledWith(
+      'wt-1',
+      '/repo/worktree'
+    )
+    expect(mocks.setPendingMagicCommand).toHaveBeenCalledWith({
+      command: 'smoke-test',
+    })
   })
 
   it('starts commit and push actions directly with loading notifications when chat is active', async () => {
