@@ -53,7 +53,6 @@ import {
   useCreateSession,
   useClearSessionHistory,
   useRenameSession,
-  useReorderSessions,
   reconnectNativeCliSession,
   canReconnectSession,
 } from '@/services/chat'
@@ -104,7 +103,6 @@ import {
 } from './session-card-utils'
 import { SessionStatusMenu } from './SessionStatusMenu'
 import {
-  buildReorderedSessionIdsWithinStatus,
   resolveModalSessionId,
   sortSessionCardsForTabs,
 } from './session-tab-order'
@@ -675,9 +673,6 @@ export function SessionChatModal({
     [renamingSessionId, worktreeId]
   )
 
-  const reorderSessions = useReorderSessions()
-  const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null)
-
   const handleCreateSession = useCallback(() => {
     useUIStore.getState().openNewSessionModeModal({
       worktreeId,
@@ -763,57 +758,10 @@ export function SessionChatModal({
       })
   }, [isOpen, worktreeId, worktreePath])
 
-  // Keep Code Review first, then attention and active sessions, review,
-  // and idle/new empty sessions. Within each tier, manual tab order wins.
+  // Keep Code Review first, then show the most recently updated sessions.
   const sortedCards = useMemo(() => {
     return sortSessionCardsForTabs(cards)
   }, [cards])
-
-  const handleSessionDragStart = useCallback(
-    (e: React.DragEvent<HTMLDivElement>, sessionId: string) => {
-      setDraggedSessionId(sessionId)
-      e.dataTransfer.effectAllowed = 'move'
-      e.dataTransfer.setData('text/plain', sessionId)
-    },
-    []
-  )
-
-  const handleSessionDragOver = useCallback(
-    (e: React.DragEvent<HTMLDivElement>, targetSessionId: string) => {
-      if (
-        draggedSessionId &&
-        buildReorderedSessionIdsWithinStatus(
-          sortedCards,
-          draggedSessionId,
-          targetSessionId
-        )
-      ) {
-        e.preventDefault()
-        e.dataTransfer.dropEffect = 'move'
-      }
-    },
-    [draggedSessionId, sortedCards]
-  )
-
-  const handleSessionDrop = useCallback(
-    (e: React.DragEvent<HTMLDivElement>, targetSessionId: string) => {
-      e.preventDefault()
-      const sourceId =
-        draggedSessionId || e.dataTransfer.getData('text/plain') || null
-      if (!sourceId) return
-
-      const sessionIds = buildReorderedSessionIdsWithinStatus(
-        sortedCards,
-        sourceId,
-        targetSessionId
-      )
-      setDraggedSessionId(null)
-      if (!sessionIds) return
-
-      reorderSessions.mutate({ worktreeId, worktreePath, sessionIds })
-    },
-    [draggedSessionId, reorderSessions, sortedCards, worktreeId, worktreePath]
-  )
 
   const sortedSessions = useMemo(
     () => sortedCards.map(c => c.session),
@@ -932,7 +880,13 @@ export function SessionChatModal({
           )
           triggerImmediateGitPoll()
           if (project) fetchWorktreesStatus(project.id)
-          if (result.fellBack) {
+          if (result.permissionDenied) {
+            opToast.error('Push failed', {
+              duration: Infinity,
+              description:
+                result.output.trim() || 'The remote rejected the push.',
+            })
+          } else if (result.fellBack) {
             opToast.warning(
               'Could not push to PR branch, pushed to new branch instead'
             )
@@ -1451,15 +1405,6 @@ export function SessionChatModal({
                         <ContextMenuTrigger asChild>
                           <div
                             data-session-id={session.id}
-                            draggable={renamingSessionId !== session.id}
-                            onDragStart={e =>
-                              handleSessionDragStart(e, session.id)
-                            }
-                            onDragOver={e =>
-                              handleSessionDragOver(e, session.id)
-                            }
-                            onDrop={e => handleSessionDrop(e, session.id)}
-                            onDragEnd={() => setDraggedSessionId(null)}
                             onClick={() => handleTabClick(session.id)}
                             onAuxClick={e => handleTabAuxClick(e, session)}
                             onDoubleClick={() =>
@@ -1473,7 +1418,6 @@ export function SessionChatModal({
                               isActive
                                 ? 'bg-muted text-foreground'
                                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
-                              draggedSessionId === session.id && 'opacity-60',
                               !isActive &&
                                 !isActionableWaitingStatus(status) &&
                                 isUnreadSession(session) &&

@@ -184,6 +184,7 @@ import {
   getCanvasFilterTabCount,
   isLabelFilterTab,
   matchesCanvasFilterTab,
+  matchesCanvasWorktreeSearch,
   shouldShowCanvasWorktreeSection,
   type CanvasFilterTab,
   type CanvasPredefinedFilterTab,
@@ -564,7 +565,13 @@ function WorktreeSectionHeader({
           )
           triggerImmediateGitPoll()
           fetchWorktreesStatus(projectId)
-          if (result.fellBack) {
+          if (result.permissionDenied) {
+            opToast.error('Push failed', {
+              duration: Infinity,
+              description:
+                result.output.trim() || 'The remote rejected the push.',
+            })
+          } else if (result.fellBack) {
             opToast.warning(
               'Could not push to PR branch, pushed to new branch instead'
             )
@@ -1245,6 +1252,7 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     )
     for (const worktree of sortedPending) {
       if (!matchesCanvasFilterTab(worktree, activeFilterTab)) continue
+      if (!matchesCanvasWorktreeSearch(worktree, searchQuery)) continue
       latestActivityByWorktreeId.set(worktree.id, worktree.created_at)
       // Include pending worktrees even without sessions - show setup card
       result.push({ worktree, cards: [], isPending: true })
@@ -1255,32 +1263,22 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
       if (!matchesCanvasFilterTab(worktree, activeFilterTab)) continue
       const sessionData = sessionsByWorktreeId.get(worktree.id)
       const sessions = sessionData?.sessions ?? []
+      const worktreeMatchesSearch = matchesCanvasWorktreeSearch(
+        worktree,
+        searchQuery
+      )
 
       // Filter sessions based on search query (includes labels)
       const filteredSessions = searchQuery.trim()
         ? sessions.filter(session => {
-            const q = searchQuery.toLowerCase()
+            const q = searchQuery.trim().toLowerCase()
             return (
               session.name.toLowerCase().includes(q) ||
-              worktree.name.toLowerCase().includes(q) ||
-              worktree.branch.toLowerCase().includes(q) ||
+              worktreeMatchesSearch ||
               (session.label?.name ?? '').toLowerCase().includes(q) ||
               (storeState.sessionLabels[session.id]?.name ?? '')
                 .toLowerCase()
-                .includes(q) ||
-              getWorktreeLabels(worktree).some(label =>
-                label.name.toLowerCase().includes(q)
-              ) ||
-              (worktree.pr_number != null &&
-                worktree.pr_number.toString().includes(q)) ||
-              (worktree.issue_number != null &&
-                worktree.issue_number.toString().includes(q)) ||
-              (worktree.linear_issue_identifier ?? '')
-                .toLowerCase()
-                .includes(q) ||
-              (worktree.security_alert_number != null &&
-                worktree.security_alert_number.toString().includes(q)) ||
-              (worktree.advisory_ghsa_id ?? '').toLowerCase().includes(q)
+                .includes(q)
             )
           })
         : sessions
@@ -1308,7 +1306,10 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
       latestActivityByWorktreeId.set(worktree.id, latestActivityAt)
 
       // Keep every worktree available, including those without a session yet.
-      if (shouldShowCanvasWorktreeSection(worktree)) {
+      if (
+        shouldShowCanvasWorktreeSection(worktree) &&
+        (!searchQuery.trim() || worktreeMatchesSearch || grouped.length > 0)
+      ) {
         readySections.push({ worktree, cards: grouped })
       }
     }

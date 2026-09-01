@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
+import { useServerCapabilities } from '@/services/server-capabilities'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
@@ -69,7 +70,6 @@ import {
   DEFAULT_PR_CONTENT_PROMPT,
   DEFAULT_COMMIT_MESSAGE_PROMPT,
   DEFAULT_CODE_REVIEW_PROMPT,
-  DEFAULT_FINAL_REVIEW_PROMPT,
   DEFAULT_CONTEXT_SUMMARY_PROMPT,
   DEFAULT_RESOLVE_CONFLICTS_PROMPT,
   DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT,
@@ -79,6 +79,7 @@ import {
   DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT,
   DEFAULT_RELEASE_NOTES_PROMPT,
   DEFAULT_REVIEW_COMMENTS_PROMPT,
+  DEFAULT_SMOKE_TEST_PROMPT,
   DEFAULT_SESSION_NAMING_PROMPT,
   DEFAULT_PARALLEL_EXECUTION_PROMPT,
   DEFAULT_GLOBAL_SYSTEM_PROMPT,
@@ -133,7 +134,10 @@ import {
   type CustomCliProfile,
 } from '@/types/preferences'
 import { cn } from '@/lib/utils'
-import { BackendLabel } from '@/components/ui/backend-label'
+import {
+  BackendLabel,
+  getBackendPlainLabel,
+} from '@/components/ui/backend-label'
 import {
   codeReviewConfigKey,
   resolveCodeReviewConfigs,
@@ -348,6 +352,25 @@ const PROMPT_SECTIONS: PromptSection[] = [
     label: 'Git Operations',
     configs: [
       {
+        key: 'smoke_test',
+        modelKey: 'smoke_test_model',
+        effortKey: 'smoke_test_effort',
+        providerKey: 'smoke_test_provider',
+        backendKey: 'smoke_test_backend',
+        modeKey: 'smoke_test_mode',
+        label: 'Smoke Test',
+        description:
+          'Prompt for testing the current work through the development server and available interfaces.',
+        variables: [
+          {
+            name: '{worktree_id}',
+            description: 'Worktree containing the feature or fix to test',
+          },
+        ],
+        defaultValue: DEFAULT_SMOKE_TEST_PROMPT,
+        defaultModel: 'claude-opus-4-8[1m]',
+      },
+      {
         key: 'code_review',
         modelKey: 'code_review_model',
         effortKey: 'code_review_effort',
@@ -369,20 +392,6 @@ const PROMPT_SECTIONS: PromptSection[] = [
           },
         ],
         defaultValue: DEFAULT_CODE_REVIEW_PROMPT,
-        defaultModel: 'claude-opus-4-8[1m]',
-      },
-      {
-        key: 'final_review',
-        modelKey: 'final_review_model',
-        effortKey: 'final_review_effort',
-        providerKey: 'final_review_provider',
-        backendKey: 'final_review_backend',
-        modeKey: 'final_review_mode',
-        label: 'Final Review',
-        description:
-          'Prompt for an audit-only merge-readiness review in a new session.',
-        variables: [],
-        defaultValue: DEFAULT_FINAL_REVIEW_PROMPT,
         defaultModel: 'claude-opus-4-8[1m]',
       },
       {
@@ -744,6 +753,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   searchTargetPromptKey = null,
 }) => {
   const { data: preferences } = usePreferences()
+  const { data: serverCapabilities } = useServerCapabilities()
   const patchPreferences = usePatchPreferences()
   const [selectedKey, setSelectedKey] =
     useState<keyof MagicPrompts>('investigate_issue')
@@ -879,7 +889,17 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     [preferences?.custom_cli_profiles]
   )
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const selectedConfig = PROMPT_CONFIGS.find(c => c.key === selectedKey)!
+  const bundledSelectedConfig = PROMPT_CONFIGS.find(c => c.key === selectedKey)!
+  const serverPrompt = serverCapabilities?.magicPrompts.find(
+    prompt => prompt.id === selectedKey
+  )
+  const selectedConfig = serverPrompt
+    ? {
+        ...bundledSelectedConfig,
+        label: serverPrompt.label,
+        defaultValue: serverPrompt.defaultPrompt,
+      }
+    : bundledSelectedConfig
   const currentValue =
     currentPrompts[selectedKey] ?? selectedConfig.defaultValue
   const rawCurrentModel = selectedConfig.modelKey
@@ -2170,32 +2190,41 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                       </SelectItem>
                     )}
                     {installedBackends.includes('pi') && (
-                      <SelectItem value="pi" aria-label="PI (Beta)">
+                      <SelectItem
+                        value="pi"
+                        aria-label={getBackendPlainLabel('pi')}
+                      >
                         <BackendLabel backend="pi" />
                       </SelectItem>
                     )}
                     {installedBackends.includes('commandcode') && (
                       <SelectItem
                         value="commandcode"
-                        aria-label="Command Code (Beta)"
+                        aria-label={getBackendPlainLabel('commandcode')}
                       >
                         <BackendLabel backend="commandcode" />
                       </SelectItem>
                     )}
                     {installedBackends.includes('grok') && (
-                      <SelectItem value="grok" aria-label="Grok (Beta)">
+                      <SelectItem
+                        value="grok"
+                        aria-label={getBackendPlainLabel('grok')}
+                      >
                         <BackendLabel backend="grok" />
                       </SelectItem>
                     )}
                     {installedBackends.includes('kimi') && (
-                      <SelectItem value="kimi" aria-label="Kimi Code (Beta)">
+                      <SelectItem
+                        value="kimi"
+                        aria-label={getBackendPlainLabel('kimi')}
+                      >
                         <BackendLabel backend="kimi" />
                       </SelectItem>
                     )}
                     {installedBackends.includes('antigravity') && (
                       <SelectItem
                         value="antigravity"
-                        aria-label="Antigravity CLI (Beta)"
+                        aria-label={getBackendPlainLabel('antigravity')}
                       >
                         <BackendLabel backend="antigravity" />
                       </SelectItem>

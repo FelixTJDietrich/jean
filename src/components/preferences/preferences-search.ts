@@ -888,6 +888,12 @@ const magicPromptDefinitions: {
   keywords: string[]
 }[] = [
   {
+    key: 'smoke_test',
+    title: 'Smoke Test Prompt',
+    description: 'Test the current work through available interfaces.',
+    keywords: ['smoke test prompt', 'test current feature'],
+  },
+  {
     key: 'investigate_issue',
     title: 'Investigate Issue Prompt',
     description: 'Analyze GitHub issues loaded into the context.',
@@ -934,12 +940,6 @@ const magicPromptDefinitions: {
     title: 'Code Review Prompt',
     description: 'Review code changes with structured findings.',
     keywords: ['code review prompt'],
-  },
-  {
-    key: 'final_review',
-    title: 'Final Review Prompt',
-    description: 'Audit merge readiness in a new session.',
-    keywords: ['final review prompt', 'pre-merge audit', 'merge readiness'],
   },
   {
     key: 'review_comments',
