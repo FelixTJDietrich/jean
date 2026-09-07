@@ -2421,7 +2421,7 @@ pub async fn dispatch_command(
             to_value(result)
         }
         "get_claude_usage" => {
-            let result = crate::claude_cli::get_claude_usage(&app).await?;
+            let result = crate::claude_cli::get_claude_usage(app).await?;
             to_value(result)
         }
         "get_available_cli_versions" => {
