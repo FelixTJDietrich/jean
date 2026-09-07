@@ -149,6 +149,10 @@ interface UIState {
   autoInvestigateLinearIssueWorktreeIds: Set<string>
   /** Worktree IDs that should auto-trigger Sentry issue investigation */
   autoInvestigateSentryIssueWorktreeIds: Set<string>
+  autoInvestigateOverrides: Record<
+    string,
+    { model: string; provider: string | null }
+  >
   /** Counter for background worktree creations (CMD+Click) — skip auto-navigation */
   pendingBackgroundCreations: number
   /** Worktree IDs that should auto-open first session modal when canvas mounts */
@@ -264,9 +268,15 @@ interface UIState {
   closeCliLoginModal: () => void
   incrementPendingBackgroundCreations: () => void
   consumePendingBackgroundCreation: () => boolean
-  markWorktreeForAutoInvestigate: (worktreeId: string) => void
+  markWorktreeForAutoInvestigate: (
+    worktreeId: string,
+    override?: { model: string; provider: string | null }
+  ) => void
   consumeAutoInvestigate: (worktreeId: string) => boolean
-  markWorktreeForAutoInvestigatePR: (worktreeId: string) => void
+  markWorktreeForAutoInvestigatePR: (
+    worktreeId: string,
+    override?: { model: string; provider: string | null }
+  ) => void
   consumeAutoInvestigatePR: (worktreeId: string) => boolean
   markWorktreeForAutoInvestigateSecurityAlert: (worktreeId: string) => void
   consumeAutoInvestigateSecurityAlert: (worktreeId: string) => boolean
@@ -383,6 +393,7 @@ export const useUIStore = create<UIState>()(
       autoInvestigateAdvisoryWorktreeIds: new Set(),
       autoInvestigateLinearIssueWorktreeIds: new Set(),
       autoInvestigateSentryIssueWorktreeIds: new Set(),
+      autoInvestigateOverrides: {},
       pendingBackgroundCreations: 0,
       autoOpenSessionWorktreeIds: new Set(),
       pendingAutoOpenSessionIds: {},
@@ -807,13 +818,16 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
-      markWorktreeForAutoInvestigate: worktreeId =>
+      markWorktreeForAutoInvestigate: (worktreeId, override) =>
         set(
           state => ({
             autoInvestigateWorktreeIds: new Set([
               ...state.autoInvestigateWorktreeIds,
               worktreeId,
             ]),
+            autoInvestigateOverrides: override
+              ? { ...state.autoInvestigateOverrides, [worktreeId]: override }
+              : state.autoInvestigateOverrides,
           }),
           undefined,
           'markWorktreeForAutoInvestigate'
@@ -825,7 +839,12 @@ export const useUIStore = create<UIState>()(
             state => {
               const newSet = new Set(state.autoInvestigateWorktreeIds)
               newSet.delete(worktreeId)
-              return { autoInvestigateWorktreeIds: newSet }
+              const { [worktreeId]: _, ...autoInvestigateOverrides } =
+                state.autoInvestigateOverrides
+              return {
+                autoInvestigateWorktreeIds: newSet,
+                autoInvestigateOverrides,
+              }
             },
             undefined,
             'consumeAutoInvestigate'
@@ -835,13 +854,16 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
-      markWorktreeForAutoInvestigatePR: worktreeId =>
+      markWorktreeForAutoInvestigatePR: (worktreeId, override) =>
         set(
           state => ({
             autoInvestigatePRWorktreeIds: new Set([
               ...state.autoInvestigatePRWorktreeIds,
               worktreeId,
             ]),
+            autoInvestigateOverrides: override
+              ? { ...state.autoInvestigateOverrides, [worktreeId]: override }
+              : state.autoInvestigateOverrides,
           }),
           undefined,
           'markWorktreeForAutoInvestigatePR'
@@ -853,7 +875,12 @@ export const useUIStore = create<UIState>()(
             state => {
               const newSet = new Set(state.autoInvestigatePRWorktreeIds)
               newSet.delete(worktreeId)
-              return { autoInvestigatePRWorktreeIds: newSet }
+              const { [worktreeId]: _, ...autoInvestigateOverrides } =
+                state.autoInvestigateOverrides
+              return {
+                autoInvestigatePRWorktreeIds: newSet,
+                autoInvestigateOverrides,
+              }
             },
             undefined,
             'consumeAutoInvestigatePR'

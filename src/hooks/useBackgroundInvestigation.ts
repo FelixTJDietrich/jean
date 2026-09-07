@@ -106,6 +106,7 @@ export function useBackgroundInvestigation(): void {
         autoInvestigateAdvisoryWorktreeIds,
         autoInvestigateLinearIssueWorktreeIds,
         autoInvestigateSentryIssueWorktreeIds,
+        autoInvestigateOverrides,
       } = useUIStore.getState()
 
       const { worktreePaths } = useChatStore.getState()
@@ -261,7 +262,8 @@ export function useBackgroundInvestigation(): void {
           type,
           preferencesRef.current,
           null,
-          queryClient
+          queryClient,
+          autoInvestigateOverrides[worktreeId]
         )
           .then(() => {
             if (!disposed) consumeByType[type](worktreeId)
@@ -493,7 +495,8 @@ async function processBackgroundInvestigation(
   type: InvestigationType,
   preferences: ReturnType<typeof usePreferences>['data'],
   cliVersion: string | null,
-  queryClient: ReturnType<typeof useQueryClient>
+  queryClient: ReturnType<typeof useQueryClient>,
+  override?: { model: string; provider: string | null }
 ): Promise<void> {
   const worktreePath = useChatStore.getState().worktreePaths[worktreeId]
   if (!worktreePath) {
@@ -517,14 +520,17 @@ async function processBackgroundInvestigation(
     investigationConfig[type]
 
   const selectedModel =
+    override?.model ??
     preferences?.magic_prompt_models?.[modelKey] ??
     preferences?.selected_model ??
     'sonnet'
-  const provider = resolveMagicPromptProvider(
-    preferences?.magic_prompt_providers,
-    providerKey,
-    preferences?.default_provider
-  )
+  const provider = override
+    ? override.provider
+    : resolveMagicPromptProvider(
+        preferences?.magic_prompt_providers,
+        providerKey,
+        preferences?.default_provider
+      )
   const backend = resolveBackend(selectedModel)
 
   // Resolve custom profile name

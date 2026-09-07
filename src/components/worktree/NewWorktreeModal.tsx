@@ -12,6 +12,29 @@ import {
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import type { LucideIcon } from 'lucide-react'
 import { useGhLogin } from '@/hooks/useGhLogin'
+import { usePreferences } from '@/services/preferences'
+import {
+  resolveMagicPromptProvider,
+  type MagicPromptModel,
+} from '@/types/preferences'
+import {
+  MODEL_OPTIONS,
+  CODEX_MODEL_OPTIONS,
+  OPENCODE_MODEL_OPTIONS,
+  CURSOR_MODEL_OPTIONS,
+  PI_MODEL_OPTIONS,
+  COMMANDCODE_MODEL_OPTIONS,
+  GROK_MODEL_OPTIONS,
+  KIMI_MODEL_OPTIONS,
+  ANTIGRAVITY_MODEL_OPTIONS,
+} from '@/components/chat/toolbar/toolbar-options'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -59,16 +82,35 @@ export const TABS: Tab[] = [
   { id: 'sentry', label: 'Sentry', key: '7', icon: Bug },
 ]
 
+const INVESTIGATION_MODEL_OPTIONS = [
+  ...MODEL_OPTIONS,
+  ...CODEX_MODEL_OPTIONS,
+  ...OPENCODE_MODEL_OPTIONS,
+  ...CURSOR_MODEL_OPTIONS,
+  ...PI_MODEL_OPTIONS,
+  ...COMMANDCODE_MODEL_OPTIONS,
+  ...GROK_MODEL_OPTIONS,
+  ...KIMI_MODEL_OPTIONS,
+  ...ANTIGRAVITY_MODEL_OPTIONS,
+].filter(
+  (option, index, options) =>
+    options.findIndex(candidate => candidate.value === option.value) === index
+)
+
 export function NewWorktreeModal() {
   const { triggerLogin: triggerGhLogin, isGhInstalled } = useGhLogin()
   const { newWorktreeModalOpen } = useUIStore()
   const isMobile = useIsMobile()
+  const { data: preferences } = usePreferences()
 
   // Local state
   const [activeTab, setActiveTab] = useState<TabId>('quick')
   const [searchQuery, setSearchQuery] = useState('')
   const [includeClosed, setIncludeClosed] = useState(false)
   const [selectedItemIndex, setSelectedItemIndex] = useState(0)
+  const [investigationModel, setInvestigationModel] = useState('sonnet')
+  const [investigationProvider, setInvestigationProvider] =
+    useState('__anthropic__')
   const [previewItem, setPreviewItem] = useState<{
     type: 'issue' | 'pr' | 'security' | 'advisory'
     number: number
@@ -87,12 +129,22 @@ export function NewWorktreeModal() {
 
   // Hooks
   const data = useNewWorktreeData(searchQuery, includeClosed)
-  const handlers = useNewWorktreeHandlers(data, {
-    setActiveTab: handleTabChange,
-    setSearchQuery,
-    setSelectedItemIndex,
-    setIncludeClosed,
-  })
+  const handlers = useNewWorktreeHandlers(
+    data,
+    {
+      setActiveTab: handleTabChange,
+      setSearchQuery,
+      setSelectedItemIndex,
+      setIncludeClosed,
+    },
+    {
+      model: investigationModel,
+      provider:
+        investigationProvider === '__anthropic__'
+          ? null
+          : investigationProvider,
+    }
+  )
 
   const handlePreviewIssue = (issue: { number: number }) => {
     previewOpenRef.current = true
@@ -166,6 +218,17 @@ export function NewWorktreeModal() {
   // Apply store-provided default tab when modal opens (resets selection via handleTabChange)
   useEffect(() => {
     if (newWorktreeModalOpen) {
+      const model =
+        preferences?.magic_prompt_models?.investigate_issue_model ??
+        preferences?.selected_model ??
+        'sonnet'
+      const provider = resolveMagicPromptProvider(
+        preferences?.magic_prompt_providers,
+        'investigate_issue_provider',
+        preferences?.default_provider
+      )
+      setInvestigationModel(model)
+      setInvestigationProvider(provider ?? '__anthropic__')
       const { newWorktreeModalDefaultTab, setNewWorktreeModalDefaultTab } =
         useUIStore.getState()
       if (newWorktreeModalDefaultTab) {
@@ -174,7 +237,7 @@ export function NewWorktreeModal() {
         setNewWorktreeModalDefaultTab(null)
       }
     }
-  }, [newWorktreeModalOpen, handleTabChange])
+  }, [newWorktreeModalOpen, handleTabChange, preferences])
 
   // Focus search input when switching to searchable tabs
   useEffect(() => {
@@ -254,6 +317,60 @@ export function NewWorktreeModal() {
             onTabChange={handleTabChange}
             tabs={TABS}
           />
+
+          {(activeTab === 'issues' || activeTab === 'prs') && (
+            <div className="shrink-0 border-b border-border px-3 py-2 flex items-center gap-2">
+              <span className="text-xs text-muted-foreground shrink-0">
+                Investigate with
+              </span>
+              <Select
+                value={investigationProvider}
+                onValueChange={setInvestigationProvider}
+              >
+                <SelectTrigger
+                  className="h-8 min-w-0 flex-1 text-xs"
+                  aria-label="Investigation provider"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__anthropic__">Anthropic</SelectItem>
+                  {(preferences?.custom_cli_profiles ?? []).map(profile => (
+                    <SelectItem key={profile.name} value={profile.name}>
+                      {profile.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select
+                value={investigationModel}
+                onValueChange={value =>
+                  setInvestigationModel(value as MagicPromptModel)
+                }
+              >
+                <SelectTrigger
+                  className="h-8 min-w-0 flex-[1.4] text-xs"
+                  aria-label="Investigation model"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {!INVESTIGATION_MODEL_OPTIONS.some(
+                    option => option.value === investigationModel
+                  ) && (
+                    <SelectItem value={investigationModel}>
+                      {investigationModel}
+                    </SelectItem>
+                  )}
+                  {INVESTIGATION_MODEL_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           {/* Tab content */}
           <div className="flex-1 min-h-0 flex flex-col">

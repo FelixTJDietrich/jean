@@ -4879,6 +4879,15 @@ pub async fn send_chat_message(
                         parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
+                    let loaded_context = super::context_instructions::build_loaded_context_content(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    );
+                    if !loaded_context.is_empty() {
+                        parts.push(loaded_context);
+                    }
+
                     if parts.is_empty() {
                         None
                     } else {
